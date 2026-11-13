@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional
 from uuid import UUID
 from fastapi import Depends, Header, HTTPException, status
@@ -6,7 +7,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import async_session_factory
 from app.core.exceptions import DomainException
-from app.core.security import decode_access_token
+from app.core.security import decode_access_token, is_token_revoked
 from app.modules.identity.models import User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/identity/login")
@@ -18,7 +19,10 @@ async def get_current_authenticated_user(
     try:
         payload = decode_access_token(token)
         user_id_str: str = payload.get("sub")
-        if not user_id_str:
+        jti: Optional[str] = payload.get("jti")
+        iat_ts: Optional[float] = payload.get("iat")
+
+        if not user_id_str or not jti:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token payload."
@@ -30,6 +34,13 @@ async def get_current_authenticated_user(
             detail="Could not validate credentials."
         )
 
+    # 1. Fast Redis Blacklist Check (Instant revocation by jti)
+    if await is_token_revoked(jti):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked."
+        )
+
     async with async_session_factory() as session:
         stmt = select(User).where(User.id == user_id, User.is_active.is_(True))
         result = await session.execute(stmt)
@@ -39,6 +50,16 @@ async def get_current_authenticated_user(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found or account is deactivated."
             )
+
+        # 2. Global Invalidation Check (e.g. password reset or admin deactivation)
+        if iat_ts is not None and user.token_valid_after:
+            token_issued_at = datetime.fromtimestamp(iat_ts, tz=timezone.utc)
+            if token_issued_at < user.token_valid_after:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session has been revoked. Please log in again."
+                )
+
         return user
 
 

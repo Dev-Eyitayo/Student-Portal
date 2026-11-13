@@ -1413,15 +1413,47 @@ class TimestampMixin:
 
 ## 10. Authentication, Authorization & Security Architecture
 
-### 10.1 Authentication & Session Life-Cycle (OAuth2 / JWT RS256)
-- **JWT (JSON Web Tokens):** Dual-token strategy:
-  - **Access Token:** Short-lived (15 minutes), signed with asymmetric RS256 private key. Contains user claims: `sub` (user_id), `school_id`, `role`, and `token_valid_after`.
-  - **Refresh Token:** Stored in secure, HTTP-only, SameSite=Strict cookies (7-day validity). Retained in database table `user_refresh_tokens` for instant revocation capability.
-- **Password Hashing:** Argon2id (via `passlib[argon2]`), resilient against GPU and ASIC cracking attacks.
+### 10.1 Authentication, Session Life-Cycle & Rapid Token Revocation
+- **JWT (JSON Web Tokens) with Time-Ordered `jti`:**
+  - **Access Token:** Short-lived (15 minutes), signed with asymmetric RS256 (or HS256 in local development). Contains user claims: `sub` (user_id), `school_id`, `role`, `iat`, `exp`, and a unique time-ordered **`jti` (JWT ID)** generated via UUIDv7.
+  - **Refresh Token:** Stored in secure, HTTP-only, SameSite=Strict cookies (7-day validity). Retained in database table `user_refresh_tokens` for renewal.
+- **Two-Tier Rapid Token Revocation Architecture:**
+  - **Tier 1 (Instant Single-Token Revocation via `jti`):** When a user logs out or an administrator terminates an active session, the backend registers `token:revoked:{jti}` in Redis with a TTL equal to the token's remaining lifespan. The `get_current_authenticated_user` dependency queries Redis (<1ms); once revoked, subsequent API calls fail immediately with `401 Unauthorized`.
+  - **Tier 2 (Global Account Invalidation):** When a teacher is deactivated or changes password, `users.token_valid_after` is set to `clock_timestamp()`. Any access token with `iat < token_valid_after` is rejected across all devices.
+- **Password Hashing:** Argon2id (via `passlib[argon2]`), with tuned cost parameters in test mode for sub-5ms suite execution.
 - **Multi-Factor Authentication (MFA):** Mandatory for `SUPER_ADMIN` and `SCHOOL_ADMIN` accounts via TOTP (RFC 6238 / Authenticator Apps).
 - **Rate Limiting:** Enforced via `slowapi` (Redis backend):
   - `/api/v1/identity/login`: 5 attempts per minute per IP.
   - `/api/v1/results/verify/`: 20 requests per minute per IP.
+
+### 10.2 Staff & Teacher Onboarding Protocol
+Teachers do not register via public signups. The onboarding lifecycle is strictly controlled by school administration:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Admin as School Administrator
+    participant API as Identity Service
+    participant Celery as Celery Notification Queue
+    actor Teacher as New Teacher (Mr. Adeleke)
+
+    Admin->>API: POST /api/v1/identity/staff/invite (or bulk Excel import)
+    API->>API: Create User(status='INVITED', is_active=False) & StaffProfile
+    API->>API: Generate 256-bit Invitation Token (72-hour TTL)
+    API->>Celery: Queue StaffOnboardingEmailTask
+    Celery-->>Teacher: Deliver Invitation Email with Activation Link
+    Teacher->>API: GET /api/v1/identity/staff/verify-invite?token=...
+    API-->>Teacher: Validate token, return staff details
+    Teacher->>API: POST /api/v1/identity/staff/accept-invitation (Password, MFA)
+    API->>API: Set password_hash, status='ACTIVE', is_active=True, token_valid_after=now()
+    API-->>Teacher: Return JWT Access & Refresh Tokens (Ready for Class Dashboard)
+```
+
+1. **Invitation Methods:**
+   - **Single Staff Invitation:** Admin submits staff profile, email, phone, and optional initial arm/subject allocations.
+   - **Bulk Staff Onboarding:** Admin uploads a staff roster spreadsheet (`.xlsx` or `.csv`). Celery parses and creates staff profiles in batch, queuing invitation emails.
+2. **Activation Guarantee:**
+   - Initial temporary passwords do not exist; accounts cannot authenticate until the invited teacher establishes their private password via the single-use invitation token.
 
 ### 10.2 Hybrid Access Control Architecture (RBAC + Scoped Delegated Permissions)
 

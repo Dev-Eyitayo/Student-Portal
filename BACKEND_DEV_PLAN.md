@@ -63,16 +63,21 @@ graph TD
   - Inputs: Name, slug, official code, location, initial admin details.
   - Outputs: Created school tenant and initialized default `SchoolConfiguration`.
   - Roles: `SUPER_ADMIN`.
-- [ ] **Task 1.2: Authentication Routes (`app/modules/identity/router.py`)**
-  - `POST /api/v1/identity/login`: Validates email/password via Argon2, checks `is_active`, returns JWT access token + refresh token cookie.
-  - `POST /api/v1/identity/refresh`: Rotates refresh token, checks `token_valid_after`.
-  - `POST /api/v1/identity/logout`: Invalidates refresh token.
+- [ ] **Task 1.2: Authentication & Rapid Token Revocation (`app/modules/identity/router.py`)**
+  - `POST /api/v1/identity/login`: Validates credentials, injects unique UUIDv7 `jti` into access token, sets HTTP-only refresh token cookie.
+  - `POST /api/v1/identity/refresh`: Rotates refresh token, checks `token_valid_after`, issues new access token with fresh `jti`.
+  - `POST /api/v1/identity/logout`: Reads token `jti`, writes to Redis blacklist (`token:revoked:{jti}`) with remaining TTL for instant sub-millisecond revocation.
   - `GET /api/v1/identity/me`: Returns authenticated profile, school details, and effective permissions.
-- [ ] **Task 1.3: Teacher Deactivation Service (`POST /api/v1/identity/users/{id}/deactivate`)**
+- [ ] **Task 1.3: Teacher & Staff Onboarding Workflow**
+  - `POST /api/v1/identity/staff/invite`: Admin creates a staff profile with status `INVITED`; dispatches email with single-use 72-hour invitation token.
+  - `POST /api/v1/identity/staff/bulk-import`: Admin uploads Excel/CSV of school staff roster; Celery worker parses rows, provisions accounts in batch, and queues invitation emails.
+  - `GET /api/v1/identity/staff/verify-invite`: Verifies invitation token and returns teacher details to frontend.
+  - `POST /api/v1/identity/staff/accept-invitation`: Teacher establishes their password, sets status to `ACTIVE`, and receives initial session tokens.
+- [ ] **Task 1.4: Teacher Deactivation Service (`POST /api/v1/identity/users/{id}/deactivate`)**
   - Updates `is_active = False`.
-  - Advances `token_valid_after = clock_timestamp()` to instantly revoke active access tokens.
-  - Revokes active teaching assignments while preserving score attribution and audit history.
-- [ ] **Task 1.4: Permission Delegation API**
+  - Advances `token_valid_after = clock_timestamp()` to instantly revoke active access tokens across all devices.
+  - Revokes active teaching assignments while preserving historical scores, remarks, and audit trails.
+- [ ] **Task 1.5: Permission Delegation API**
   - `POST /api/v1/identity/users/{user_id}/permissions`: Assigns direct scoped grants (`SCHOOL_WIDE`, `DEPARTMENT`, `ACADEMIC_LEVEL`, `CLASS_GROUP`).
   - `DELETE /api/v1/identity/users/{user_id}/permissions/{grant_id}`: Revokes grant.
 
