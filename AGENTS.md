@@ -44,7 +44,8 @@ When designing, modifying, or implementing code, you must enforce these 8 non-ne
    - When a student or teacher leaves, updates must set their lifecycle status (`WITHDRAWN`, `TRANSFERRED`, `INACTIVE`) and apply soft-deletion (`deleted_at`).
    - Foreign keys to historical records must use `ON DELETE RESTRICT` or `ON DELETE SET NULL`.
 8. **Decoupled Heavy Operations (Celery & Redis):**
-   - Never compile WeasyPrint PDFs, process bulk Excel imports, or send emails synchronously in an HTTP request worker. Always dispatch them to Celery.
+   - Never process bulk Excel imports or send emails/SMS synchronously in an HTTP request worker. Always dispatch them to Celery.
+   - Report cards are assembled and exported to PDF on the client side from verified JSON payloads, avoiding server-side PDF generation bottlenecks and storage costs.
 
 ---
 
@@ -58,7 +59,7 @@ When designing, modifying, or implementing code, you must enforce these 8 non-ne
 - **Migrations:** Alembic (Async migration runner)
 - **Task Queue:** Celery 5.4 + Redis 7
 - **Admin Dashboard:** SQLAdmin (`sqladmin`)
-- **PDF Generation:** WeasyPrint (HTML5/CSS3 Paged Media)
+- **Document Model:** Client-Side Document Assembly & Local PDF Export (from verified JSON payload)
 - **Testing:** `pytest`, `pytest-asyncio`, `httpx.AsyncClient`, `Hypothesis`
 
 ---
@@ -77,7 +78,7 @@ app/
 │   ├── security.py          # Passlib Argon2, PyJWT RS256, MFA TOTP
 │   ├── dependencies.py      # get_tenant_db, get_current_user
 │   ├── permissions.py       # Hybrid permission resolver (require_permission)
-│   └── exceptions.py        # RFC 7807 Exception handlers
+│   └── exceptions.py        # Standardized Exception handlers
 └── modules/                 # Bounded domain contexts
     ├── common/              # Base declarative models, TenantMixin, TimestampMixin
     ├── identity/            # Users, StaffProfiles, Permissions, Auth routes
@@ -86,7 +87,7 @@ app/
     ├── subjects/            # Subjects, Offerings, ClassSubjects, TeacherAssignments
     ├── assessments/         # AssessmentDefinitions, Scores, Bulk entry
     ├── computation/         # Pure Python Computation Engine & Broadsheets
-    ├── distribution/        # Result Tokens, WeasyPrint PDF, Email notifications
+    ├── distribution/        # Result Tokens, Report JSON Payloads, Notifications
     └── audit/               # Immutable Security Audit Logging
 ```
 
@@ -147,11 +148,8 @@ alembic downgrade -1
 # Start FastAPI development server
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
-# Start Celery worker for general and bulk import queues
+# Start Celery worker for general, bulk import, and notification queues
 celery -A app.core.celery_app worker -Q default,bulk_imports,notifications -l info
-
-# Start isolated Celery worker for memory-intensive PDF generation
-celery -A app.core.celery_app worker -Q pdf_compilation -c 4 --max-tasks-per-child=50 -l info
 ```
 
 ### Testing & Verification

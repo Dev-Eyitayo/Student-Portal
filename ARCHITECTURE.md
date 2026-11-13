@@ -4,7 +4,7 @@
 **Document Version:** 2.0.0-FASTAPI-SPEC  
 **Status:** Approved for Implementation Architecture  
 **Architect:** Senior Software Architect (SaaS, Security & Academic Systems)  
-**Primary Tech Stack:** FastAPI, Pydantic v2, SQLAlchemy 2.0 (Async), Alembic, PostgreSQL 16 (RLS), Celery, Redis, WeasyPrint
+**Primary Tech Stack:** FastAPI, Pydantic v2, SQLAlchemy 2.0 (Async), Alembic, PostgreSQL 16 (RLS), Celery, Redis
 
 ---
 
@@ -33,7 +33,7 @@
    - 5.5 Business Logic Placement: Service Layer, Domain Policies & Dependency Injection
    - 5.6 Operational Administration Interface Strategy (SQLAdmin Integration)
 6. [API Architecture & Interface Contracts](#6-api-architecture--interface-contracts)
-   - 6.1 API Conventions, OpenAPI 3.1 Standards & Error Envelopes
+   - 6.1 API Conventions, OpenAPI 3.1 Standards & Response Envelopes
    - 6.2 Endpoint Catalog by Domain
    - 6.3 End-to-End JSON Request/Response Payloads & Pydantic v2 Schemas
 7. [Result Computation & Processing Engine](#7-result-computation--processing-engine)
@@ -44,7 +44,7 @@
 8. [Asynchronous Background Processing & File Generation](#8-asynchronous-background-processing--file-generation)
    - 8.1 Async Workload Topology (Celery & Redis)
    - 8.2 Bulk Student Import Pipeline
-   - 8.3 PDF Compilation via WeasyPrint
+   - 8.3 Client-Side Document Assembly & PDF Generation
    - 8.4 Notification Dispatch & Magic Link Verification
    - 8.5 Idempotency, Dead-Letter Queues & Failure Recovery
 9. [Multi-Tenancy & Tenant Isolation Architecture](#9-multi-tenancy--tenant-isolation-architecture)
@@ -126,7 +126,7 @@ graph TD
         M5[Configurable CA/Exam Assessment Engine]
         M6[Score Validation & Lifecycle: Draft->Submitted->Approved->Published]
         M7[Automated Result Computation: Totals, Grades, Ranks, Averages]
-        M8[Headless PDF Generation via WeasyPrint]
+        M8[Structured Report Payload & Client-Side PDF Generation]
         M9[Magic Link Result Access via Email/SMS Notification]
         M10[Audit Logging for All Score Adjustments]
         M11[SQLAdmin Backoffice for School Ops]
@@ -139,7 +139,7 @@ graph TD
         P4[Psychomotor & Affective Domain Skill Rubrics]
         P5[Automated Transcript Generation for Alumni/Transfers]
         P6[SMS Gateway Integration e.g., Termii, Twilio]
-        P7[School Custom Subdomains e.g., olivet.edurecords.ng]
+        P7[School Custom Subdomains e.g., portal.olivet.edu.ng]
         P8[Cross-Session Performance Predictive Analytics]
     end
 
@@ -363,6 +363,8 @@ CREATE TABLE schools (
     city VARCHAR(64) NOT NULL,
     address TEXT NOT NULL,
     logo_storage_path VARCHAR(512),
+    stamp_image_url VARCHAR(512), -- Official school stamp for digital report cards
+    principal_signature_url VARCHAR(512), -- Official principal signature image
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
@@ -418,6 +420,7 @@ CREATE TABLE staff_profiles (
     staff_id_number VARCHAR(64) NOT NULL,
     employment_status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE', -- ACTIVE, ON_LEAVE, TERMINATED, TRANSFERRED
     specialization VARCHAR(128),
+    signature_image_url VARCHAR(512), -- Form Master / Teacher digital signature for reports
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT uq_staff_school_id UNIQUE (school_id, staff_id_number),
@@ -703,6 +706,12 @@ CREATE TABLE subject_results (
     class_highest_score NUMERIC(5,2) NOT NULL,
     class_lowest_score NUMERIC(5,2) NOT NULL,
     class_average_score NUMERIC(5,2) NOT NULL,
+    -- Annual Cumulative Fields (populated on Third Term reports)
+    first_term_score NUMERIC(5,2) NULL,
+    second_term_score NUMERIC(5,2) NULL,
+    third_term_score NUMERIC(5,2) NULL,
+    cumulative_annual_score NUMERIC(5,2) NULL, -- e.g., weighted average (T1 + T2 + T3)
+    cumulative_annual_grade VARCHAR(8) NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'DRAFT', -- 'DRAFT', 'SUBMITTED', 'APPROVED', 'PUBLISHED'
     approved_by_id UUID REFERENCES users(id) ON DELETE SET NULL,
     approved_at TIMESTAMPTZ NULL,
@@ -726,6 +735,13 @@ CREATE TABLE term_report_cards (
     times_absent SMALLINT DEFAULT 0,
     teacher_comment TEXT,
     principal_comment TEXT,
+    -- Annual Cumulative & Promotion Fields (for Third Term / Session end)
+    is_cumulative_annual BOOLEAN NOT NULL DEFAULT FALSE,
+    cumulative_total_obtainable NUMERIC(7,2) NULL,
+    cumulative_total_obtained NUMERIC(7,2) NULL,
+    cumulative_average_percentage NUMERIC(5,2) NULL,
+    cumulative_class_position SMALLINT NULL,
+    promotion_decision VARCHAR(32) NULL, -- 'PROMOTED', 'REPEATING', 'PROMOTED_ON_TRIAL', 'WITHDRAWN'
     publication_status VARCHAR(32) NOT NULL DEFAULT 'DRAFT', -- 'DRAFT', 'APPROVED', 'PUBLISHED'
     published_at TIMESTAMPTZ NULL,
     frozen_config_snapshot JSONB NOT NULL, -- Freezes grading scale and calculation formulas
@@ -808,7 +824,7 @@ Adopting **FastAPI** provides significant performance and developer-velocity adv
                                     │ (Executes via asyncpg)
 ┌───────────────────────────────────▼────────────────────────────────────┐
 │                      PERSISTENCE & STORAGE LAYER                       │
-│    PostgreSQL 16 (Row-Level Security)   │   S3-Compatible Object Store │
+│    PostgreSQL 16 (Row-Level Security)   │   Local/Cloud Asset Storage  │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -874,12 +890,11 @@ olivet-platform/
 │   │   │   ├── engine.py        # Zero-IO calculation engine
 │   │   │   ├── services.py
 │   │   │   └── router.py
-│   │   ├── distribution/        # Result Tokens, WeasyPrint PDF, Email notifications
+│   │   ├── distribution/        # Result Tokens, Report Payloads, Notifications
 │   │   │   ├── models.py
 │   │   │   ├── schemas.py
 │   │   │   ├── services.py
-│   │   │   ├── tasks.py         # Celery tasks
-│   │   │   ├── templates/       # HTML5/CSS3 report templates
+│   │   │   ├── tasks.py         # Celery tasks (Email/SMS dispatch)
 │   │   │   └── router.py
 │   │   └── audit/               # Security audit logging
 │   │       ├── models.py
@@ -944,23 +959,29 @@ Because FastAPI lacks Django's built-in administration dashboard, we integrate *
 
 ## 6. API Architecture & Interface Contracts
 
-### 6.1 API Conventions, OpenAPI 3.1 Standards & Error Envelopes
+### 6.1 API Conventions, OpenAPI 3.1 Standards & Response Envelopes
 - **Base URI:** `/api/v1/`
-- **Error Standard:** Compliant with RFC 7807 (Problem Details for HTTP APIs).
-
+- **Standard Success Envelope:**
 ```json
 {
-  "type": "https://api.edurecords.ng/errors/score-exceeds-maximum",
-  "title": "Invalid Score Value",
-  "status": 422,
-  "detail": "Score 25.00 exceeds the configured maximum permitted score of 20.00 for Continuous Assessment 1.",
-  "instance": "/api/v1/assessments/scores/bulk-entry",
-  "invalid_params": [
-    {
-      "name": "scores[0].raw_score",
-      "reason": "Must be less than or equal to 20.00"
-    }
-  ]
+  "success": true,
+  "data": { ... }
+}
+```
+- **Standard Error Envelope:**
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Score 25.00 exceeds the configured maximum permitted score of 20.00 for Continuous Assessment 1.",
+    "details": [
+      {
+        "field": "scores[0].raw_score",
+        "reason": "Must be less than or equal to 20.00"
+      }
+    ],
+    "path": "/api/v1/assessments/scores/bulk-entry"
+  }
 }
 ```
 
@@ -1115,9 +1136,15 @@ class BulkScoreEntryRequest(BaseModel):
       "class_average": 58.10
     }
   ],
-  "download_pdf_url": "https://s3.eu-west-1.amazonaws.com/olivet-records/reports/2024-t1-obhs-2022-0412.pdf?X-Amz-Signature=abcdef123456"
+  "verification": {
+    "qr_payload": "VERIFY:OBHS/2022/0412:2024-T1:748.50:SIG_7f8a9b",
+    "issued_at": "2026-11-13T13:40:00Z",
+    "is_authentic": true
+  }
 }
 ```
+
+> **Client-Side PDF Generation:** The frontend client (web or mobile) receives this complete structured JSON payload and renders the report card directly in the browser or app (e.g. using CSS `@media print`, `@react-pdf/renderer`, or client-side PDF export). This eliminates server-side PDF compiling bottlenecks and removes the need for object storage (S3) for rendered reports.
 
 ---
 
@@ -1206,9 +1233,9 @@ sequenceDiagram
     PubService->>DB: UPDATE academic_terms SET is_locked_for_scoring = TRUE
     PubService->>DB: INSERT INTO audit_logs (Term Published)
     PubService->>DB: COMMIT TRANSACTION
-    PubService->>Celery: Dispatch GeneratePDFJobs & SendNotifications
+    PubService->>Celery: Dispatch SendNotifications (Email/SMS)
     PubService-->>PubRouter: Publication Complete
-    PubRouter-->>Principal: 202 Accepted (Async jobs queued)
+    PubRouter-->>Principal: 202 Accepted (Publication sealed, notifications queued)
 ```
 
 #### Post-Publication Correction Protocol
@@ -1220,8 +1247,7 @@ If an arithmetic error or grading omission is discovered *after* publication:
 4. The system executes a versioned recalculation:
    - Increments report card version: `version = version + 1`.
    - Records full `before` and `after` diffs in `audit_logs`.
-   - Marks previous PDF artifacts in S3 as deprecated.
-   - Generates an amended PDF with an explicit header stamp: *"AMENDED REPORT - ISSUED [TIMESTAMP]"*.
+   - Revokes previous tokens and generates a revised report card snapshot with an explicit header stamp: *"AMENDED REPORT - ISSUED [TIMESTAMP]"*.
 
 ---
 
@@ -1239,13 +1265,11 @@ Heavy computational and I/O-bound operations are strictly isolated from HTTP web
 [Redis 7 Broker & Result Backend]
        ├── Queue: default         (General housekeeping, cache invalidations)
        ├── Queue: bulk_imports    (CSV/Excel student & score parsing)
-       ├── Queue: pdf_compilation (WeasyPrint headless rendering)
        └── Queue: notifications   (Email & SMS delivery)
        │
        ▼
-[Dedicated Celery Worker Pools]
-  ├── Worker Pool A: Concurrency 8  (Imports & Notifications)
-  └── Worker Pool B: Concurrency 4  (Isolated for Memory-Heavy WeasyPrint)
+[Dedicated Celery Worker Pool]
+  └── Worker Pool: Concurrency 8  (Imports & Notifications)
 ```
 
 ### 8.2 Bulk Student Import Pipeline
@@ -1255,28 +1279,31 @@ Heavy computational and I/O-bound operations are strictly isolated from HTTP web
 - Implements atomic batch inserts via SQLAlchemy `session.execute(insert(Student), records)`.
 - Generates a row-by-row error report if validation fails, returning it to the initiating administrator without committing partial dirty records.
 
-### 8.3 PDF Compilation via WeasyPrint
+### 8.3 Client-Side Document Assembly & PDF Generation Architecture
+
+To eliminate high server memory consumption and recurring object storage (S3) costs, the platform utilizes **Client-Side Document Assembly**:
 
 ```mermaid
 flowchart TD
-    Task[Celery Task: compile_student_report_pdf] --> Fetch[Fetch ReportCard Aggregate & Frozen Snapshot]
-    Fetch --> Context[Hydrate HTML Context: Student, Scores, Charts, Signatures]
-    Context --> Jinja[Render Jinja2 HTML5/CSS3 Paged Media Template]
-    Jinja --> Weasy[WeasyPrint Engine Compiles to PDF Document]
-    Weasy --> Compress[Optimize & Compress PDF Stream]
-    Compress --> Upload[Upload to S3: s3://school-bucket/reports/{hash}.pdf]
-    Upload --> Token[Generate Secure Access Token Record in DB]
-    Token --> Notify[Enqueue Notification Task with Magic Link]
+    Publish[Principal Approves & Publishes Term] --> Snapshot[Backend Freezes Aggregates & Historical Snapshot in DB]
+    Snapshot --> TokenGen[Backend Generates Secure Access Tokens in DB]
+    TokenGen --> Notify[Celery Enqueues Notification Task: Email/SMS]
+    Notify --> Parent[Parent / Student Clicks Magic Link]
+    Parent --> Verify[Frontend Calls GET /api/v1/results/verify/:token?dob=...]
+    Verify --> Payload[Backend Returns Complete Structured Result JSON Payload]
+    Payload --> Render[Frontend Renders Responsive Report Card & Verification QR Code]
+    Render --> ClientPDF[Client Downloads / Prints PDF via Browser Print Engine or @react-pdf]
 ```
 
-#### Memory Management & Isolation
-WeasyPrint relies on Cairo and Pango libraries and can consume 50–150 MB of RAM per concurrent high-density document rendering.
-- **Worker Isolation:** The `pdf_compilation` Celery queue runs on dedicated worker processes configured with `--max-tasks-per-child=50` to release memory back to the Linux kernel and prevent fragmentation leaks.
-- **Timeouts:** Hard task timeout enforced at 60 seconds per report sheet.
+#### Key Advantages:
+1. **Zero Storage Costs:** No need to store thousands of static PDF files per term on S3/MinIO.
+2. **Immediate Availability:** Results are viewable instantly upon publication without waiting for long server-side PDF compilation queues.
+3. **Responsive Mobile View:** Parents on smartphones view interactive, mobile-optimized grade breakdowns directly on their screens, with a one-click button to download or print a physical copy.
+4. **Offline Resilience & Integrity:** The JSON payload includes a cryptographic verification signature (`qr_payload`) that prints onto the client-rendered document, allowing instant tamper verification.
 
 ### 8.4 Notification Dispatch & Magic Link Verification
 - **Link Construction:** Magic links are generated with 256-bit entropy:
-  `https://records.olivet.edu.ng/r/v1/{token_value}`
+  `/r/v1/{token_value}` (relative to the configured frontend application URL).
 - **Notification Body:** Emails do **not** attach PDF files directly. They contain an institutional greeting, term performance summary, and the secure call-to-action link.
 - **Token Security:** Tokens expire after 14 days by default, or immediately upon manual revocation. Subsequent clicks regenerate fresh tokens if requested by verified guardians.
 
@@ -1378,11 +1405,9 @@ class TimestampMixin:
     )
 ```
 
-### 9.4 Tenant Context Propagation across Async Tasks & Object Storage
+### 9.4 Tenant Context Propagation across Async Tasks & Static Assets
 - **Celery Tasks:** Every Celery task signature accepting tenant work must declare `school_id: str` as its first parameter. The task worker automatically sets the PostgreSQL session variable `app.current_school_id` upon connection checkout.
-- **S3 Storage Paths:** Tenant assets are physically namespaced in cloud object storage:
-  `s3://edurecords-storage/{school_slug}/reports/{session_id}/{term_id}/{report_card_id}.pdf`
-  Cross-school file traversal is prevented by signing S3 URLs with IAM policies restricted to the specific tenant prefix.
+- **Tenant Asset Isolation:** School-specific assets (e.g. logos) are stored locally or in managed storage namespaced strictly by `{school_slug}/branding/{asset_name}`. Static PDF files are not stored on disk or cloud buckets; results are served on-demand as structured JSON payloads for client-side rendering.
 
 ---
 
@@ -1513,8 +1538,8 @@ def require_permission(
 | **BOLA / IDOR** | Teacher alters student score in a different class arm by guessing `class_subject_id`. | FastAPI dependency injection (`verify_teacher_subject_access`) validates ownership against `TeacherAssignment`. Direct ID query without tenant scoping is blocked. |
 | **Cross-Tenant Leakage** | Tenant A queries results of Tenant B via predictable URLs. | Multi-tier enforcement: RLS database policies + `get_tenant_db` dependency + UUIDv7 IDs + Tenant prefix validation. |
 | **Grade Tampering** | Rogue actor changes published terminal exam score. | Immutability triggers on `subject_results` prevent updates once `status = 'PUBLISHED'`. All adjustments require a formal `CORRECTION_REQUEST` and are logged to immutable `audit_logs`. |
-| **Insecure Direct Object File Access** | Public download of minor student report cards from S3. | S3 buckets are completely private. Zero public access. Access is granted solely via time-limited (15-min) HMAC AWS Pre-signed URLs generated dynamically upon token verification. |
-| **Denial of Service (DoS)** | Mass report PDF generation exhausting server memory. | PDF generation is strictly offloaded to Celery background workers with concurrency throttling and resource limits. |
+| **Insecure Direct Object File Access** | Public download of minor student report cards without authentication. | No static PDF files are stored or exposed. Access to report card payloads requires a cryptographically signed, expiring token validated against student verification parameters (e.g. Date of Birth). |
+| **Denial of Service (DoS)** | Mass report request spikes exhausting server memory. | Client-side PDF rendering shifts CPU-heavy rendering to the client device; the backend only returns lightweight, cached JSON payloads. |
 
 ### 10.4 Immutable Audit Logging Engine
 The `audit_logs` table records every critical state mutation. An asynchronous database trigger and Python listener record:
@@ -1645,8 +1670,7 @@ graph TD
         LB --> Web2[Uvicorn / FastAPI: Instance 2]
         Web1 --> Redis[(Redis 7 Cache & Broker)]
         Web2 --> Redis
-        Redis --> CeleryDefault[Celery Worker: Default Queue]
-        Redis --> CeleryPDF[Celery Worker: WeasyPrint PDF Queue]
+        Redis --> CeleryDefault[Celery Worker: Bulk Imports & Notifications]
         Redis --> CeleryBeat[Celery Beat Scheduler]
     end
 
@@ -1654,18 +1678,16 @@ graph TD
         Web1 --> PG[(PostgreSQL 16 Primary)]
         Web2 --> PG
         CeleryDefault --> PG
-        CeleryPDF --> PG
         PG -. Streaming Replication .-> PGReplica[(PostgreSQL 16 Read Replica)]
-        CeleryPDF --> S3[(AWS S3 / MinIO Object Storage)]
     end
 ```
 
 ### 13.2 Environment Segregation & Secrets Management
-- **Environments:** Development (`local`), Staging (`staging.edurecords.ng`), Production (`api.edurecords.ng`).
+- **Environments:** Development (`local`), Staging (`staging`), Production (`production`).
 - **Secrets Management:** Injected at container runtime via AWS Secrets Manager or HashiCorp Vault. Zero secrets stored in Git repositories.
 
 ### 13.3 Backup, Point-in-Time Recovery (PITR) & Disaster Recovery
-- **Continuous Archiving:** PostgreSQL WAL (Write-Ahead Logging) archiving streamed directly to an isolated, multi-region encrypted S3 bucket.
+- **Continuous Archiving:** PostgreSQL WAL (Write-Ahead Logging) archiving streamed directly to an isolated, multi-region encrypted backup storage.
 - **Automated Snapshots:** Full daily database dumps executed via `pg_dump` at 02:00 Africa/Lagos time, retained with a 30-day GFS (Grandfather-Father-Son) rotation policy.
 - **RPO / RTO Targets:**
   - **Recovery Point Objective (RPO):** < 15 minutes (via WAL streaming).
@@ -1697,7 +1719,7 @@ gantt
     Score Entry UI APIs & Validation Lifecycle   :p3_2, after p3_1, 14d
     Pure Computation Engine & Broadsheet Logic   :p3_3, after p3_2, 12d
     section Phase 4: Distribution & Pilot
-    WeasyPrint PDF Report Card Engine            :p4_1, after p3_3, 12d
+    Client Report Card Payload & QR Verification :p4_1, after p3_3, 10d
     Magic Link Distribution & Token Auth         :p4_2, after p4_1, 8d
     SQLAdmin Setup & Pilot Simulation at Olivet  :p4_3, after p4_2, 14d
 ```
@@ -1716,9 +1738,9 @@ gantt
 - **Deliverables:** Assessment definitions, Score bulk entry endpoints, State machine (`DRAFT` $\to$ `SUBMITTED` $\to$ `APPROVED`), Computation engine for totals, grades, positions, and averages.
 - **Acceptance Criteria:** Score entries validated against assessment maximums; competition ranking mathematically verified with ties; approval workflow locks records from further editing.
 
-#### Phase 4: Result Publication, PDF Generation & Pilot Delivery
-- **Deliverables:** Publication snapshotting engine, WeasyPrint PDF compiler, Magic link verification API, email notification worker, SQLAdmin dashboard.
-- **Acceptance Criteria:** Generate 1,500 individual student PDF report cards in under 10 minutes via background Celery workers; verify parents can access report cards via expiring secure links without requiring passwords.
+#### Phase 4: Result Publication, Client-Side PDF & Pilot Delivery
+- **Deliverables:** Publication snapshotting engine, Structured report JSON payload with QR verification, Magic link verification API, email notification worker, SQLAdmin dashboard.
+- **Acceptance Criteria:** Publish 1,500 individual student report records in seconds without storage bottlenecks; verify frontend client can assemble and export print-ready PDFs locally from the verified payload without server-side rendering delay.
 
 ---
 
@@ -1742,22 +1764,29 @@ gantt
 
 ---
 
-## 16. Open Architectural Questions (Product Owner Sign-Off Required)
+## 16. Architectural Decisions & Product Owner Confirmations
 
-Before proceeding with Phase 1 implementation, the following decisions require formal stakeholder review and product-owner sign-off:
+All core architectural questions have been formally reviewed and confirmed:
 
-1. **Third Term Cumulative (Annual) Computation Model:**
-   - *Question:* In Nigerian secondary schools, does the Third Term report card reflect *only* Third Term scores, or does it include a weighted cumulative annual computation (e.g., 25% Term 1 + 25% Term 2 + 50% Term 3)?
-   - *Impact on Schema:* If cumulative calculation is required, `term_report_cards` must store both terminal and cumulative year-to-date aggregates.
-2. **Subject Elective Boundaries & Trade Subjects per Student: [RESOLVED & INCORPORATED]**
-   - *Status:* **Resolved & Incorporated into Core Schema.**
-   - *Decision:* The architecture officially incorporates `student_subject_registrations` (linking `student_enrollments` to `class_subjects` with `subject_category` tagging: `COMPULSORY_CORE`, `DEPARTMENT_CORE`, `TRADE_ELECTIVE`, `FREE_ELECTIVE`). Compulsory subjects auto-register upon enrollment; trade subjects (e.g., Catering Craft Practice, Data Processing) are selectively registered per student. Total obtainable marks on report cards are dynamically computed from active registrations, and teachers of elective subjects only see registered students on score sheets.
-3. **Parent Phone Numbers & WhatsApp / SMS Distribution:**
-   - *Question:* Given email delivery variability in rural/semi-urban Nigeria, is email notification sufficient for the Olivet MVP, or must SMS / WhatsApp integration (via Termii or Infobip) be prioritized in Phase 1?
-   - *Cost Impact:* SMS gateways incur per-message transactional costs that must be budgeted.
-4. **School Stamp & Digital Signature Authority:**
-   - *Question:* Will report cards feature pre-uploaded digital signatures of the Principal and Form Master, or will report cards be downloaded, printed physically, and signed by hand?
-   - *Impact:* Determines whether `staff_profiles` requires encrypted image storage for signature assets in MVP.
+1. **Third Term Cumulative (Annual) Computation Model: [RESOLVED & APPROVED]**
+   - *Decision:* The platform natively supports **both** standard terminal report cards (Term 1, Term 2, Term 3 individual terminal scores) and an **Annual Cumulative Summary** on Third Term report cards.
+   - *Implementation:* `subject_results` stores terminal scores for Terms 1, 2, and 3 alongside cumulative annual totals and grades. `term_report_cards` stores cumulative average percentages, annual class positions, and official promotion decisions (`PROMOTED`, `REPEATING`, `PROMOTED_ON_TRIAL`).
+
+2. **Subject Elective Boundaries & Trade Subjects per Student: [RESOLVED & APPROVED]**
+   - *Decision:* Fully supported via `student_subject_registrations`.
+   - *Implementation:* Compulsory core subjects auto-register upon class enrollment; senior trade electives (Catering Craft, Data Processing, etc.) are registered individually. Score entry sheets for trade subjects display only enrolled students, and obtainable mark totals adapt dynamically per student.
+
+3. **Parent Distribution Channels: [RESOLVED & APPROVED]**
+   - *Decision:* **Email-only distribution for MVP.** Magic links to access the client-side assembled report cards are delivered securely via email.
+   - *Roadmap:* WhatsApp and SMS distribution gateways (e.g. Termii / Infobip) are deferred to Post-MVP (Phase 2).
+
+4. **School Stamp & Digital Signatures: [RESOLVED & APPROVED]**
+   - *Decision:* **Supported out of the box.**
+   - *Implementation:* Digital asset storage fields are integrated on `schools` (`stamp_image_url`, `principal_signature_url`) and `staff_profiles` (`signature_image_url`). These image assets are passed securely in the verified JSON report payload and embedded directly into the client-rendered PDF.
+
+5. **Storage Provider Strategy (Branding & Signatures): [RESOLVED & APPROVED]**
+   - *Decision:* Design an abstract `StorageService` interface supporting both **AWS S3** and **Cloudinary** (with local disk storage for development).
+   - *Scope:* Storage is required only for institutional branding assets (logos, stamps, signatures); rendered student report cards require zero object storage as they are generated client-side on-demand.
 
 ---
 *End of Architectural Specification. Document maintained under strict version control.*

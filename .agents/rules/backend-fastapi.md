@@ -24,5 +24,9 @@ Follow these patterns when implementing features:
    - Ensure explicit serialization schemas for all API endpoints.
 
 4. **Background Tasks:**
-   - Long-running or heavy I/O operations (WeasyPrint PDF, bulk CSV/Excel imports, emails) must be enqueued as Celery tasks in `tasks.py`.
+   - Asynchronous tasks (bulk CSV/Excel imports, emails, SMS notifications) must be enqueued as Celery tasks in `tasks.py`.
    - Always pass `school_id` as the first argument in Celery tasks to re-establish the tenant context.
+
+5. **Client-Side Document Assembly:**
+   - Report cards are assembled and printed to PDF on the client side from verified backend JSON payloads.
+   - Do not add server-side PDF compilers or cloud object storage for rendered reports.

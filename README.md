@@ -37,9 +37,8 @@ For autonomous agents and developers working on this codebase:
 | **Backend Framework** | **FastAPI** (Python 3.12+) | Async I/O, Pydantic v2 validation, OpenAPI 3.1 client generation |
 | **ORM & Migrations** | **SQLAlchemy 2.0 (Async)** + **Alembic** | AsyncSession via `asyncpg`, declarative mappings, migration tracking |
 | **Database** | **PostgreSQL 16** | Row-Level Security (RLS), JSONB, composite constraints, UUIDv7 |
-| **Task Queue & Broker** | **Celery 5.4** + **Redis 7** | Dedicated worker pools for bulk imports, PDF generation, emails |
-| **Document Compiler** | **WeasyPrint** | Headless HTML5/CSS3 Paged Media rendering of report cards |
-| **Object Storage** | **AWS S3 / MinIO** | Multi-tenant namespaced storage with 15-minute HMAC pre-signed URLs |
+| **Task Queue & Broker** | **Celery 5.4** + **Redis 7** | Dedicated worker queues for bulk student imports and email/SMS |
+| **Document Delivery** | **Client-Side Document Assembly** | Report cards assembled and printed/downloaded client-side from verified JSON |
 | **Administration** | **SQLAdmin** | Starlette-native admin panel mounted at `/admin/` |
 
 ---
