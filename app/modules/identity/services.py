@@ -1,8 +1,11 @@
 from datetime import datetime, timezone, timedelta
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
+import secrets
 from fastapi import HTTPException, status
 from sqlalchemy import select, and_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -15,6 +18,7 @@ from app.core.security import (
     is_token_revoked,
     verify_password,
 )
+from app.modules.identity.bulk_import import ParsedStaffRow, StaffBulkImportRow
 from app.modules.identity.models import (
     School,
     SchoolConfiguration,
@@ -57,6 +61,36 @@ DEFAULT_TERM_DEFINITIONS = [
     {"number": 2, "name": "Second Term"},
     {"number": 3, "name": "Third Term"},
 ]
+
+
+@dataclass
+class StaffBulkProvisionResult:
+    school_name: str
+    created: int
+    invitations: List[StaffInviteResponse]
+    errors: List[Dict[str, Any]]
+
+
+def _build_staff_invitation(user: User, school_id: UUID) -> StaffInviteResponse:
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=72)
+    invitation_token = create_access_token(
+        subject=str(user.id),
+        school_id=school_id,
+        role=user.role,
+        expires_delta=timedelta(hours=72),
+        extra_claims={
+            "type": "invitation",
+            "email": user.email,
+            "school_id": str(school_id),
+        },
+    )
+    return StaffInviteResponse(
+        email=user.email,
+        role=user.role,
+        invitation_token=invitation_token,
+        expires_at=expires_at,
+        message="Staff invitation generated successfully. Share this invitation link with the teacher.",
+    )
 
 
 async def authenticate_user(db: AsyncSession, email: str, password: str) -> User:
@@ -280,7 +314,6 @@ async def invite_staff_member(
         )
 
     # Create inactive user waiting for invitation acceptance with a cryptographically random unusable hash
-    import secrets
     unusable_random_secret = secrets.token_urlsafe(64)
     temporary_hash = hash_password(unusable_random_secret)
     user = User(
@@ -306,26 +339,188 @@ async def invite_staff_member(
     db.add(staff_profile)
     await db.commit()
 
-    # Generate 72-hour invitation token
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=72)
-    invitation_token = create_access_token(
-        subject=str(user.id),
-        school_id=school_id,
-        role=user.role,
-        expires_delta=timedelta(hours=72),
-        extra_claims={
-            "type": "invitation",
-            "email": user.email,
-            "school_id": str(school_id),
-        },
+    return _build_staff_invitation(user, school_id)
+
+
+async def provision_staff_batch(
+    db: AsyncSession,
+    school_id: UUID,
+    granter_id: UUID,
+    rows: List[ParsedStaffRow],
+) -> StaffBulkProvisionResult:
+    """Validates and provisions a staff roster atomically.
+
+    All rows are checked before any account is created. If any row fails,
+    no users or staff profiles are committed and the caller receives a
+    row-by-row error report.
+    """
+    school = await db.get(School, school_id)
+    if not school:
+        return StaffBulkProvisionResult(
+            school_name="",
+            created=0,
+            invitations=[],
+            errors=[
+                {
+                    "row": 0,
+                    "message": (
+                        "The school associated with this import could not be found. "
+                        "Please check that you are signed in to the right school."
+                    ),
+                }
+            ],
+        )
+
+    errors: List[Dict[str, Any]] = []
+    seen_emails: Dict[str, int] = {}
+    seen_staff_ids: Dict[str, int] = {}
+    normalized_rows: List[Tuple[int, StaffBulkImportRow, str, str]] = []
+
+    for parsed in rows:
+        row = parsed.data
+        email = row.email.lower()
+        staff_id = row.staff_id_number
+
+        if email in seen_emails:
+            errors.append(
+                {
+                    "row": parsed.row_number,
+                    "message": (
+                        f"The email address {email} appears more than once in this "
+                        f"file. It was first used on row {seen_emails[email]}."
+                    ),
+                }
+            )
+        else:
+            seen_emails[email] = parsed.row_number
+
+        if staff_id in seen_staff_ids:
+            errors.append(
+                {
+                    "row": parsed.row_number,
+                    "message": (
+                        f"The staff ID {staff_id} appears more than once in this "
+                        f"file. It was first used on row {seen_staff_ids[staff_id]}."
+                    ),
+                }
+            )
+        else:
+            seen_staff_ids[staff_id] = parsed.row_number
+
+        normalized_rows.append((parsed.row_number, row, email, staff_id))
+
+    existing_emails = set(
+        (
+            await db.execute(select(User.email).where(User.email.in_(seen_emails)))
+        )
+        .scalars()
+        .all()
+    )
+    existing_staff_ids = set(
+        (
+            await db.execute(
+                select(StaffProfile.staff_id_number).where(
+                    and_(
+                        StaffProfile.school_id == school_id,
+                        StaffProfile.staff_id_number.in_(seen_staff_ids),
+                    )
+                )
+            )
+        )
+        .scalars()
+        .all()
     )
 
-    return StaffInviteResponse(
-        email=user.email,
-        role=user.role,
-        invitation_token=invitation_token,
-        expires_at=expires_at,
-        message="Staff invitation generated successfully. Share this invitation link with the teacher.",
+    for row_number, _, email, staff_id in normalized_rows:
+        if email in existing_emails:
+            errors.append(
+                {
+                    "row": row_number,
+                    "message": (
+                        f"An account with the email address {email} already exists. "
+                        "Please use a different email address."
+                    ),
+                }
+            )
+        if staff_id in existing_staff_ids:
+            errors.append(
+                {
+                    "row": row_number,
+                    "message": (
+                        f"A staff member with ID {staff_id} already exists in your "
+                        "school. Please check the staff ID and try again."
+                    ),
+                }
+            )
+
+    if errors:
+        return StaffBulkProvisionResult(
+            school_name=school.name,
+            created=0,
+            invitations=[],
+            errors=errors,
+        )
+
+    # One random unusable hash is enough for the whole batch: every account
+    # remains inactive until the invitee sets a real password.
+    unusable_hash = hash_password(secrets.token_urlsafe(64))
+    created_users: List[Tuple[int, User, StaffBulkImportRow]] = []
+
+    try:
+        for row_number, row, email, _ in normalized_rows:
+            user = User(
+                school_id=school_id,
+                email=email,
+                password_hash=unusable_hash,
+                first_name=row.first_name,
+                last_name=row.last_name,
+                phone_number=row.phone_number,
+                role=row.role,
+                is_active=False,
+            )
+            db.add(user)
+            created_users.append((row_number, user, row))
+
+        await db.flush()
+
+        for _, user, row in created_users:
+            db.add(
+                StaffProfile(
+                    school_id=school_id,
+                    user_id=user.id,
+                    staff_id_number=row.staff_id_number,
+                    employment_status="INVITED",
+                    specialization=row.specialization,
+                )
+            )
+
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return StaffBulkProvisionResult(
+            school_name=school.name,
+            created=0,
+            invitations=[],
+            errors=[
+                {
+                    "row": 0,
+                    "message": (
+                        "We couldn't save this staff list because one or more "
+                        "details conflict with existing records. Please review the "
+                        "file and try again."
+                    ),
+                }
+            ],
+        )
+
+    invitations = [
+        _build_staff_invitation(user, school_id) for _, user, _ in created_users
+    ]
+    return StaffBulkProvisionResult(
+        school_name=school.name,
+        created=len(invitations),
+        invitations=invitations,
+        errors=[],
     )
 
 
