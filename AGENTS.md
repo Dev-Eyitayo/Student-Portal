@@ -1,0 +1,179 @@
+# AGENTS.md: Developer & Agent Engineering Manual
+**Project:** Olivet Academic Records Management Platform  
+**Target Pilot:** Olivet Baptist High School, Oyo, Nigeria  
+**Architecture Spec:** [`ARCHITECTURE.md`](./ARCHITECTURE.md) (Authoritative Source of Truth)
+
+---
+
+## 1. Agent Mission & Purpose
+
+You are working on the **Olivet Academic Records Management Platform**, a production-grade, multi-tenant SaaS application built for Nigerian secondary schools (junior and senior) and extensible internationally.
+
+Before writing code or making architectural adjustments, **always consult `ARCHITECTURE.md`**. Every data model, endpoint contract, computation rule, and security constraint in this repository is explicitly specified there.
+
+---
+
+## 2. Core Architectural Invariants (Non-Negotiables)
+
+When designing, modifying, or implementing code, you must enforce these 8 non-negotiable rules:
+
+1. **Multi-Tenancy Defense-in-Depth:**
+   - Every tenant table **must** have `school_id: UUID NOT NULL REFERENCES schools(id)`.
+   - Never write a database query that relies solely on application-level filtering without verifying that the database session has executed:
+     `SET LOCAL app.current_school_id = :school_id`
+   - Use the `get_tenant_db` dependency in all tenant-scoped FastAPI route handlers.
+2. **UUIDv7 for Primary Keys:**
+   - Use time-ordered UUIDv7 for all primary keys to guarantee optimal B-Tree index performance while preventing integer enumeration attacks across schools.
+3. **Immutability of Published Academic Records:**
+   - When a term is `PUBLISHED`, results become relationally frozen.
+   - `term_report_cards` and `subject_results` store computed grades and ranks alongside a `frozen_config_snapshot` JSON blob.
+   - **Never** recalculate historical published scores dynamically on read.
+4. **Hybrid Access Control (RBAC + Scoped ABAC):**
+   - Do not restrict permissions to rigid role enums.
+   - Staff can have a baseline role (e.g., `TEACHER`) plus direct delegated permissions (`user_permission_grants`) scoped to `SCHOOL_WIDE`, `DEPARTMENT`, `ACADEMIC_LEVEL`, or `CLASS_GROUP`.
+   - Enforce authorization using `require_permission(code, scope_extractor)` from `app.core.permissions`.
+5. **Trade Subjects & Electives Registration:**
+   - Senior secondary students choose trade subjects (e.g., Catering Craft, Data Processing).
+   - Never assume all students in an arm take every subject in that arm.
+   - Query `student_subject_registrations` to get the active roster for an elective subject.
+   - Compute total obtainable marks dynamically based on each student's registered subjects.
+6. **Configurable by Architecture, Familiar by Default:**
+   - Olivet’s structures (JSS1–SS3, Science/Arts/Commercial, arm letters `O`, `L`, `I`, `V`, `E`, `T`, `B`, `H`, `S`, `Y`, 20/20/60 assessment weights) are seed defaults, **never hardcoded business logic**.
+   - Junior secondary levels must function seamlessly with `department_id = NULL`.
+7. **Zero Hard Deletions of Academic or Staff History:**
+   - When a student or teacher leaves, updates must set their lifecycle status (`WITHDRAWN`, `TRANSFERRED`, `INACTIVE`) and apply soft-deletion (`deleted_at`).
+   - Foreign keys to historical records must use `ON DELETE RESTRICT` or `ON DELETE SET NULL`.
+8. **Decoupled Heavy Operations (Celery & Redis):**
+   - Never compile WeasyPrint PDFs, process bulk Excel imports, or send emails synchronously in an HTTP request worker. Always dispatch them to Celery.
+
+---
+
+## 3. Technology Stack Reference
+
+- **Language:** Python 3.12+ (Strict typing with `typing` and `mypy`)
+- **Web Framework:** FastAPI (v0.111+)
+- **ORM:** SQLAlchemy 2.0 (`AsyncSession` with `asyncpg`)
+- **Data Validation:** Pydantic v2 (`BaseModel`, `Field`, `model_validator`)
+- **Database:** PostgreSQL 16 (Row-Level Security enabled)
+- **Migrations:** Alembic (Async migration runner)
+- **Task Queue:** Celery 5.4 + Redis 7
+- **Admin Dashboard:** SQLAdmin (`sqladmin`)
+- **PDF Generation:** WeasyPrint (HTML5/CSS3 Paged Media)
+- **Testing:** `pytest`, `pytest-asyncio`, `httpx.AsyncClient`, `Hypothesis`
+
+---
+
+## 4. Directory & Module Conventions
+
+All application code resides under `app/`:
+
+```
+app/
+├── main.py                  # FastAPI app factory, middleware, CORS, routers
+├── admin.py                 # SQLAdmin configuration
+├── core/                    # Shared infrastructure
+│   ├── config.py            # Pydantic Settings
+│   ├── database.py          # SQLAlchemy async engine & sessionmaker
+│   ├── security.py          # Passlib Argon2, PyJWT RS256, MFA TOTP
+│   ├── dependencies.py      # get_tenant_db, get_current_user
+│   ├── permissions.py       # Hybrid permission resolver (require_permission)
+│   └── exceptions.py        # RFC 7807 Exception handlers
+└── modules/                 # Bounded domain contexts
+    ├── common/              # Base declarative models, TenantMixin, TimestampMixin
+    ├── identity/            # Users, StaffProfiles, Permissions, Auth routes
+    ├── academic_structure/  # Sessions, Terms, Levels, Departments, Arms, ClassGroups
+    ├── students/            # Students, Demographics, Enrollments
+    ├── subjects/            # Subjects, Offerings, ClassSubjects, TeacherAssignments
+    ├── assessments/         # AssessmentDefinitions, Scores, Bulk entry
+    ├── computation/         # Pure Python Computation Engine & Broadsheets
+    ├── distribution/        # Result Tokens, WeasyPrint PDF, Email notifications
+    └── audit/               # Immutable Security Audit Logging
+```
+
+### Module Responsibilities:
+- `models.py`: SQLAlchemy 2.0 mapped entities and relationships.
+- `schemas.py`: Pydantic v2 request/response schemas.
+- `services.py`: Business logic, domain state transitions, and database writes.
+- `router.py`: FastAPI `APIRouter` with dependency injection and status codes.
+- `engine.py` (in `computation/`): Pure calculation functions with **zero database or I/O imports**.
+
+---
+
+## 5. Coding Standards & Idioms
+
+### 5.1 Service Layer Pattern
+Never write business logic or database writes inside FastAPI route handlers. Route handlers must strictly:
+1. Accept and validate the request via Pydantic schemas.
+2. Enforce authentication and permissions via `Depends`.
+3. Delegate execution to a function in `services.py`.
+4. Return the response model.
+
+### 5.2 Pure Computation Engine
+The grading and ranking engine (`app/modules/computation/engine.py`) must remain pure Python:
+- Accept plain Python dictionaries, Decimals, and dataclasses.
+- Return calculated data structures.
+- Use `Decimal` with `ROUND_HALF_UP` for all mark computations.
+- Never import SQLAlchemy models, DB sessions, or HTTP request objects into `engine.py`.
+
+### 5.3 Error Handling Standard (RFC 7807)
+Raise domain-specific HTTPExceptions that serialize to RFC 7807:
+```python
+from fastapi import HTTPException, status
+
+raise HTTPException(
+    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+    detail="Score 25.00 exceeds the maximum allowed score of 20.00 for Continuous Assessment 1."
+)
+```
+
+---
+
+## 6. Common Commands for Agents & Developers
+
+### Environment & Migrations
+```bash
+# Run database migrations
+alembic upgrade head
+
+# Generate a new migration after model changes
+alembic revision --autogenerate -m "add_student_subject_registrations"
+
+# Rollback one migration
+alembic downgrade -1
+```
+
+### Running the Services
+```bash
+# Start FastAPI development server
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# Start Celery worker for general and bulk import queues
+celery -A app.core.celery_app worker -Q default,bulk_imports,notifications -l info
+
+# Start isolated Celery worker for memory-intensive PDF generation
+celery -A app.core.celery_app worker -Q pdf_compilation -c 4 --max-tasks-per-child=50 -l info
+```
+
+### Testing & Verification
+```bash
+# Run full test suite
+pytest
+
+# Run tests with coverage
+pytest --cov=app tests/
+
+# Run cross-tenant isolation tests specifically
+pytest tests/test_tenant_isolation.py
+
+# Run pure computation engine property tests
+pytest tests/test_computation_engine.py
+```
+
+---
+
+## 7. Instructions for Subagents & Swarm Collaboration
+
+When multiple agents work on this codebase in parallel:
+1. **Never edit files outside your assigned module** without coordinating.
+2. If modifying database schemas, you must update `ARCHITECTURE.md` and generate the corresponding Alembic revision.
+3. Every new service endpoint must have an accompanying automated test verifying both **success** and **unauthorized cross-tenant access denial**.
