@@ -3,9 +3,14 @@ from typing import AsyncGenerator, Optional
 from uuid import UUID
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy import select, text
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.database import async_session_factory
+from app.core.database import (
+    async_session_factory,
+    reset_tenant_scope,
+    set_tenant_scope,
+)
 from app.core.exceptions import DomainException
 from app.core.security import decode_access_token, is_token_revoked
 from app.modules.identity.models import User
@@ -25,42 +30,55 @@ async def get_current_authenticated_user(
         if not user_id_str or not jti:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token payload."
+                detail="Your sign-in token is invalid. Please sign in again."
             )
         user_id = UUID(user_id_str)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials."
+            detail="Your session is invalid or has expired. Please sign in again to continue."
         )
 
     # 1. Fast Redis Blacklist Check (Instant revocation by jti)
     if await is_token_revoked(jti):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has been revoked."
+            detail="This session has been signed out. Please sign in again to continue."
         )
 
     async with async_session_factory() as session:
-        stmt = select(User).where(User.id == user_id, User.is_active.is_(True))
+        stmt = (
+            select(User)
+            .options(selectinload(User.staff_profile), selectinload(User.school))
+            .where(User.id == user_id, User.is_active.is_(True))
+        )
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found or account is deactivated."
+                detail="This account could not be found or has been deactivated. Please contact your school administrator."
             )
 
         # 2. Global Invalidation Check (e.g. password reset or admin deactivation)
         if iat_ts is not None and user.token_valid_after:
             token_issued_at = datetime.fromtimestamp(iat_ts, tz=timezone.utc)
-            if token_issued_at < user.token_valid_after:
+            if token_issued_at < user.token_valid_after.replace(microsecond=0):
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Session has been revoked. Please log in again."
+                    detail="You have been signed out because your account details or password were updated. Please sign in again."
                 )
 
         return user
+
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """Yields a standard database session without RLS scoping (for public or unauthenticated endpoints)."""
+    async with async_session_factory() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
 
 
 async def get_tenant_db(
@@ -73,19 +91,14 @@ async def get_tenant_db(
     if not current_user.school_id and current_user.role != "SUPER_ADMIN":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="User is not associated with an active school tenant."
+            detail="Your account is not linked to an active school. Please reach out to your school administrator."
         )
 
-    async with async_session_factory() as session:
-        if current_user.school_id:
-            await session.execute(
-                text("SET LOCAL app.current_school_id = :school_id"),
-                {"school_id": str(current_user.school_id)}
-            )
-        if current_user.role == "SUPER_ADMIN":
-            await session.execute(text("SET LOCAL app.is_super_admin = 'true'"))
-
-        try:
+    tokens = set_tenant_scope(
+        current_user.school_id, current_user.role == "SUPER_ADMIN"
+    )
+    try:
+        async with async_session_factory() as session:
             yield session
-        finally:
-            await session.close()
+    finally:
+        reset_tenant_scope(tokens)

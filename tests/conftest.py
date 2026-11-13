@@ -7,6 +7,9 @@ os.environ["TESTING"] = "1"
 import pytest
 from hypothesis import settings, HealthCheck
 
+# Register every SQLAlchemy model/mapper before tests run
+import app.models  # noqa: F401
+
 # Optimize hypothesis settings for fast deterministic test suites
 settings.register_profile(
     "fast",

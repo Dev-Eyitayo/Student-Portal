@@ -34,7 +34,7 @@ async def test_tenant_mismatch_exception_response(error_test_app):
         data = res.json()
         assert "error" in data
         assert data["error"]["code"] == "TENANT_MISMATCH"
-        assert "tenant" in data["error"]["message"].lower()
+        assert "school" in data["error"]["message"].lower()
         assert data["error"]["path"] == "/trigger-tenant-mismatch"
 
 
@@ -47,5 +47,16 @@ async def test_insufficient_permission_response(error_test_app):
         data = res.json()
         assert "error" in data
         assert data["error"]["code"] == "INSUFFICIENT_PERMISSIONS"
-        assert "scores:approve" in data["error"]["message"]
-        assert "Science" in data["error"]["message"]
+        assert "approve scores" in data["error"]["message"].lower()
+        assert "science" in data["error"]["message"].lower()
+        assert data["error"]["details"][0]["permission_required"] == "scores:approve"
+
+
+@pytest.mark.asyncio
+async def test_scores_incomplete_friendly_message():
+    from app.core.exceptions import ScoresIncompleteException
+    exc = ScoresIncompleteException(subject_name="Chemistry", missing_count=3)
+    assert exc.status_code == 422
+    assert exc.code == "SCORES_INCOMPLETE"
+    assert "3 student(s) in Chemistry are still missing a score" in exc.message
+    assert "mark them as absent or exempt" in exc.message

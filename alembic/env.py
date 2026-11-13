@@ -7,9 +7,8 @@ from alembic import context
 
 from app.core.config import get_settings
 from app.modules.common.models import Base
-# Import all model modules so Base.metadata is fully populated
-import app.modules.identity.models  # noqa: F401
-import app.modules.academic_structure.models  # noqa: F401
+# Import the central model registry so Base.metadata is fully populated
+import app.models  # noqa: F401
 
 config = context.config
 
@@ -17,7 +16,10 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+config.set_main_option(
+    "sqlalchemy.url",
+    settings.MIGRATION_DATABASE_URL or settings.DATABASE_URL,
+)
 
 target_metadata = Base.metadata
 

@@ -76,12 +76,19 @@ pip install -U pip poetry
 # 4. Install dependencies
 poetry install
 
-# 5. Run database migrations
+# 5. Run database migrations (uses MIGRATION_DATABASE_URL / admin role)
 alembic upgrade head
 
 # 6. Start development server
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+### Database Roles & Row-Level Security
+PostgreSQL Row-Level Security only applies to roles that are neither `SUPERUSER` nor `BYPASSRLS`. The application therefore connects with the non-superuser `APP_POSTGRES_USER` (default `olivet_runtime`) while migrations run as `POSTGRES_USER` (`olivet_app`) via `MIGRATION_DATABASE_URL`.
+
+Fresh Docker volumes create and grant the runtime role automatically through `docker/initdb/01-create-runtime-role.sh`. For an existing database volume, run that script once as the admin role before starting the app.
+
+For managed PostgreSQL (Neon) and managed Redis (Upstash), see the deployment runbook: **[docs/managed-deployment.md](./docs/managed-deployment.md)**
 
 ---
 

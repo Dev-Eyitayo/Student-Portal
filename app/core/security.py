@@ -1,12 +1,15 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+import logging
 import os
 import jwt
 from passlib.context import CryptContext
 from app.core.config import get_settings
+from app.core.redis import get_redis
 from app.modules.common.models import generate_uuid7
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 # In test mode, reduce Argon2 cost parameters to ensure blazing-fast test execution (< 5ms per hash)
 is_testing = settings.ENVIRONMENT in ("testing", "test") or os.getenv("TESTING") == "1"
@@ -35,14 +38,31 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 
 def create_access_token(
-    data: Dict[str, Any],
-    expires_delta: Optional[timedelta] = None
+    data: Optional[Dict[str, Any]] = None,
+    expires_delta: Optional[timedelta] = None,
+    *,
+    subject: Optional[str] = None,
+    school_id: Optional[Any] = None,
+    role: Optional[str] = None,
+    extra_claims: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Creates an access token featuring a unique time-ordered 'jti' (JWT ID).
     The 'jti' allows immediate individual token revocation via Redis blacklist.
+    Supports dictionary payload or explicit subject/claims parameters.
     """
-    to_encode = data.copy()
+    to_encode: Dict[str, Any] = {}
+    if data:
+        to_encode.update(data)
+    if subject:
+        to_encode["sub"] = str(subject)
+    if school_id:
+        to_encode["school_id"] = str(school_id)
+    if role:
+        to_encode["role"] = role
+    if extra_claims:
+        to_encode.update(extra_claims)
+
     now = datetime.now(timezone.utc)
     expire = now + (
         expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -56,8 +76,34 @@ def create_access_token(
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
+def create_refresh_token(
+    subject: str,
+    school_id: Optional[Any] = None,
+    expires_delta: Optional[timedelta] = None,
+) -> str:
+    """
+    Creates a long-lived refresh token for token rotation.
+    """
+    now = datetime.now(timezone.utc)
+    expire = now + (
+        expires_delta or timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    )
+    to_encode = {
+        "sub": str(subject),
+        "school_id": str(school_id) if school_id else None,
+        "type": "refresh",
+        "jti": str(generate_uuid7()),
+        "iat": now,
+        "exp": expire,
+    }
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
 def decode_access_token(token: str) -> Dict[str, Any]:
     return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+
+
+decode_token = decode_access_token
 
 
 async def revoke_access_token(jti: str, expires_in_seconds: int = 900) -> None:
@@ -66,25 +112,28 @@ async def revoke_access_token(jti: str, expires_in_seconds: int = 900) -> None:
     Key will automatically expire in Redis after token's remaining lifespan.
     """
     _in_memory_revoked_tokens.add(jti)
+    if is_testing:
+        return
     try:
-        import redis.asyncio as aioredis
-        client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        client = get_redis()
         await client.set(f"token:revoked:{jti}", "1", ex=max(1, expires_in_seconds))
-        await client.aclose()
     except Exception:
-        # Falls back to in-memory store in local dev/tests
-        pass
+        # Falls back to the in-memory store in local dev or during Redis outages.
+        logger.warning(
+            "Could not persist token revocation in Redis; using in-memory fallback",
+            exc_info=True,
+        )
 
 
 async def is_token_revoked(jti: str) -> bool:
     """Checks whether a token jti has been blacklisted."""
     if jti in _in_memory_revoked_tokens:
         return True
+    if is_testing:
+        return False
     try:
-        import redis.asyncio as aioredis
-        client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
-        is_revoked = await client.exists(f"token:revoked:{jti}")
-        await client.aclose()
-        return bool(is_revoked)
+        client = get_redis()
+        return bool(await client.exists(f"token:revoked:{jti}"))
     except Exception:
+        logger.debug("Redis unavailable while checking token revocation", exc_info=True)
         return False

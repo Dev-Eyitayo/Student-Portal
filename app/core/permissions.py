@@ -3,8 +3,7 @@ from uuid import UUID
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.dependencies import get_tenant_db
-from app.core.security import get_current_authenticated_user
+from app.core.dependencies import get_current_authenticated_user, get_tenant_db
 from app.core.exceptions import InsufficientPermissionException
 from app.modules.identity.models import (
     Permission,

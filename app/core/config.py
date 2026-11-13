@@ -1,6 +1,30 @@
 from functools import lru_cache
-from typing import List
+from typing import List, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def normalize_asyncpg_url(url: str) -> str:
+    """Translate libpq-style parameters into asyncpg-compatible ones.
+
+    Neon connection strings use ``sslmode`` and ``channel_binding``. asyncpg
+    expects ``ssl`` and treats unknown query parameters as PostgreSQL server
+    settings, so ``channel_binding`` must be removed before connecting.
+    """
+    if not url.startswith("postgresql+asyncpg://"):
+        return url
+
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.pop("channel_binding", None)
+    if "sslmode" in query:
+        sslmode = query.pop("sslmode")
+        query.setdefault("ssl", sslmode)
+
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+    )
 
 
 class Settings(BaseSettings):
@@ -15,12 +39,43 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    # Database
-    DATABASE_URL: str = "postgresql+asyncpg://olivet_app:olivet_secure_pass@localhost:5432/olivet_records"
-    DATABASE_SYNC_URL: str = "postgresql://olivet_app:olivet_secure_pass@localhost:5432/olivet_records"
+    # Database Configuration - loaded strictly from environment or .env
+    POSTGRES_USER: str = "olivet_app"
+    POSTGRES_PASSWORD: str = ""
+    POSTGRES_HOST: str = "localhost"
+    POSTGRES_PORT: int = 5432
+    POSTGRES_DB: str = "olivet_records"
+
+    # Non-superuser role used by the running application so PostgreSQL RLS is
+    # actually enforced. Falls back to POSTGRES_USER when not configured.
+    APP_POSTGRES_USER: Optional[str] = None
+    APP_POSTGRES_PASSWORD: Optional[str] = None
+
+    DATABASE_URL: Optional[str] = None
+    MIGRATION_DATABASE_URL: Optional[str] = None
+    DATABASE_SYNC_URL: Optional[str] = None
+
+    # Connection pool. Keep these small when connecting through a managed
+    # transaction pooler such as Neon's PgBouncer endpoint.
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 5
+    DB_POOL_RECYCLE_SECONDS: int = 300
+    DB_SSL_MODE: Optional[str] = None
+    # None = auto-detect (0 when the URL contains '-pooler', otherwise 100).
+    DB_PREPARED_STATEMENT_CACHE_SIZE: Optional[int] = None
 
     # Redis & Broker
-    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+    REDIS_URL: Optional[str] = None
+    REDIS_BROKER_URL: Optional[str] = None
+    CELERY_RESULT_BACKEND: Optional[str] = None
+    REDIS_SSL_CERT_REQS: str = "required"
+    REDIS_SOCKET_TIMEOUT_SECONDS: float = 5.0
+    REDIS_CONNECT_TIMEOUT_SECONDS: float = 5.0
+    REDIS_HEALTH_CHECK_INTERVAL_SECONDS: int = 30
+    REDIS_MAX_CONNECTIONS: int = 20
 
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8000"]
@@ -31,7 +86,55 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
+    @model_validator(mode="after")
+    def assemble_urls_and_validate_secrets(self) -> "Settings":
+        # Build DATABASE_URL dynamically if not directly provided. The runtime
+        # URL uses the non-superuser role so Row-Level Security applies.
+        if not self.DATABASE_URL:
+            runtime_user = self.APP_POSTGRES_USER or self.POSTGRES_USER
+            runtime_password = (
+                self.APP_POSTGRES_PASSWORD
+                if self.APP_POSTGRES_USER
+                else self.POSTGRES_PASSWORD
+            )
+            auth = (
+                f"{runtime_user}:{runtime_password}@"
+                if runtime_password
+                else f"{runtime_user}@"
+            )
+            self.DATABASE_URL = f"postgresql+asyncpg://{auth}{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+
+        # Migrations run as the database owner using the admin credentials.
+        if not self.MIGRATION_DATABASE_URL:
+            auth = f"{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@" if self.POSTGRES_PASSWORD else f"{self.POSTGRES_USER}@"
+            self.MIGRATION_DATABASE_URL = f"postgresql+asyncpg://{auth}{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+
+        if not self.DATABASE_SYNC_URL:
+            auth = f"{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@" if self.POSTGRES_PASSWORD else f"{self.POSTGRES_USER}@"
+            self.DATABASE_SYNC_URL = f"postgresql://{auth}{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+
+        # Normalize Neon/libpq-style query parameters for asyncpg.
+        self.DATABASE_URL = normalize_asyncpg_url(self.DATABASE_URL)
+        self.MIGRATION_DATABASE_URL = normalize_asyncpg_url(self.MIGRATION_DATABASE_URL)
+
+        # Build REDIS_URL dynamically if not directly provided
+        if not self.REDIS_URL:
+            self.REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+
+        if not self.REDIS_BROKER_URL:
+            self.REDIS_BROKER_URL = self.REDIS_URL
+
+        # Enforce non-default secret key outside development and testing
+        if self.ENVIRONMENT not in ("development", "testing", "test"):
+            if "default-insecure" in self.SECRET_KEY:
+                raise ValueError("SECRET_KEY must be configured with a secure high-entropy key in production.")
+
+        return self
+
 
 @lru_cache()
 def get_settings() -> Settings:
     return Settings()
+
+
+settings = get_settings()

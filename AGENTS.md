@@ -116,16 +116,16 @@ The grading and ranking engine (`app/modules/computation/engine.py`) must remain
 - Use `Decimal` with `ROUND_HALF_UP` for all mark computations.
 - Never import SQLAlchemy models, DB sessions, or HTTP request objects into `engine.py`.
 
-### 5.3 Error Handling Standard (RFC 7807)
-Raise domain-specific HTTPExceptions that serialize to RFC 7807:
-```python
-from fastapi import HTTPException, status
-
-raise HTTPException(
-    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-    detail="Score 25.00 exceeds the maximum allowed score of 20.00 for Continuous Assessment 1."
-)
-```
+### 5.3 Human-Friendly Error Messaging Standard
+Every error message returned by the API must read like natural, empathetic, actionable human English. Teachers, school administrators, and parents will read these messages:
+- **Never expose raw technical codes** (e.g. `scores:approve`, `IntegrityError`) as the main error message. Technical codes belong in `error.code` or `details`.
+- **Always explain what happened and what to do next**:
+  - *Bad:* `"Access denied: Resource does not belong to your tenant."`
+  - *Good:* `"We couldn't find this record in your school's account. Please check that you're signed in to the right school."`
+  - *Bad:* `"Missing required permission: 'scores:approve' for scope 'Science'"`
+  - *Good:* `"You don't have permission to approve scores for Science. If you need this access, please ask your school administrator or academic officer."`
+  - *Bad:* `"ScoresIncompleteException"`
+  - *Good:* `"Scores cannot be submitted yet because 3 student(s) in Chemistry are still missing a score. Please enter their scores, or mark them as absent or exempt before submitting."`
 
 ---
 
