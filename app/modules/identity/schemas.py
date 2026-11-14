@@ -167,3 +167,14 @@ class SchoolResponse(BaseModel):
     address: str
     is_active: bool
     created_at: datetime
+
+
+class StaffBulkImportAcceptedResponse(BaseModel):
+    task_id: str
+    message: str
+
+
+class StaffBulkImportStatusResponse(BaseModel):
+    task_id: str
+    state: str
+    result: Optional[Dict[str, Any]] = None

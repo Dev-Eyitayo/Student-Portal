@@ -10,6 +10,7 @@ celery_app = Celery(
     "olivet",
     broker=broker_url,
     backend=settings.CELERY_RESULT_BACKEND,
+    include=["app.modules.identity.tasks"],
 )
 
 celery_app.conf.update(
@@ -24,6 +25,14 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
     task_track_started=True,
     broker_transport_options={"visibility_timeout": 3600},
+    task_routes={
+        "app.modules.identity.tasks.process_staff_bulk_import": {
+            "queue": "bulk_imports"
+        },
+        "app.modules.identity.tasks.send_staff_invitation_email": {
+            "queue": "notifications"
+        },
+    },
 )
 
 _ssl_options = {"ssl_cert_reqs": settings.REDIS_SSL_CERT_REQS}

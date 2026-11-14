@@ -28,7 +28,6 @@ def _result(school_id: str, status: str, **payload: Any) -> Dict[str, Any]:
 @celery_app.task(
     bind=True,
     name="app.modules.identity.tasks.send_staff_invitation_email",
-    queue="notifications",
 )
 def send_staff_invitation_email(
     self,
@@ -49,7 +48,6 @@ def send_staff_invitation_email(
 @celery_app.task(
     bind=True,
     name="app.modules.identity.tasks.process_staff_bulk_import",
-    queue="bulk_imports",
 )
 def process_staff_bulk_import(
     self,
@@ -64,6 +62,21 @@ def process_staff_bulk_import(
 
 
 async def _process_staff_bulk_import(
+    job_id: str,
+    school_id: str,
+    granter_id: str,
+    filename: str,
+) -> Dict[str, Any]:
+    try:
+        return await _process_staff_bulk_import_inner(
+            job_id, school_id, granter_id, filename
+        )
+    finally:
+        await close_redis()
+        await async_engine.dispose()
+
+
+async def _process_staff_bulk_import_inner(
     job_id: str,
     school_id: str,
     granter_id: str,
@@ -148,8 +161,6 @@ async def _process_staff_bulk_import(
             )
     finally:
         reset_tenant_scope(tokens)
-        await close_redis()
-        await async_engine.dispose()
 
     if provisioned.errors:
         return _result(

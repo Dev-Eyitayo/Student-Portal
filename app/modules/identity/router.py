@@ -1,9 +1,25 @@
+import base64
 import time
+from pathlib import Path
 from typing import Dict, List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Body, Cookie, Depends, Header, HTTPException, Query, Response, status
+from celery.result import AsyncResult
+from fastapi import (
+    APIRouter,
+    Body,
+    Cookie,
+    Depends,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.core.dependencies import (
     get_current_authenticated_user,
@@ -12,8 +28,16 @@ from app.core.dependencies import (
     oauth2_scheme,
 )
 from app.core.permissions import require_permission
+from app.core.redis import get_redis
 from app.core.security import decode_access_token, revoke_access_token
+from app.modules.common.models import generate_uuid7
+from app.modules.identity.bulk_import import MAX_STAFF_IMPORT_BYTES
 from app.modules.identity.models import User
+from app.modules.identity.tasks import (
+    STAGING_KEY,
+    STAGING_TTL_SECONDS,
+    process_staff_bulk_import,
+)
 from app.modules.identity.schemas import (
     AcceptInvitationRequest,
     DeactivateUserResponse,
@@ -24,6 +48,8 @@ from app.modules.identity.schemas import (
     RefreshTokenRequest,
     SchoolCreateRequest,
     SchoolResponse,
+    StaffBulkImportAcceptedResponse,
+    StaffBulkImportStatusResponse,
     StaffInviteRequest,
     StaffInviteResponse,
     StaffVerifyInviteResponse,
@@ -223,6 +249,149 @@ async def accept_invitation(
     _, tokens = await services.accept_staff_invitation(db, req)
     _set_refresh_cookie(response, tokens.refresh_token)
     return tokens
+
+
+@router.post(
+    "/staff/bulk-import",
+    response_model=StaffBulkImportAcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_permission("users:manage"))],
+)
+async def bulk_import_staff(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_authenticated_user),
+):
+    """
+    Queues a CSV or Excel staff roster for asynchronous provisioning.
+    """
+    if not current_user.school_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Staff import requires an active school context.",
+        )
+
+    filename = file.filename or ""
+    suffix = Path(filename).suffix.lower()
+    if suffix not in (".csv", ".xlsx"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please upload an Excel (.xlsx) or CSV (.csv) file.",
+        )
+
+    content = await file.read(MAX_STAFF_IMPORT_BYTES + 1)
+    if len(content) > MAX_STAFF_IMPORT_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="This file is too large. Please upload a file smaller than 5 MB.",
+        )
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This file is empty. Please add staff rows and upload again.",
+        )
+
+    job_id = str(generate_uuid7())
+    staging_key = STAGING_KEY.format(
+        school_id=current_user.school_id, job_id=job_id
+    )
+
+    try:
+        client = get_redis()
+        await client.set(
+            staging_key,
+            base64.b64encode(content).decode("ascii"),
+            ex=STAGING_TTL_SECONDS,
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "We couldn't queue the staff import right now. Please try again "
+                "in a moment."
+            ),
+        )
+
+    try:
+        process_staff_bulk_import.apply_async(
+            args=[
+                job_id,
+                str(current_user.school_id),
+                str(current_user.id),
+                filename,
+            ],
+            task_id=job_id,
+            queue="bulk_imports",
+        )
+    except Exception:
+        try:
+            await client.delete(staging_key)
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "We couldn't start the staff import right now. Please try again "
+                "in a moment."
+            ),
+        )
+
+    return StaffBulkImportAcceptedResponse(
+        task_id=job_id,
+        message=(
+            "Your staff list has been queued for import. You can check its "
+            "progress using the task ID."
+        ),
+    )
+
+
+@router.get(
+    "/staff/bulk-import/{task_id}",
+    response_model=StaffBulkImportStatusResponse,
+    dependencies=[Depends(require_permission("users:manage"))],
+)
+async def get_bulk_import_status(
+    task_id: str,
+    current_user: User = Depends(get_current_authenticated_user),
+):
+    if not current_user.school_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Staff import status requires an active school context.",
+        )
+
+    async_result = AsyncResult(task_id, app=celery_app)
+    state = async_result.state
+    result: Optional[Dict[str, object]] = None
+
+    if async_result.successful():
+        raw_result = async_result.result
+        if isinstance(raw_result, dict):
+            if raw_result.get("school_id") != str(current_user.school_id):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="This staff import task could not be found.",
+                )
+            result = {
+                key: value
+                for key, value in raw_result.items()
+                if key != "school_id"
+            }
+        else:
+            result = {"status": "completed"}
+    elif state == "FAILURE":
+        result = {
+            "status": "failed",
+            "message": (
+                "The staff import could not be completed. Please try again or "
+                "contact your platform administrator."
+            ),
+        }
+
+    return StaffBulkImportStatusResponse(
+        task_id=task_id,
+        state=state,
+        result=result,
+    )
 
 
 @router.post(

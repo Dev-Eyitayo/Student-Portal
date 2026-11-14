@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
@@ -731,6 +731,33 @@ async def deactivate_user(
     user.token_valid_after = datetime.now(timezone.utc)
     if user.staff_profile:
         user.staff_profile.employment_status = "INACTIVE"
+
+    from app.modules.academic_structure.models import ClassGroup
+    from app.modules.subjects.models import TeacherAssignment
+
+    active_assignments = await db.execute(
+        select(TeacherAssignment).where(
+            and_(
+                TeacherAssignment.teacher_id == user.id,
+                TeacherAssignment.school_id == school_id,
+                TeacherAssignment.is_active.is_(True),
+            )
+        )
+    )
+    for assignment in active_assignments.scalars().all():
+        assignment.is_active = False
+        assignment.end_date = date.today()
+
+    form_master_groups = await db.execute(
+        select(ClassGroup).where(
+            and_(
+                ClassGroup.school_id == school_id,
+                ClassGroup.class_teacher_id == user.id,
+            )
+        )
+    )
+    for class_group in form_master_groups.scalars().all():
+        class_group.class_teacher_id = None
 
     await db.commit()
     await db.refresh(user)
