@@ -26,19 +26,13 @@ celery_app.conf.update(
     task_track_started=True,
     broker_transport_options={"visibility_timeout": 3600},
     task_routes={
-        "app.modules.identity.tasks.process_staff_bulk_import": {
-            "queue": "bulk_imports"
-        },
-        "app.modules.identity.tasks.send_staff_invitation_email": {
-            "queue": "notifications"
-        },
+        "app.modules.identity.tasks.process_staff_bulk_import": {"queue": "bulk_imports"},
+        "app.modules.identity.tasks.send_staff_invitation_email": {"queue": "notifications"},
     },
 )
 
 _ssl_options = {"ssl_cert_reqs": settings.REDIS_SSL_CERT_REQS}
 if broker_url.startswith("rediss://"):
     celery_app.conf.broker_use_ssl = _ssl_options
-if settings.CELERY_RESULT_BACKEND and settings.CELERY_RESULT_BACKEND.startswith(
-    "rediss://"
-):
+if settings.CELERY_RESULT_BACKEND and settings.CELERY_RESULT_BACKEND.startswith("rediss://"):
     celery_app.conf.redis_backend_use_ssl = _ssl_options

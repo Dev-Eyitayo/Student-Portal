@@ -1,6 +1,7 @@
 from datetime import date, datetime
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Optional
 from uuid import UUID
+
 from sqlalchemy import (
     Boolean,
     Date,
@@ -12,6 +13,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from app.modules.common.models import Base, TenantMixin, TimestampMixin, generate_uuid7
 
 if TYPE_CHECKING:
@@ -37,11 +39,9 @@ class Subject(Base, TenantMixin):
         DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False
     )
 
-    __table_args__ = (
-        UniqueConstraint("school_id", "code", name="uq_school_subject_code"),
-    )
+    __table_args__ = (UniqueConstraint("school_id", "code", name="uq_school_subject_code"),)
 
-    offerings: Mapped[List["SubjectOffering"]] = relationship(
+    offerings: Mapped[list["SubjectOffering"]] = relationship(
         "SubjectOffering", back_populates="subject", cascade="all, delete-orphan"
     )
 
@@ -59,7 +59,7 @@ class SubjectOffering(Base, TenantMixin):
     academic_level_id: Mapped[UUID] = mapped_column(
         ForeignKey("academic_levels.id", ondelete="RESTRICT"), nullable=False
     )
-    department_id: Mapped[Optional[UUID]] = mapped_column(
+    department_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("departments.id", ondelete="RESTRICT"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -68,8 +68,11 @@ class SubjectOffering(Base, TenantMixin):
 
     __table_args__ = (
         UniqueConstraint(
-            "subject_id", "academic_session_id", "academic_level_id", "department_id",
-            name="uq_offering_unique"
+            "subject_id",
+            "academic_session_id",
+            "academic_level_id",
+            "department_id",
+            name="uq_offering_unique",
         ),
     )
 
@@ -77,7 +80,7 @@ class SubjectOffering(Base, TenantMixin):
     academic_session: Mapped["AcademicSession"] = relationship("AcademicSession")
     academic_level: Mapped["AcademicLevel"] = relationship("AcademicLevel")
     department: Mapped[Optional["Department"]] = relationship("Department")
-    class_subjects: Mapped[List["ClassSubject"]] = relationship(
+    class_subjects: Mapped[list["ClassSubject"]] = relationship(
         "ClassSubject", back_populates="subject_offering", cascade="all, delete-orphan"
     )
 
@@ -100,12 +103,14 @@ class ClassSubject(Base, TenantMixin):
         UniqueConstraint("subject_offering_id", "class_group_id", name="uq_class_subject"),
     )
 
-    subject_offering: Mapped["SubjectOffering"] = relationship("SubjectOffering", back_populates="class_subjects")
+    subject_offering: Mapped["SubjectOffering"] = relationship(
+        "SubjectOffering", back_populates="class_subjects"
+    )
     class_group: Mapped["ClassGroup"] = relationship("ClassGroup")
-    teacher_assignments: Mapped[List["TeacherAssignment"]] = relationship(
+    teacher_assignments: Mapped[list["TeacherAssignment"]] = relationship(
         "TeacherAssignment", back_populates="class_subject", cascade="all, delete-orphan"
     )
-    student_registrations: Mapped[List["StudentSubjectRegistration"]] = relationship(
+    student_registrations: Mapped[list["StudentSubjectRegistration"]] = relationship(
         "StudentSubjectRegistration", back_populates="class_subject", cascade="all, delete-orphan"
     )
 
@@ -129,13 +134,19 @@ class StudentSubjectRegistration(Base, TenantMixin):
     )
 
     __table_args__ = (
-        UniqueConstraint("student_enrollment_id", "class_subject_id", name="uq_student_subject_registration"),
+        UniqueConstraint(
+            "student_enrollment_id", "class_subject_id", name="uq_student_subject_registration"
+        ),
         Index("idx_student_subject_reg", "class_subject_id", "is_active"),
         Index("idx_student_subject_enrollment", "student_enrollment_id", "is_active"),
     )
 
-    student_enrollment: Mapped["StudentEnrollment"] = relationship("StudentEnrollment", back_populates="subject_registrations")
-    class_subject: Mapped["ClassSubject"] = relationship("ClassSubject", back_populates="student_registrations")
+    student_enrollment: Mapped["StudentEnrollment"] = relationship(
+        "StudentEnrollment", back_populates="subject_registrations"
+    )
+    class_subject: Mapped["ClassSubject"] = relationship(
+        "ClassSubject", back_populates="student_registrations"
+    )
 
 
 class TeacherAssignment(Base, TenantMixin, TimestampMixin):
@@ -152,14 +163,20 @@ class TeacherAssignment(Base, TenantMixin, TimestampMixin):
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    start_date: Mapped[date] = mapped_column(Date, server_default=text("CURRENT_DATE"), nullable=False)
-    end_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    start_date: Mapped[date] = mapped_column(
+        Date, server_default=text("CURRENT_DATE"), nullable=False
+    )
+    end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("class_subject_id", "teacher_id", "is_active", name="uq_active_teacher_class_subject"),
+        UniqueConstraint(
+            "class_subject_id", "teacher_id", "is_active", name="uq_active_teacher_class_subject"
+        ),
         Index("idx_teacher_assignments_lookup", "teacher_id", "is_active"),
     )
 
     teacher: Mapped["User"] = relationship("User", foreign_keys=[teacher_id])
     assigned_by: Mapped["User"] = relationship("User", foreign_keys=[assigned_by_id])
-    class_subject: Mapped["ClassSubject"] = relationship("ClassSubject", back_populates="teacher_assignments")
+    class_subject: Mapped["ClassSubject"] = relationship(
+        "ClassSubject", back_populates="teacher_assignments"
+    )

@@ -1,15 +1,16 @@
 import logging
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
-from fastapi import FastAPI, status
+
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+
+import app.models  # noqa: F401  # register every SQLAlchemy model/mapper at startup
 from app.core.config import get_settings
 from app.core.database import async_session_factory
 from app.core.exceptions import DomainException, domain_exception_handler
 from app.core.redis import close_redis, init_redis
 from app.core.rls import verify_rls_enforcement
-import app.models  # noqa: F401  # register every SQLAlchemy model/mapper at startup
 from app.modules.identity.router import router as identity_router
 from app.modules.identity.seed import seed_system_permissions
 
@@ -74,17 +75,14 @@ def create_app() -> FastAPI:
                 "status": "healthy",
                 "app": settings.APP_NAME,
                 "environment": settings.ENVIRONMENT,
-            }
+            },
         }
 
     @app.get("/", tags=["System"])
     async def root():
         return {
             "success": True,
-            "data": {
-                "message": f"Welcome to {settings.APP_NAME} API",
-                "docs": "/docs"
-            }
+            "data": {"message": f"Welcome to {settings.APP_NAME} API", "docs": "/docs"},
         }
 
     return app

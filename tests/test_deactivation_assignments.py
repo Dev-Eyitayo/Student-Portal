@@ -1,5 +1,5 @@
-from datetime import date
 import uuid
+from datetime import date
 from uuid import UUID
 
 import pytest
@@ -52,9 +52,7 @@ async def test_deactivation_revokes_assignments_and_form_master_role():
             "admin_last_name": "Olufemi",
             "admin_password": "SuperAdminSecurePassword123!",
         }
-        school_response = await client.post(
-            "/api/v1/identity/schools", json=school_payload
-        )
+        school_response = await client.post("/api/v1/identity/schools", json=school_payload)
         assert school_response.status_code == 201, school_response.text
         school_id = school_response.json()["id"]
         school_uuid = UUID(school_id)
@@ -67,12 +65,8 @@ async def test_deactivation_revokes_assignments_and_form_master_role():
             },
         )
         assert admin_login.status_code == 200
-        admin_headers = {
-            "Authorization": f"Bearer {admin_login.json()['access_token']}"
-        }
-        admin_me = await client.get(
-            "/api/v1/identity/me", headers=admin_headers
-        )
+        admin_headers = {"Authorization": f"Bearer {admin_login.json()['access_token']}"}
+        admin_me = await client.get("/api/v1/identity/me", headers=admin_headers)
         admin_user_id = UUID(admin_me.json()["id"])
 
         invite = await client.post(
@@ -96,12 +90,8 @@ async def test_deactivation_revokes_assignments_and_form_master_role():
             },
         )
         assert accept.status_code == 200
-        teacher_headers = {
-            "Authorization": f"Bearer {accept.json()['access_token']}"
-        }
-        teacher_me = await client.get(
-            "/api/v1/identity/me", headers=teacher_headers
-        )
+        teacher_headers = {"Authorization": f"Bearer {accept.json()['access_token']}"}
+        teacher_me = await client.get("/api/v1/identity/me", headers=teacher_headers)
         teacher_user_id = UUID(teacher_me.json()["id"])
 
         tokens = set_tenant_scope(school_uuid)
@@ -181,9 +171,7 @@ async def test_deactivation_revokes_assignments_and_form_master_role():
         tokens = set_tenant_scope(school_uuid)
         try:
             async with async_session_factory() as session:
-                assignment = await session.get(
-                    TeacherAssignment, assignment_id
-                )
+                assignment = await session.get(TeacherAssignment, assignment_id)
                 class_group = await session.get(ClassGroup, class_group_id)
                 assert assignment is not None
                 assert assignment.is_active is False
@@ -192,9 +180,7 @@ async def test_deactivation_revokes_assignments_and_form_master_role():
                 assert class_group.class_teacher_id is None
 
                 user = (
-                    await session.execute(
-                        select(User).where(User.id == teacher_user_id)
-                    )
+                    await session.execute(select(User).where(User.id == teacher_user_id))
                 ).scalar_one()
                 assert user.is_active is False
         finally:

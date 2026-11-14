@@ -1,4 +1,5 @@
 import pytest
+
 from app.core.security import (
     create_access_token,
     decode_access_token,
@@ -16,7 +17,11 @@ def test_password_hashing():
 
 
 def test_jwt_token_flow():
-    payload = {"sub": "018f2195-2c8b-7000-8542-0123456789ab", "role": "TEACHER", "school_id": "018f2195-2c8b-7000-8542-abcdefabcdef"}
+    payload = {
+        "sub": "018f2195-2c8b-7000-8542-0123456789ab",
+        "role": "TEACHER",
+        "school_id": "018f2195-2c8b-7000-8542-abcdefabcdef",
+    }
     token = create_access_token(payload)
     assert isinstance(token, str)
 

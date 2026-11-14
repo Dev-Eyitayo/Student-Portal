@@ -1,8 +1,8 @@
 import base64
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
 from uuid import UUID
+
 from celery.result import AsyncResult
 from fastapi import (
     APIRouter,
@@ -10,7 +10,6 @@ from fastapi import (
     Cookie,
     Depends,
     File,
-    Header,
     HTTPException,
     Query,
     Response,
@@ -31,13 +30,9 @@ from app.core.permissions import require_permission
 from app.core.redis import get_redis
 from app.core.security import decode_access_token, revoke_access_token
 from app.modules.common.models import generate_uuid7
+from app.modules.identity import services
 from app.modules.identity.bulk_import import MAX_STAFF_IMPORT_BYTES
 from app.modules.identity.models import User
-from app.modules.identity.tasks import (
-    STAGING_KEY,
-    STAGING_TTL_SECONDS,
-    process_staff_bulk_import,
-)
 from app.modules.identity.schemas import (
     AcceptInvitationRequest,
     DeactivateUserResponse,
@@ -56,7 +51,11 @@ from app.modules.identity.schemas import (
     TokenResponse,
     UserPermissionGrantResponse,
 )
-from app.modules.identity import services
+from app.modules.identity.tasks import (
+    STAGING_KEY,
+    STAGING_TTL_SECONDS,
+    process_staff_bulk_import,
+)
 
 router = APIRouter(prefix="/identity", tags=["Identity & Access Management"])
 
@@ -80,11 +79,10 @@ def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
     )
 
 
-def _remaining_ttl(exp: Optional[float], fallback_seconds: int) -> int:
+def _remaining_ttl(exp: float | None, fallback_seconds: int) -> int:
     if exp is None:
         return fallback_seconds
     return max(1, int(exp - time.time()))
-
 
 
 @router.post("/schools", response_model=SchoolResponse, status_code=status.HTTP_201_CREATED)
@@ -133,8 +131,8 @@ async def refresh_token(
 @router.post("/logout", status_code=status.HTTP_200_OK)
 async def logout(
     response: Response,
-    req: Optional[LogoutRequest] = Body(default=None),
-    refresh_cookie: Optional[str] = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
+    req: LogoutRequest | None = Body(default=None),
+    refresh_cookie: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
     token: str = Depends(oauth2_scheme),
     current_user: User = Depends(get_current_authenticated_user),
 ):
@@ -165,7 +163,8 @@ async def logout(
                 await revoke_access_token(
                     refresh_jti,
                     expires_in_seconds=_remaining_ttl(
-                        refresh_payload.get("exp"), settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+                        refresh_payload.get("exp"),
+                        settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
                     ),
                 )
         except Exception:
@@ -291,9 +290,7 @@ async def bulk_import_staff(
         )
 
     job_id = str(generate_uuid7())
-    staging_key = STAGING_KEY.format(
-        school_id=current_user.school_id, job_id=job_id
-    )
+    staging_key = STAGING_KEY.format(school_id=current_user.school_id, job_id=job_id)
 
     try:
         client = get_redis()
@@ -305,11 +302,8 @@ async def bulk_import_staff(
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "We couldn't queue the staff import right now. Please try again "
-                "in a moment."
-            ),
-        )
+            detail=("We couldn't queue the staff import right now. Please try again in a moment."),
+        ) from None
 
     try:
         process_staff_bulk_import.apply_async(
@@ -329,11 +323,8 @@ async def bulk_import_staff(
             pass
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "We couldn't start the staff import right now. Please try again "
-                "in a moment."
-            ),
-        )
+            detail=("We couldn't start the staff import right now. Please try again in a moment."),
+        ) from None
 
     return StaffBulkImportAcceptedResponse(
         task_id=job_id,
@@ -361,7 +352,7 @@ async def get_bulk_import_status(
 
     async_result = AsyncResult(task_id, app=celery_app)
     state = async_result.state
-    result: Optional[Dict[str, object]] = None
+    result: dict[str, object] | None = None
 
     if async_result.successful():
         raw_result = async_result.result
@@ -371,11 +362,7 @@ async def get_bulk_import_status(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="This staff import task could not be found.",
                 )
-            result = {
-                key: value
-                for key, value in raw_result.items()
-                if key != "school_id"
-            }
+            result = {key: value for key, value in raw_result.items() if key != "school_id"}
         else:
             result = {"status": "completed"}
     elif state == "FAILURE":

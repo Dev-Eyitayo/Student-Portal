@@ -14,10 +14,7 @@ async def verify_rls_enforcement(session: AsyncSession) -> None:
     with a dedicated non-superuser, non-BYPASSRLS role.
     """
     result = await session.execute(
-        text(
-            "SELECT rolsuper, rolbypassrls "
-            "FROM pg_roles WHERE rolname = current_user"
-        )
+        text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
     )
     row = result.one_or_none()
     if row is None:

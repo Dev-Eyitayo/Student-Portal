@@ -1,7 +1,7 @@
 import asyncio
 import base64
 import logging
-from typing import Any, Dict
+from typing import Any
 from uuid import UUID
 
 from app.core.celery_app import celery_app
@@ -21,7 +21,7 @@ STAGING_KEY = "bulk_import:staff:{school_id}:{job_id}"
 STAGING_TTL_SECONDS = 60 * 60
 
 
-def _result(school_id: str, status: str, **payload: Any) -> Dict[str, Any]:
+def _result(school_id: str, status: str, **payload: Any) -> dict[str, Any]:
     return {"status": status, "school_id": school_id, **payload}
 
 
@@ -35,7 +35,7 @@ def send_staff_invitation_email(
     first_name: str,
     school_name: str,
     invitation_token: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     logger.info(
         "Staff invitation email ready for delivery to %s (%s) at %s",
         email,
@@ -55,10 +55,8 @@ def process_staff_bulk_import(
     school_id: str,
     granter_id: str,
     filename: str,
-) -> Dict[str, Any]:
-    return asyncio.run(
-        _process_staff_bulk_import(job_id, school_id, granter_id, filename)
-    )
+) -> dict[str, Any]:
+    return asyncio.run(_process_staff_bulk_import(job_id, school_id, granter_id, filename))
 
 
 async def _process_staff_bulk_import(
@@ -66,11 +64,9 @@ async def _process_staff_bulk_import(
     school_id: str,
     granter_id: str,
     filename: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     try:
-        return await _process_staff_bulk_import_inner(
-            job_id, school_id, granter_id, filename
-        )
+        return await _process_staff_bulk_import_inner(job_id, school_id, granter_id, filename)
     finally:
         await close_redis()
         await async_engine.dispose()
@@ -81,7 +77,7 @@ async def _process_staff_bulk_import_inner(
     school_id: str,
     granter_id: str,
     filename: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     key = STAGING_KEY.format(school_id=school_id, job_id=job_id)
 
     try:
@@ -135,8 +131,7 @@ async def _process_staff_bulk_import_inner(
                 {
                     "row": 0,
                     "message": (
-                        "The uploaded staff file could not be decoded. Please upload "
-                        "it again."
+                        "The uploaded staff file could not be decoded. Please upload it again."
                     ),
                 }
             ],
@@ -171,9 +166,7 @@ async def _process_staff_bulk_import_inner(
             errors=provisioned.errors,
         )
 
-    first_names = {
-        row.data.email.lower(): row.data.first_name for row in parsed.rows
-    }
+    first_names = {row.data.email.lower(): row.data.first_name for row in parsed.rows}
     invitations_queued = 0
     email_errors = 0
     for invitation in provisioned.invitations:

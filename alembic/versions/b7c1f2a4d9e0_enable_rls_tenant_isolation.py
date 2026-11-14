@@ -17,6 +17,7 @@ Platform/auth-lookup tables (``schools``, ``users``, ``school_configurations``,
 intentionally excluded because they must be readable before a tenant context
 is known (login, invitation verification, school onboarding).
 """
+
 from alembic import op
 
 revision = "b7c1f2a4d9e0"
@@ -64,8 +65,7 @@ def upgrade() -> None:
         op.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
         op.execute(f"DROP POLICY IF EXISTS {policy_name} ON {table}")
         op.execute(
-            f"CREATE POLICY {policy_name} ON {table} "
-            f"FOR ALL USING ({policy}) WITH CHECK ({policy})"
+            f"CREATE POLICY {policy_name} ON {table} FOR ALL USING ({policy}) WITH CHECK ({policy})"
         )
 
 

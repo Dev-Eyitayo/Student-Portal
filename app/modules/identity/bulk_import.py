@@ -5,7 +5,7 @@ import io
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from openpyxl import load_workbook
 from pydantic import BaseModel, EmailStr, Field, ValidationError, field_validator
@@ -33,10 +33,10 @@ class StaffBulkImportRow(BaseModel):
     email: EmailStr
     first_name: str = Field(..., min_length=1, max_length=64)
     last_name: str = Field(..., min_length=1, max_length=64)
-    phone_number: Optional[str] = Field(None, max_length=32)
+    phone_number: str | None = Field(None, max_length=32)
     role: str = "TEACHER"
     staff_id_number: str = Field(..., min_length=1, max_length=64)
-    specialization: Optional[str] = Field(None, max_length=128)
+    specialization: str | None = Field(None, max_length=128)
 
     @field_validator("email", mode="before")
     @classmethod
@@ -54,7 +54,7 @@ class StaffBulkImportRow(BaseModel):
 
     @field_validator("phone_number", "specialization", mode="before")
     @classmethod
-    def blank_optional_text(cls, value: Any) -> Optional[str]:
+    def blank_optional_text(cls, value: Any) -> str | None:
         if value is None:
             return None
         text = str(value).strip()
@@ -65,9 +65,7 @@ class StaffBulkImportRow(BaseModel):
     def normalize_role(cls, value: Any) -> str:
         role = str(value or "TEACHER").strip().upper()
         if role not in ALLOWED_STAFF_ROLES:
-            raise ValueError(
-                "Role must be one of TEACHER, ACADEMIC_OFFICER, or SCHOOL_ADMIN."
-            )
+            raise ValueError("Role must be one of TEACHER, ACADEMIC_OFFICER, or SCHOOL_ADMIN.")
         return role
 
 
@@ -79,8 +77,8 @@ class ParsedStaffRow:
 
 @dataclass
 class ParsedStaffImport:
-    rows: List[ParsedStaffRow] = field(default_factory=list)
-    errors: List[Dict[str, Any]] = field(default_factory=list)
+    rows: list[ParsedStaffRow] = field(default_factory=list)
+    errors: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def is_valid(self) -> bool:
@@ -94,9 +92,7 @@ def _canonicalize_header(value: Any) -> str:
     return HEADER_ALIASES.get(normalized, normalized)
 
 
-def _row_mapping(
-    headers: List[str], values: Tuple[Any, ...]
-) -> Dict[str, Any]:
+def _row_mapping(headers: list[str], values: tuple[Any, ...]) -> dict[str, Any]:
     return {
         headers[index]: values[index]
         for index in range(min(len(headers), len(values)))
@@ -104,13 +100,11 @@ def _row_mapping(
     }
 
 
-def _is_blank_row(values: Tuple[Any, ...]) -> bool:
-    return not values or all(
-        value is None or str(value).strip() == "" for value in values
-    )
+def _is_blank_row(values: tuple[Any, ...]) -> bool:
+    return not values or all(value is None or str(value).strip() == "" for value in values)
 
 
-def _read_csv_table(data: bytes) -> Tuple[List[str], List[Tuple[int, Dict[str, Any]]]]:
+def _read_csv_table(data: bytes) -> tuple[list[str], list[tuple[int, dict[str, Any]]]]:
     text = data.decode("utf-8-sig")
     reader = csv.reader(io.StringIO(text))
     try:
@@ -121,7 +115,7 @@ def _read_csv_table(data: bytes) -> Tuple[List[str], List[Tuple[int, Dict[str, A
     headers = [_canonicalize_header(header) for header in raw_headers]
     _reject_duplicate_headers(headers)
 
-    rows: List[Tuple[int, Dict[str, Any]]] = []
+    rows: list[tuple[int, dict[str, Any]]] = []
     for row_number, values in enumerate(reader, start=2):
         if _is_blank_row(tuple(values)):
             continue
@@ -129,7 +123,7 @@ def _read_csv_table(data: bytes) -> Tuple[List[str], List[Tuple[int, Dict[str, A
     return headers, rows
 
 
-def _read_xlsx_table(data: bytes) -> Tuple[List[str], List[Tuple[int, Dict[str, Any]]]]:
+def _read_xlsx_table(data: bytes) -> tuple[list[str], list[tuple[int, dict[str, Any]]]]:
     workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     try:
         worksheet = workbook.active
@@ -141,7 +135,7 @@ def _read_xlsx_table(data: bytes) -> Tuple[List[str], List[Tuple[int, Dict[str, 
         headers = [_canonicalize_header(header) for header in raw_headers]
         _reject_duplicate_headers(headers)
 
-        rows: List[Tuple[int, Dict[str, Any]]] = []
+        rows: list[tuple[int, dict[str, Any]]] = []
         for row_number, values in enumerate(iterator, start=2):
             if _is_blank_row(values):
                 continue
@@ -151,28 +145,22 @@ def _read_xlsx_table(data: bytes) -> Tuple[List[str], List[Tuple[int, Dict[str, 
         workbook.close()
 
 
-def _reject_duplicate_headers(headers: List[str]) -> None:
+def _reject_duplicate_headers(headers: list[str]) -> None:
     populated = [header for header in headers if header]
     if len(populated) != len(set(populated)):
         raise ValueError("duplicate_headers")
 
 
 def _friendly_validation_message(exc: ValidationError) -> str:
-    messages: List[str] = []
+    messages: list[str] = []
     for error in exc.errors():
-        location = ".".join(
-            str(part) for part in error.get("loc", ()) if part != "__root__"
-        )
+        location = ".".join(str(part) for part in error.get("loc", ()) if part != "__root__")
         if location == "email":
             messages.append("Please enter a valid email address.")
         elif location in ("first_name", "last_name"):
-            messages.append(
-                f"Please enter a valid {location.replace('_', ' ')}."
-            )
+            messages.append(f"Please enter a valid {location.replace('_', ' ')}.")
         elif location == "role":
-            messages.append(
-                "Role must be one of TEACHER, ACADEMIC_OFFICER, or SCHOOL_ADMIN."
-            )
+            messages.append("Role must be one of TEACHER, ACADEMIC_OFFICER, or SCHOOL_ADMIN.")
         elif location:
             messages.append(
                 f"{location.replace('_', ' ').capitalize()}: {error.get('msg', 'invalid value')}."
@@ -211,9 +199,7 @@ def parse_staff_import_file(filename: str, data: bytes) -> ParsedStaffImport:
         return result
 
     try:
-        headers, records = (
-            _read_csv_table(data) if suffix == ".csv" else _read_xlsx_table(data)
-        )
+        headers, records = _read_csv_table(data) if suffix == ".csv" else _read_xlsx_table(data)
     except ValueError as exc:
         reason = str(exc)
         if reason == "empty":
@@ -257,9 +243,7 @@ def parse_staff_import_file(filename: str, data: bytes) -> ParsedStaffImport:
         return result
 
     if not records:
-        result.errors.append(
-            {"row": 1, "message": "The file does not contain any staff rows."}
-        )
+        result.errors.append({"row": 1, "message": "The file does not contain any staff rows."})
         return result
 
     for row_number, record in records:

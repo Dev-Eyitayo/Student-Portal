@@ -1,6 +1,7 @@
 from datetime import date, datetime
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Optional
 from uuid import UUID
+
 from sqlalchemy import (
     CheckConstraint,
     Date,
@@ -9,9 +10,9 @@ from sqlalchemy import (
     Index,
     String,
     UniqueConstraint,
-    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from app.modules.common.models import Base, TenantMixin, TimestampMixin, generate_uuid7
 
 if TYPE_CHECKING:
@@ -25,7 +26,7 @@ class Student(Base, TenantMixin, TimestampMixin):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
     admission_number: Mapped[str] = mapped_column(String(64), nullable=False)
     first_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    middle_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    middle_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_name: Mapped[str] = mapped_column(String(64), nullable=False)
     date_of_birth: Mapped[date] = mapped_column(Date, nullable=False)
     gender: Mapped[str] = mapped_column(String(1), nullable=False)  # 'M' or 'F'
@@ -36,9 +37,7 @@ class Student(Base, TenantMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(
         String(32), default="ACTIVE", nullable=False
     )  # ACTIVE, TRANSFERRED, GRADUATED, WITHDRAWN, SUSPENDED
-    deleted_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("school_id", "admission_number", name="uq_school_admission_number"),
@@ -46,7 +45,7 @@ class Student(Base, TenantMixin, TimestampMixin):
         Index("idx_students_search", "school_id", "last_name", "first_name"),
     )
 
-    enrollments: Mapped[List["StudentEnrollment"]] = relationship(
+    enrollments: Mapped[list["StudentEnrollment"]] = relationship(
         "StudentEnrollment", back_populates="student", cascade="all, delete-orphan"
     )
 
@@ -67,7 +66,7 @@ class StudentEnrollment(Base, TenantMixin, TimestampMixin):
     enrollment_status: Mapped[str] = mapped_column(
         String(32), default="ENROLLED", nullable=False
     )  # ENROLLED, PROMOTED, REPEATING, TRANSFERRED, WITHDRAWN
-    promoted_to_class_group_id: Mapped[Optional[UUID]] = mapped_column(
+    promoted_to_class_group_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("class_groups.id", ondelete="SET NULL"), nullable=True
     )
 
@@ -82,6 +81,8 @@ class StudentEnrollment(Base, TenantMixin, TimestampMixin):
     promoted_to_class_group: Mapped[Optional["ClassGroup"]] = relationship(
         "ClassGroup", foreign_keys=[promoted_to_class_group_id]
     )
-    subject_registrations: Mapped[List["StudentSubjectRegistration"]] = relationship(
-        "StudentSubjectRegistration", back_populates="student_enrollment", cascade="all, delete-orphan"
+    subject_registrations: Mapped[list["StudentSubjectRegistration"]] = relationship(
+        "StudentSubjectRegistration",
+        back_populates="student_enrollment",
+        cascade="all, delete-orphan",
     )

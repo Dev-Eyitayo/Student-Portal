@@ -1,6 +1,7 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 from uuid import UUID
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 
@@ -21,7 +22,7 @@ class RefreshTokenRequest(BaseModel):
 
 
 class LogoutRequest(BaseModel):
-    refresh_token: Optional[str] = None
+    refresh_token: str | None = None
 
 
 class StaffProfileResponse(BaseModel):
@@ -30,50 +31,50 @@ class StaffProfileResponse(BaseModel):
     id: UUID
     staff_id_number: str
     employment_status: str
-    specialization: Optional[str] = None
-    signature_image_url: Optional[str] = None
+    specialization: str | None = None
+    signature_image_url: str | None = None
 
 
 class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    school_id: Optional[UUID] = None
+    school_id: UUID | None = None
     email: EmailStr
     first_name: str
     last_name: str
-    phone_number: Optional[str] = None
+    phone_number: str | None = None
     role: str
     is_active: bool
     is_mfa_enabled: bool
-    staff_profile: Optional[StaffProfileResponse] = None
+    staff_profile: StaffProfileResponse | None = None
 
 
 class MeResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    school_id: Optional[UUID] = None
-    school_name: Optional[str] = None
+    school_id: UUID | None = None
+    school_name: str | None = None
     email: EmailStr
     first_name: str
     last_name: str
-    phone_number: Optional[str] = None
+    phone_number: str | None = None
     role: str
     is_active: bool
     is_mfa_enabled: bool
-    staff_profile: Optional[StaffProfileResponse] = None
-    permissions: List[str] = Field(default_factory=list)
+    staff_profile: StaffProfileResponse | None = None
+    permissions: list[str] = Field(default_factory=list)
 
 
 class StaffInviteRequest(BaseModel):
     email: EmailStr
     first_name: str = Field(..., min_length=1, max_length=64)
     last_name: str = Field(..., min_length=1, max_length=64)
-    phone_number: Optional[str] = Field(None, max_length=32)
+    phone_number: str | None = Field(None, max_length=32)
     role: str = Field("TEACHER", description="Role: TEACHER, ACADEMIC_OFFICER, SCHOOL_ADMIN")
     staff_id_number: str = Field(..., min_length=1, max_length=64)
-    specialization: Optional[str] = Field(None, max_length=128)
+    specialization: str | None = Field(None, max_length=128)
 
 
 class StaffInviteResponse(BaseModel):
@@ -106,10 +107,12 @@ class AcceptInvitationRequest(BaseModel):
 
 class PermissionGrantRequest(BaseModel):
     permission_code: str
-    scope_type: str = Field("SCHOOL_WIDE", description="SCHOOL_WIDE, DEPARTMENT, ACADEMIC_LEVEL, CLASS_GROUP")
-    department_id: Optional[UUID] = None
-    academic_level_id: Optional[UUID] = None
-    class_group_id: Optional[UUID] = None
+    scope_type: str = Field(
+        "SCHOOL_WIDE", description="SCHOOL_WIDE, DEPARTMENT, ACADEMIC_LEVEL, CLASS_GROUP"
+    )
+    department_id: UUID | None = None
+    academic_level_id: UUID | None = None
+    class_group_id: UUID | None = None
 
 
 class PermissionResponse(BaseModel):
@@ -118,7 +121,7 @@ class PermissionResponse(BaseModel):
     code: str
     name: str
     category: str
-    description: Optional[str] = None
+    description: str | None = None
 
 
 class UserPermissionGrantResponse(BaseModel):
@@ -126,11 +129,11 @@ class UserPermissionGrantResponse(BaseModel):
 
     id: UUID
     permission_id: UUID
-    permission_code: Optional[str] = None
+    permission_code: str | None = None
     scope_type: str
-    department_id: Optional[UUID] = None
-    academic_level_id: Optional[UUID] = None
-    class_group_id: Optional[UUID] = None
+    department_id: UUID | None = None
+    academic_level_id: UUID | None = None
+    class_group_id: UUID | None = None
     created_at: datetime
 
 
@@ -177,4 +180,4 @@ class StaffBulkImportAcceptedResponse(BaseModel):
 class StaffBulkImportStatusResponse(BaseModel):
     task_id: str
     state: str
-    result: Optional[Dict[str, Any]] = None
+    result: dict[str, Any] | None = None

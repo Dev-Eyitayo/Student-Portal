@@ -1,4 +1,5 @@
 from uuid import UUID
+
 from app.modules.common.models import generate_uuid7
 
 

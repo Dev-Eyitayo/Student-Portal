@@ -1,10 +1,11 @@
-from datetime import date, datetime, timezone, timedelta
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-from uuid import UUID
 import secrets
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
+from uuid import UUID
+
 from fastapi import HTTPException, status
-from sqlalchemy import select, and_
+from sqlalchemy import and_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -20,11 +21,11 @@ from app.core.security import (
 )
 from app.modules.identity.bulk_import import ParsedStaffRow, StaffBulkImportRow
 from app.modules.identity.models import (
+    Permission,
     School,
     SchoolConfiguration,
-    User,
     StaffProfile,
-    Permission,
+    User,
     UserPermissionGrant,
 )
 from app.modules.identity.schemas import (
@@ -36,7 +37,6 @@ from app.modules.identity.schemas import (
     StaffVerifyInviteResponse,
     TokenResponse,
 )
-
 
 DEFAULT_ASSESSMENT_WEIGHTS = {
     "CA1": {"name": "Continuous Assessment 1", "max_score": 20, "weight_percentage": 20},
@@ -67,12 +67,12 @@ DEFAULT_TERM_DEFINITIONS = [
 class StaffBulkProvisionResult:
     school_name: str
     created: int
-    invitations: List[StaffInviteResponse]
-    errors: List[Dict[str, Any]]
+    invitations: list[StaffInviteResponse]
+    errors: list[dict[str, Any]]
 
 
 def _build_staff_invitation(user: User, school_id: UUID) -> StaffInviteResponse:
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=72)
+    expires_at = datetime.now(UTC) + timedelta(hours=72)
     invitation_token = create_access_token(
         subject=str(user.id),
         school_id=school_id,
@@ -115,7 +115,7 @@ async def authenticate_user(db: AsyncSession, email: str, password: str) -> User
             detail="Your account is currently inactive. Please reach out to your school administrator for assistance.",
         )
 
-    user.last_login_at = datetime.now(timezone.utc)
+    user.last_login_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(user)
     return user
@@ -152,7 +152,7 @@ async def refresh_user_tokens(db: AsyncSession, refresh_token: str) -> TokenResp
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Your session has expired. Please sign in again.",
-        )
+        ) from None
 
     if payload.get("type") != "refresh":
         raise HTTPException(
@@ -194,7 +194,7 @@ async def refresh_user_tokens(db: AsyncSession, refresh_token: str) -> TokenResp
     # database timestamp must be truncated to the same precision before
     # comparing; otherwise a token issued in the same second as an account
     # change is incorrectly rejected.
-    token_iat = datetime.fromtimestamp(payload.get("iat", 0), tz=timezone.utc)
+    token_iat = datetime.fromtimestamp(payload.get("iat", 0), tz=UTC)
     if user.token_valid_after.replace(microsecond=0) > token_iat:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -206,7 +206,7 @@ async def refresh_user_tokens(db: AsyncSession, refresh_token: str) -> TokenResp
 
 async def register_school_with_admin(
     db: AsyncSession, req: SchoolCreateRequest
-) -> Tuple[School, User]:
+) -> tuple[School, User]:
     # Check uniqueness of slug and official code
     slug_check = await db.execute(select(School).where(School.slug == req.slug.lower().strip()))
     if slug_check.scalar_one_or_none():
@@ -289,9 +289,7 @@ async def invite_staff_member(
         )
 
     # Check email uniqueness
-    existing_user = await db.execute(
-        select(User).where(User.email == req.email.lower().strip())
-    )
+    existing_user = await db.execute(select(User).where(User.email == req.email.lower().strip()))
     if existing_user.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -346,7 +344,7 @@ async def provision_staff_batch(
     db: AsyncSession,
     school_id: UUID,
     granter_id: UUID,
-    rows: List[ParsedStaffRow],
+    rows: list[ParsedStaffRow],
 ) -> StaffBulkProvisionResult:
     """Validates and provisions a staff roster atomically.
 
@@ -371,10 +369,10 @@ async def provision_staff_batch(
             ],
         )
 
-    errors: List[Dict[str, Any]] = []
-    seen_emails: Dict[str, int] = {}
-    seen_staff_ids: Dict[str, int] = {}
-    normalized_rows: List[Tuple[int, StaffBulkImportRow, str, str]] = []
+    errors: list[dict[str, Any]] = []
+    seen_emails: dict[str, int] = {}
+    seen_staff_ids: dict[str, int] = {}
+    normalized_rows: list[tuple[int, StaffBulkImportRow, str, str]] = []
 
     for parsed in rows:
         row = parsed.data
@@ -410,11 +408,7 @@ async def provision_staff_batch(
         normalized_rows.append((parsed.row_number, row, email, staff_id))
 
     existing_emails = set(
-        (
-            await db.execute(select(User.email).where(User.email.in_(seen_emails)))
-        )
-        .scalars()
-        .all()
+        (await db.execute(select(User.email).where(User.email.in_(seen_emails)))).scalars().all()
     )
     existing_staff_ids = set(
         (
@@ -464,7 +458,7 @@ async def provision_staff_batch(
     # One random unusable hash is enough for the whole batch: every account
     # remains inactive until the invitee sets a real password.
     unusable_hash = hash_password(secrets.token_urlsafe(64))
-    created_users: List[Tuple[int, User, StaffBulkImportRow]] = []
+    created_users: list[tuple[int, User, StaffBulkImportRow]] = []
 
     try:
         for row_number, row, email, _ in normalized_rows:
@@ -513,9 +507,7 @@ async def provision_staff_batch(
             ],
         )
 
-    invitations = [
-        _build_staff_invitation(user, school_id) for _, user, _ in created_users
-    ]
+    invitations = [_build_staff_invitation(user, school_id) for _, user, _ in created_users]
     return StaffBulkProvisionResult(
         school_name=school.name,
         created=len(invitations),
@@ -524,14 +516,16 @@ async def provision_staff_batch(
     )
 
 
-async def verify_staff_invitation(db: AsyncSession, invitation_token: str) -> StaffVerifyInviteResponse:
+async def verify_staff_invitation(
+    db: AsyncSession, invitation_token: str
+) -> StaffVerifyInviteResponse:
     try:
         payload = decode_token(invitation_token)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This invitation link is invalid or has expired. Please ask your school administrator to send a new invitation.",
-        )
+        ) from None
 
     if payload.get("type") != "invitation":
         raise HTTPException(
@@ -579,14 +573,14 @@ async def verify_staff_invitation(db: AsyncSession, invitation_token: str) -> St
 
 async def accept_staff_invitation(
     db: AsyncSession, req: AcceptInvitationRequest
-) -> Tuple[User, TokenResponse]:
+) -> tuple[User, TokenResponse]:
     try:
         payload = decode_token(req.invitation_token)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This invitation link is invalid or has expired. Please ask your school administrator to send a new invitation.",
-        )
+        ) from None
 
     if payload.get("type") != "invitation":
         raise HTTPException(
@@ -617,7 +611,7 @@ async def accept_staff_invitation(
 
     user.password_hash = hash_password(req.password)
     user.is_active = True
-    user.token_valid_after = datetime.now(timezone.utc)
+    user.token_valid_after = datetime.now(UTC)
     if user.staff_profile:
         user.staff_profile.employment_status = "ACTIVE"
 
@@ -711,9 +705,7 @@ async def revoke_user_permission(
     await db.commit()
 
 
-async def deactivate_user(
-    db: AsyncSession, school_id: UUID, target_user_id: UUID
-) -> User:
+async def deactivate_user(db: AsyncSession, school_id: UUID, target_user_id: UUID) -> User:
     stmt = (
         select(User)
         .options(selectinload(User.staff_profile))
@@ -728,7 +720,7 @@ async def deactivate_user(
         )
 
     user.is_active = False
-    user.token_valid_after = datetime.now(timezone.utc)
+    user.token_valid_after = datetime.now(UTC)
     if user.staff_profile:
         user.staff_profile.employment_status = "INACTIVE"
 
@@ -764,7 +756,7 @@ async def deactivate_user(
     return user
 
 
-async def get_user_effective_permissions(db: AsyncSession, user: User) -> List[str]:
+async def get_user_effective_permissions(db: AsyncSession, user: User) -> list[str]:
     """Returns the set of permission codes effective for the user."""
     from app.modules.identity.models import RoleDefaultPermission
 
@@ -787,4 +779,3 @@ async def get_user_effective_permissions(db: AsyncSession, user: User) -> List[s
     grant_perms = (await db.execute(user_grants_stmt)).scalars().all()
 
     return sorted(list(set(role_perms).union(set(grant_perms))))
-

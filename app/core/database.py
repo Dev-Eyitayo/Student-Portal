@@ -1,5 +1,6 @@
+from collections.abc import AsyncGenerator
 from contextvars import ContextVar
-from typing import AsyncGenerator, Optional, Tuple
+
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -7,6 +8,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import NullPool
+
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -15,9 +17,7 @@ _prepared_statement_cache_size = settings.DB_PREPARED_STATEMENT_CACHE_SIZE
 if _prepared_statement_cache_size is None:
     # PgBouncer in transaction mode (Neon's -pooler endpoint) is safest with
     # asyncpg's statement cache disabled. Direct connections keep the cache.
-    _prepared_statement_cache_size = (
-        0 if "-pooler" in (settings.DATABASE_URL or "") else 100
-    )
+    _prepared_statement_cache_size = 0 if "-pooler" in (settings.DATABASE_URL or "") else 100
 
 _connect_args: dict = {
     "prepared_statement_cache_size": _prepared_statement_cache_size,
@@ -66,8 +66,8 @@ def _apply_tenant_context(conn) -> None:
 
 
 def set_tenant_scope(
-    school_id: Optional[object], is_super_admin: bool = False
-) -> Tuple[object, object]:
+    school_id: object | None, is_super_admin: bool = False
+) -> tuple[object, object]:
     """Set the tenant scope for subsequent transactions in the current context."""
     return (
         _tenant_school_id.set(str(school_id) if school_id else ""),
@@ -75,7 +75,7 @@ def set_tenant_scope(
     )
 
 
-def reset_tenant_scope(tokens: Tuple[object, object]) -> None:
+def reset_tenant_scope(tokens: tuple[object, object]) -> None:
     school_token, super_admin_token = tokens
     _tenant_school_id.reset(school_token)
     _tenant_is_super_admin.reset(super_admin_token)

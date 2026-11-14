@@ -37,9 +37,7 @@ async def seed_permissions_fixture():
         await seed_system_permissions(session)
 
 
-async def _create_school_and_admin(
-    client: AsyncClient, suffix: str
-) -> tuple[str, str]:
+async def _create_school_and_admin(client: AsyncClient, suffix: str) -> tuple[str, str]:
     payload = {
         "name": f"Olivet Baptist High School {suffix}",
         "slug": f"olivet-{suffix}",
@@ -131,9 +129,7 @@ async def test_staff_bulk_import_queues_and_provisions(monkeypatch):
                 dispatched["task_id"] = task_id
                 dispatched["queue"] = queue
 
-        monkeypatch.setattr(
-            identity_router, "process_staff_bulk_import", FakeTask()
-        )
+        monkeypatch.setattr(identity_router, "process_staff_bulk_import", FakeTask())
 
         queued_email_args: list = []
 
@@ -141,9 +137,7 @@ async def test_staff_bulk_import_queues_and_provisions(monkeypatch):
             def delay(self, *args, **kwargs):
                 queued_email_args.append(args)
 
-        monkeypatch.setattr(
-            identity_tasks, "send_staff_invitation_email", FakeEmailTask()
-        )
+        monkeypatch.setattr(identity_tasks, "send_staff_invitation_email", FakeEmailTask())
 
         emails = [
             f"teacher.one.{suffix}@olivet-test.edu.ng",
@@ -173,36 +167,31 @@ async def test_staff_bulk_import_queues_and_provisions(monkeypatch):
         assert result["created"] == 2
         assert result["invitations_queued"] == 2
         assert len(queued_email_args) == 2
-        assert not any(
-            key.startswith("bulk_import:staff:")
-            for key in fake_redis.values
-        )
+        assert not any(key.startswith("bulk_import:staff:") for key in fake_redis.values)
 
         async with async_session_factory() as session:
             users = (
-                await session.execute(
-                    select(User).where(User.email.in_(emails))
-                )
-            ).scalars().all()
+                (await session.execute(select(User).where(User.email.in_(emails)))).scalars().all()
+            )
             assert len(users) == 2
             assert all(user.is_active is False for user in users)
 
             profiles = (
-                await session.execute(
-                    select(StaffProfile).where(
-                        StaffProfile.user_id.in_([user.id for user in users])
+                (
+                    await session.execute(
+                        select(StaffProfile).where(
+                            StaffProfile.user_id.in_([user.id for user in users])
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             assert len(profiles) == 2
-            assert {profile.employment_status for profile in profiles} == {
-                "INVITED"
-            }
+            assert {profile.employment_status for profile in profiles} == {"INVITED"}
 
         invitation_token = queued_email_args[0][3]
-        verify = await client.get(
-            f"/api/v1/identity/staff/verify-invite?token={invitation_token}"
-        )
+        verify = await client.get(f"/api/v1/identity/staff/verify-invite?token={invitation_token}")
         assert verify.status_code == 200, verify.text
         assert verify.json()["email"] == emails[0]
 
@@ -227,9 +216,7 @@ async def test_staff_bulk_import_rejects_invalid_rows_atomically(monkeypatch):
                 dispatched["task_id"] = task_id
                 dispatched["queue"] = queue
 
-        monkeypatch.setattr(
-            identity_router, "process_staff_bulk_import", FakeTask()
-        )
+        monkeypatch.setattr(identity_router, "process_staff_bulk_import", FakeTask())
 
         valid_email = f"teacher.valid.{suffix}@olivet-test.edu.ng"
         csv_data = (
@@ -255,8 +242,6 @@ async def test_staff_bulk_import_rejects_invalid_rows_atomically(monkeypatch):
 
         async with async_session_factory() as session:
             existing = (
-                await session.execute(
-                    select(User).where(User.email == valid_email)
-                )
+                await session.execute(select(User).where(User.email == valid_email))
             ).scalar_one_or_none()
             assert existing is None

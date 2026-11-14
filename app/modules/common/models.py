@@ -1,7 +1,8 @@
-from datetime import datetime, timezone
 import os
 import time
-from uuid import UUID, uuid4
+from datetime import UTC, datetime
+from uuid import UUID
+
 from sqlalchemy import DateTime, ForeignKey, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -47,6 +48,7 @@ class Base(DeclarativeBase):
 
 class TenantMixin:
     """Enforces tenant foreign key on all tenant-scoped database tables."""
+
     school_id: Mapped[UUID] = mapped_column(
         ForeignKey("schools.id", ondelete="RESTRICT"),
         index=True,
@@ -56,6 +58,7 @@ class TenantMixin:
 
 class TimestampMixin:
     """Standard audit timestamps with soft-delete support."""
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=text("clock_timestamp()"),
@@ -64,7 +67,7 @@ class TimestampMixin:
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=text("clock_timestamp()"),
-        onupdate=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(UTC),
         nullable=False,
     )
     deleted_at: Mapped[datetime | None] = mapped_column(

@@ -1,6 +1,7 @@
 import pytest
-from httpx import ASGITransport, AsyncClient
 from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
 from app.core.exceptions import (
     DomainException,
     InsufficientPermissionException,
@@ -55,6 +56,7 @@ async def test_insufficient_permission_response(error_test_app):
 @pytest.mark.asyncio
 async def test_scores_incomplete_friendly_message():
     from app.core.exceptions import ScoresIncompleteException
+
     exc = ScoresIncompleteException(subject_name="Chemistry", missing_count=3)
     assert exc.status_code == 422
     assert exc.code == "SCORES_INCOMPLETE"

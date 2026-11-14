@@ -14,9 +14,7 @@ async def seed_permissions_fixture():
         await seed_system_permissions(session)
 
 
-async def _create_school(
-    client: AsyncClient, suffix: str, label: str
-) -> dict:
+async def _create_school(client: AsyncClient, suffix: str, label: str) -> dict:
     payload = {
         "name": f"Olivet Baptist High School {suffix} {label}",
         "slug": f"olivet-{suffix}-{label}",
@@ -58,12 +56,8 @@ async def test_cross_tenant_login_isolation():
         school_one = await _create_school(client, suffix, "one")
         school_two = await _create_school(client, suffix, "two")
 
-        admin_one_headers = {
-            "Authorization": f"Bearer {school_one['access_token']}"
-        }
-        admin_two_headers = {
-            "Authorization": f"Bearer {school_two['access_token']}"
-        }
+        admin_one_headers = {"Authorization": f"Bearer {school_one['access_token']}"}
+        admin_two_headers = {"Authorization": f"Bearer {school_two['access_token']}"}
 
         invite = await client.post(
             "/api/v1/identity/staff/invite",
@@ -93,9 +87,7 @@ async def test_cross_tenant_login_isolation():
         teacher_token = accept.json()["access_token"]
         teacher_headers = {"Authorization": f"Bearer {teacher_token}"}
 
-        teacher_me = await client.get(
-            "/api/v1/identity/me", headers=teacher_headers
-        )
+        teacher_me = await client.get("/api/v1/identity/me", headers=teacher_headers)
         assert teacher_me.status_code == 200, teacher_me.text
         teacher = teacher_me.json()
         assert teacher["school_id"] == school_two["school"]["id"]
@@ -116,20 +108,10 @@ async def test_cross_tenant_login_isolation():
         )
         assert cross_deactivate.status_code == 404, cross_deactivate.text
 
-        admin_one_me = await client.get(
-            "/api/v1/identity/me", headers=admin_one_headers
-        )
+        admin_one_me = await client.get("/api/v1/identity/me", headers=admin_one_headers)
         assert admin_one_me.status_code == 200
-        assert (
-            admin_one_me.json()["school_id"]
-            == school_one["school"]["id"]
-        )
+        assert admin_one_me.json()["school_id"] == school_one["school"]["id"]
 
-        admin_two_me = await client.get(
-            "/api/v1/identity/me", headers=admin_two_headers
-        )
+        admin_two_me = await client.get("/api/v1/identity/me", headers=admin_two_headers)
         assert admin_two_me.status_code == 200
-        assert (
-            admin_two_me.json()["school_id"]
-            == school_two["school"]["id"]
-        )
+        assert admin_two_me.json()["school_id"] == school_two["school"]["id"]

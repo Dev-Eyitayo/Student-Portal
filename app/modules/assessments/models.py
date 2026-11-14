@@ -1,7 +1,8 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 from uuid import UUID
+
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
@@ -14,6 +15,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from app.modules.common.models import Base, TenantMixin, TimestampMixin, generate_uuid7
 
 if TYPE_CHECKING:
@@ -47,11 +49,15 @@ class AssessmentDefinition(Base, TenantMixin):
 
     __table_args__ = (
         UniqueConstraint(
-            "academic_term_id", "class_subject_id", "code",
-            name="uq_term_class_subject_assessment_code"
+            "academic_term_id",
+            "class_subject_id",
+            "code",
+            name="uq_term_class_subject_assessment_code",
         ),
         CheckConstraint("max_score > 0", name="chk_assessment_max_score"),
-        CheckConstraint("weight_percentage >= 0 AND weight_percentage <= 100", name="chk_assessment_weight"),
+        CheckConstraint(
+            "weight_percentage >= 0 AND weight_percentage <= 100", name="chk_assessment_weight"
+        ),
     )
 
     academic_term: Mapped["AcademicTerm"] = relationship("AcademicTerm")
@@ -71,7 +77,7 @@ class AssessmentScore(Base, TenantMixin, TimestampMixin):
     score_status: Mapped[str] = mapped_column(
         String(16), default="SCORED", nullable=False
     )  # 'SCORED', 'ABSENT', 'EXEMPT', 'PENDING'
-    raw_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    raw_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     recorded_by_id: Mapped[UUID] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
@@ -81,13 +87,12 @@ class AssessmentScore(Base, TenantMixin, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint(
-            "assessment_definition_id", "student_enrollment_id",
-            name="uq_student_assessment_score"
+            "assessment_definition_id", "student_enrollment_id", name="uq_student_assessment_score"
         ),
         CheckConstraint(
             "(score_status = 'SCORED' AND raw_score IS NOT NULL AND raw_score >= 0) OR "
             "(score_status IN ('ABSENT', 'EXEMPT', 'PENDING') AND raw_score IS NULL)",
-            name="chk_score_validity"
+            name="chk_score_validity",
         ),
         Index("idx_scores_enrollment", "student_enrollment_id"),
     )

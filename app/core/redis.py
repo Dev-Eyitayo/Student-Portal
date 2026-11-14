@@ -1,5 +1,4 @@
 import logging
-from typing import Optional
 
 import redis.asyncio as aioredis
 
@@ -9,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-_client: Optional[aioredis.Redis] = None
+_client: aioredis.Redis | None = None
 
 
 def get_redis() -> aioredis.Redis:

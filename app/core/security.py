@@ -1,9 +1,11 @@
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
 import logging
 import os
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
 import jwt
 from passlib.context import CryptContext
+
 from app.core.config import get_settings
 from app.core.redis import get_redis
 from app.modules.common.models import generate_uuid7
@@ -38,20 +40,20 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 
 def create_access_token(
-    data: Optional[Dict[str, Any]] = None,
-    expires_delta: Optional[timedelta] = None,
+    data: dict[str, Any] | None = None,
+    expires_delta: timedelta | None = None,
     *,
-    subject: Optional[str] = None,
-    school_id: Optional[Any] = None,
-    role: Optional[str] = None,
-    extra_claims: Optional[Dict[str, Any]] = None,
+    subject: str | None = None,
+    school_id: Any | None = None,
+    role: str | None = None,
+    extra_claims: dict[str, Any] | None = None,
 ) -> str:
     """
     Creates an access token featuring a unique time-ordered 'jti' (JWT ID).
     The 'jti' allows immediate individual token revocation via Redis blacklist.
     Supports dictionary payload or explicit subject/claims parameters.
     """
-    to_encode: Dict[str, Any] = {}
+    to_encode: dict[str, Any] = {}
     if data:
         to_encode.update(data)
     if subject:
@@ -63,31 +65,29 @@ def create_access_token(
     if extra_claims:
         to_encode.update(extra_claims)
 
-    now = datetime.now(timezone.utc)
-    expire = now + (
-        expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
+    now = datetime.now(UTC)
+    expire = now + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
     jti = str(generate_uuid7())
-    to_encode.update({
-        "exp": expire,
-        "iat": now,
-        "jti": jti,
-    })
+    to_encode.update(
+        {
+            "exp": expire,
+            "iat": now,
+            "jti": jti,
+        }
+    )
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
 def create_refresh_token(
     subject: str,
-    school_id: Optional[Any] = None,
-    expires_delta: Optional[timedelta] = None,
+    school_id: Any | None = None,
+    expires_delta: timedelta | None = None,
 ) -> str:
     """
     Creates a long-lived refresh token for token rotation.
     """
-    now = datetime.now(timezone.utc)
-    expire = now + (
-        expires_delta or timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    )
+    now = datetime.now(UTC)
+    expire = now + (expires_delta or timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS))
     to_encode = {
         "sub": str(subject),
         "school_id": str(school_id) if school_id else None,
@@ -99,7 +99,7 @@ def create_refresh_token(
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
-def decode_access_token(token: str) -> Dict[str, Any]:
+def decode_access_token(token: str) -> dict[str, Any]:
     return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
 
 

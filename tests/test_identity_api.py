@@ -1,8 +1,10 @@
 import uuid
+
 import pytest
 from httpx import ASGITransport, AsyncClient
-from app.main import app
+
 from app.core.database import async_session_factory
+from app.main import app
 from app.modules.identity.seed import seed_system_permissions
 
 
@@ -35,7 +37,6 @@ async def test_full_identity_and_onboarding_lifecycle():
         assert res_school.status_code == 201, res_school.text
         school_data = res_school.json()
         assert school_data["slug"] == f"olivet-{unique_id}"
-        school_id = school_data["id"]
 
         # 2. Login as School Admin
         login_payload = {
@@ -53,10 +54,13 @@ async def test_full_identity_and_onboarding_lifecycle():
         admin_headers = {"Authorization": f"Bearer {admin_access_token}"}
 
         # 3. Test Invalid Password Login (Empathetic error)
-        bad_login = await client.post("/api/v1/identity/login", json={
-            "email": f"principal.{unique_id}@olivet-test.edu.ng",
-            "password": "WrongPassword!",
-        })
+        bad_login = await client.post(
+            "/api/v1/identity/login",
+            json={
+                "email": f"principal.{unique_id}@olivet-test.edu.ng",
+                "password": "WrongPassword!",
+            },
+        )
         assert bad_login.status_code == 401
         assert "incorrect" in bad_login.json()["detail"].lower()
 
@@ -70,9 +74,9 @@ async def test_full_identity_and_onboarding_lifecycle():
         assert "scores:approve" in me_data["permissions"]
 
         # 5. Token Refresh
-        res_refresh = await client.post("/api/v1/identity/refresh", json={
-            "refresh_token": refresh_token
-        })
+        res_refresh = await client.post(
+            "/api/v1/identity/refresh", json={"refresh_token": refresh_token}
+        )
         assert res_refresh.status_code == 200, res_refresh.text
         refreshed_tokens = res_refresh.json()
         assert "access_token" in refreshed_tokens
@@ -87,14 +91,18 @@ async def test_full_identity_and_onboarding_lifecycle():
             "staff_id_number": f"STF-{unique_id.upper()}",
             "specialization": "Chemistry & Biology",
         }
-        res_invite = await client.post("/api/v1/identity/staff/invite", json=invite_payload, headers=admin_headers)
+        res_invite = await client.post(
+            "/api/v1/identity/staff/invite", json=invite_payload, headers=admin_headers
+        )
         assert res_invite.status_code == 201, res_invite.text
         invite_data = res_invite.json()
         assert "invitation_token" in invite_data
         invitation_token = invite_data["invitation_token"]
 
         # 7. Teacher verifies invitation token
-        res_verify = await client.get(f"/api/v1/identity/staff/verify-invite?token={invitation_token}")
+        res_verify = await client.get(
+            f"/api/v1/identity/staff/verify-invite?token={invitation_token}"
+        )
         assert res_verify.status_code == 200, res_verify.text
         verify_data = res_verify.json()
         assert verify_data["email"] == f"teacher.{unique_id}@olivet-test.edu.ng"
@@ -107,7 +115,9 @@ async def test_full_identity_and_onboarding_lifecycle():
             "password": "TeacherStrongPassword2026!",
             "confirm_password": "TeacherStrongPassword2026!",
         }
-        res_accept = await client.post("/api/v1/identity/staff/accept-invitation", json=accept_payload)
+        res_accept = await client.post(
+            "/api/v1/identity/staff/accept-invitation", json=accept_payload
+        )
         assert res_accept.status_code == 200, res_accept.text
         teacher_session = res_accept.json()
         teacher_access_token = teacher_session["access_token"]
@@ -163,10 +173,12 @@ async def test_full_identity_and_onboarding_lifecycle():
         assert res_deactivate.json()["is_active"] is False
 
         # Attempting to login as deactivated teacher must fail with 403
-        res_inactive_login = await client.post("/api/v1/identity/login", json={
-            "email": f"teacher.{unique_id}@olivet-test.edu.ng",
-            "password": "TeacherStrongPassword2026!",
-        })
+        res_inactive_login = await client.post(
+            "/api/v1/identity/login",
+            json={
+                "email": f"teacher.{unique_id}@olivet-test.edu.ng",
+                "password": "TeacherStrongPassword2026!",
+            },
+        )
         assert res_inactive_login.status_code == 403
         assert "inactive" in res_inactive_login.json()["detail"].lower()
-

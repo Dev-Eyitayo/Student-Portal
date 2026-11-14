@@ -1,6 +1,7 @@
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Optional
 from uuid import UUID
+
 from sqlalchemy import (
     DateTime,
     ForeignKey,
@@ -10,6 +11,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from app.modules.common.models import Base, generate_uuid7
 
 if TYPE_CHECKING:
@@ -20,17 +22,21 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
-    school_id: Mapped[Optional[UUID]] = mapped_column(
+    school_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("schools.id", ondelete="CASCADE"), nullable=True
     )
-    actor_id: Mapped[Optional[UUID]] = mapped_column(
+    actor_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     actor_ip: Mapped[str] = mapped_column(INET, nullable=False)
-    action: Mapped[str] = mapped_column(String(64), nullable=False)  # 'SCORE_ENTRY', 'SCORE_MODIFY', etc.
-    resource_type: Mapped[str] = mapped_column(String(64), nullable=False)  # 'AssessmentScore', 'SubjectResult'
+    action: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )  # 'SCORE_ENTRY', 'SCORE_MODIFY', etc.
+    resource_type: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )  # 'AssessmentScore', 'SubjectResult'
     resource_id: Mapped[UUID] = mapped_column(nullable=False)
-    diff_payload: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    diff_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False
     )

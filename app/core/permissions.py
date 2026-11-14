@@ -1,8 +1,10 @@
-from typing import Any, Callable, Dict, Optional
+from collections.abc import Callable
 from uuid import UUID
-from fastapi import Depends, HTTPException, Request, status
+
+from fastapi import Depends, Request
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.dependencies import get_current_authenticated_user, get_tenant_db
 from app.core.exceptions import InsufficientPermissionException
 from app.modules.identity.models import (
@@ -14,8 +16,7 @@ from app.modules.identity.models import (
 
 
 def require_permission(
-    permission_code: str,
-    scope_extractor: Optional[Callable[[Request], Dict[str, Optional[UUID]]]] = None
+    permission_code: str, scope_extractor: Callable[[Request], dict[str, UUID | None]] | None = None
 ) -> Callable:
     """
     FastAPI dependency factory enforcing the Hybrid Permission Model.
@@ -25,6 +26,7 @@ def require_permission(
       3. User has a direct UserPermissionGrant matching the required organizational scope
          (SCHOOL_WIDE, or matching department, level, or class group).
     """
+
     async def permission_checker(
         request: Request,
         current_user: User = Depends(get_current_authenticated_user),
@@ -39,8 +41,7 @@ def require_permission(
             select(Permission)
             .join(RoleDefaultPermission, RoleDefaultPermission.permission_id == Permission.id)
             .where(
-                RoleDefaultPermission.role == current_user.role,
-                Permission.code == permission_code
+                RoleDefaultPermission.role == current_user.role, Permission.code == permission_code
             )
         )
         role_has_perm = (await db.execute(stmt_role)).scalar_one_or_none()
@@ -65,8 +66,8 @@ def require_permission(
                     UserPermissionGrant.scope_type == "SCHOOL_WIDE",
                     UserPermissionGrant.department_id == target_dept_id,
                     UserPermissionGrant.academic_level_id == target_level_id,
-                    UserPermissionGrant.class_group_id == target_class_group_id
-                )
+                    UserPermissionGrant.class_group_id == target_class_group_id,
+                ),
             )
         )
         matching_grant = (await db.execute(stmt_grant)).scalar_one_or_none()

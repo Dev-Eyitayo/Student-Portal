@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Ruff lint
+        run: ruff check app tests alembic
+
+      - name: Check Ruff formatting
+        run: ruff format --check app tests alembic
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: olivet_app
+          POSTGRES_PASSWORD: olivet_admin_test_password
+          POSTGRES_DB: olivet_records
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U olivet_app -d olivet_records"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # CI-only, ephemeral credentials for the service containers in this job.
+      # They are intentionally not GitHub Secrets: they grant access to nothing
+      # outside the job and keep pull requests from forks runnable. Real
+      # credentials (Neon, Upstash, Mailgun, JWT keys) belong in GitHub
+      # Secrets or a protected Environment.
+      ENVIRONMENT: testing
+      TESTING: "1"
+      DEBUG: "false"
+      SECRET_KEY: ci-only-secret-key-not-for-production
+      POSTGRES_USER: olivet_app
+      POSTGRES_PASSWORD: olivet_admin_test_password
+      APP_POSTGRES_USER: olivet_runtime
+      APP_POSTGRES_PASSWORD: olivet_runtime_test_password
+      POSTGRES_DB: olivet_records
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      DATABASE_URL: postgresql+asyncpg://olivet_runtime:olivet_runtime_test_password@localhost:5432/olivet_records
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://olivet_app:olivet_admin_test_password@localhost:5432/olivet_records
+      DATABASE_SYNC_URL: postgresql://olivet_app:olivet_admin_test_password@localhost:5432/olivet_records
+      REDIS_URL: redis://localhost:6379/0
+      REDIS_BROKER_URL: redis://localhost:6379/0
+      CELERY_RESULT_BACKEND: redis://localhost:6379/0
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Apply database migrations
+        run: alembic upgrade head
+
+      - name: Provision least-privilege runtime role
+        run: |
+          psql "$DATABASE_SYNC_URL" -v ON_ERROR_STOP=1 \
+            -v runtime_user="$APP_POSTGRES_USER" \
+            -v runtime_password="$APP_POSTGRES_PASSWORD" \
+            -v admin_user="$POSTGRES_USER" \
+            -f scripts/provision_runtime_role.sql
+
+      - name: Run tests
+        run: pytest --cov=app --cov-report=term-missing

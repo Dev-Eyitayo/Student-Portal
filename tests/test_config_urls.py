@@ -8,8 +8,7 @@ def test_normalizes_neon_libpq_parameters_for_asyncpg():
     )
 
     assert normalize_asyncpg_url(url) == (
-        "postgresql+asyncpg://user:pass@ep-xxxx-pooler.region.aws.neon.tech/neondb"
-        "?ssl=require"
+        "postgresql+asyncpg://user:pass@ep-xxxx-pooler.region.aws.neon.tech/neondb?ssl=require"
     )
 
 
@@ -19,9 +18,7 @@ def test_keeps_explicit_ssl_parameter():
         "?ssl=verify-full&sslmode=require&channel_binding=require"
     )
 
-    assert normalize_asyncpg_url(url) == (
-        "postgresql+asyncpg://user:pass@host/db?ssl=verify-full"
-    )
+    assert normalize_asyncpg_url(url) == ("postgresql+asyncpg://user:pass@host/db?ssl=verify-full")
 
 
 def test_leaves_sync_urls_unchanged():

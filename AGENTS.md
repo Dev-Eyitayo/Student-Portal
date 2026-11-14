@@ -152,6 +152,21 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 celery -A app.core.celery_app worker -Q default,bulk_imports,notifications -l info
 ```
 
+### Linting & Formatting
+```bash
+# Check lint rules
+ruff check app tests alembic
+
+# Apply safe automatic fixes
+ruff check --fix app tests alembic
+
+# Format code
+ruff format app tests alembic
+
+# Verify formatting without changing files
+ruff format --check app tests alembic
+```
+
 ### Testing & Verification
 ```bash
 # Run full test suite

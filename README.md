@@ -71,16 +71,28 @@ cp .env.example .env
 # 3. Create virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -U pip poetry
+pip install --upgrade pip
 
-# 4. Install dependencies
-poetry install
+# 4. Install dependencies, including linting and test tools
+pip install -e ".[dev]"
 
 # 5. Run database migrations (uses MIGRATION_DATABASE_URL / admin role)
 alembic upgrade head
 
 # 6. Start development server
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### Quality Checks
+Run these before opening a pull request. CI enforces the same checks.
+
+```bash
+# Lint and formatting
+ruff check app tests alembic
+ruff format --check app tests alembic
+
+# Tests with coverage
+pytest --cov=app --cov-report=term-missing
 ```
 
 ### Database Roles & Row-Level Security
