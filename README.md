@@ -1,4 +1,4 @@
-# Olivet Academic Records Management Platform
+# Academic Records Management Platform
 **Multi-Tenant SaaS for Secondary Academic Records, Grading & Result Distribution**  
 **Target Pilot:** Olivet Baptist High School, Oyo, Nigeria
 
@@ -6,7 +6,7 @@
 
 ## 📌 Overview
 
-The **Olivet Academic Records Management Platform** is a secure, high-performance, multi-tenant SaaS designed for Nigerian and international secondary schools. It replaces error-prone spreadsheets and fragmented result compilation with an automated, auditable system of record for:
+The **Academic Records Management Platform** is a secure, high-performance, multi-tenant SaaS designed for Nigerian and international secondary schools. It replaces error-prone spreadsheets and fragmented result compilation with an automated, auditable system of record for:
 - Student admissions, session enrollments, class arms, and departments.
 - Subject offerings and granular teacher-arm assignments.
 - Configurable Continuous Assessment (CA) and examination score entry.
@@ -14,7 +14,7 @@ The **Olivet Academic Records Management Platform** is a secure, high-performanc
 - Cryptographic snapshotting and tamper-resistant digital report cards.
 - Secure, time-limited magic link result delivery to parents without unencrypted email attachments.
 
-The platform is designed around the core principle: **"Configurable by architecture, familiar by default"**. Olivet's unique traditions (historic arm letters `O`, `L`, `I`, `V`, `E`, `T`, `B`, `H`, `S`, `Y`, department structures, and 20/20/60 assessment weights) serve as the pre-configured seed template without hardcoding business rules into the codebase.
+The platform is designed around the core principle: **"Configurable by architecture, familiar by default"**. Olivet's unique traditions (historic arm letters `O`, `L`, `I`, `V`, `E`, `T`, `B`, `H`, `S`, `Y`, department structures, and the 10/10/10/70 assessment structure — Test 1, Test 2, Assignments/Attendance, and Terminal Examination) serve as the pre-configured seed template without hardcoding business rules into the codebase.
 
 ---
 

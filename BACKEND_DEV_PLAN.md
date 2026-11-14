@@ -157,15 +157,16 @@ graph TD
 **Lead Focus:** Assessments Module (`app/modules/assessments/`)
 
 #### Objectives:
-1. Implement configurable assessment structures (CA1, CA2, Terminal Exam).
+1. Implement Olivet's configurable 10/10/10/70 assessment structure (Test 1, Test 2, Assignments/Attendance, Terminal Exam).
 2. Build bulk score entry with validation against assessment maximum scores.
 3. Enforce the score review lifecycle: `DRAFT` $\to$ `SUBMITTED` $\to$ `APPROVED`.
 
 #### Tasks & Implementation Details:
 - [ ] **Task 4.1: Assessment Schema Configuration**
   - Model: `AssessmentDefinition` linked to `class_subject_id` and `academic_term_id`.
-  - Fields: `name`, `code` (`TEST1`, `TEST2`, `EXAM`), `max_score`, `weight_percentage`, `sequence_order`.
-  - Default seed for Olivet: Test 1 (20), Test 2 (20), Exam (60).
+  - Fields: `name`, `code` (`TEST1`, `TEST2`, `ASSIGN`, `EXAM`), `max_score`, `weight_percentage`, `sequence_order`.
+  - Olivet-only seed: Test 1 (10 marks, 10%), Test 2 (10 marks, 10%), Assignments/Attendance (10 marks, 10%), Terminal Exam (70 marks, 70%). Other schools remain configurable.
+  - M1 onboarding now seeds this template; this task extends it to per-class-subject assessment definitions.
 - [ ] **Task 4.2: Score Entry & Validation (`app/modules/assessments/schemas.py`)**
   - Model: `AssessmentScore`.
   - States: `SCORED`, `ABSENT`, `EXEMPT`, `PENDING`.
@@ -289,7 +290,7 @@ graph TD
     - Canonical Arms: `O`, `L`, `I`, `V`, `E`, `T`, `B`, `H`, `S`, `Y`.
     - Department Arm Allocations (Science: O, L, I, V; Commercial: E; Arts: T, B, H, S, Y).
     - Standard Nigerian secondary WAEC/NECO grading scale.
-    - Assessment weights: 20/20/60.
+    - Assessment weights: 10/10/10/70 (Test 1, Test 2, Assignments/Attendance, Terminal Exam).
 - [ ] **Task 7.3: Security & Penetration Testing**
   - Run BOLA/IDOR vulnerability scanners against score entry endpoints.
   - Test Row-Level Security isolation with two concurrent school sessions.

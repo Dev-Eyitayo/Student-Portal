@@ -38,7 +38,7 @@ When designing, modifying, or implementing code, you must enforce these 8 non-ne
    - Query `student_subject_registrations` to get the active roster for an elective subject.
    - Compute total obtainable marks dynamically based on each student's registered subjects.
 6. **Configurable by Architecture, Familiar by Default:**
-   - Olivet’s structures (JSS1–SS3, Science/Arts/Commercial, arm letters `O`, `L`, `I`, `V`, `E`, `T`, `B`, `H`, `S`, `Y`, 20/20/60 assessment weights) are seed defaults, **never hardcoded business logic**.
+   - Olivet’s structures (JSS1–SS3, Science/Arts/Commercial, arm letters `O`, `L`, `I`, `V`, `E`, `T`, `B`, `H`, `S`, `Y`, and the Olivet-specific 10/10/10/70 assessment structure: Test 1, Test 2, Assignments/Attendance, and Terminal Examination) are seed defaults, **never hardcoded business logic**.
    - Junior secondary levels must function seamlessly with `department_id = NULL`.
 7. **Zero Hard Deletions of Academic or Staff History:**
    - When a student or teacher leaves, updates must set their lifecycle status (`WITHDRAWN`, `TRANSFERRED`, `INACTIVE`) and apply soft-deletion (`deleted_at`).

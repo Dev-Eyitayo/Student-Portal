@@ -85,7 +85,7 @@ The platform is engineered around **FastAPI**, **Pydantic v2**, and **SQLAlchemy
 
 ### Core Architectural Tenets
 
-1. **Configurable by Architecture, Familiar by Default:** Olivet’s structures (class levels JSS1–SS3, Science/Arts/Commercial departments, lettered arms, 20/20/60 continuous assessment weights) serve as the pre-configured *Initial Seed Template*. The underlying database models enforce zero hardcoded assumptions about arm letters, department existence, or assessment weightings.
+1. **Configurable by Architecture, Familiar by Default:** Olivet’s structures (class levels JSS1–SS3, Science/Arts/Commercial departments, lettered arms, and the Olivet-specific 10/10/10/70 assessment structure: Test 1, Test 2, Assignments/Attendance, and Terminal Examination) serve as the pre-configured *Initial Seed Template*. The underlying database models enforce zero hardcoded assumptions about arm letters, department existence, or assessment weightings.
 2. **Immutable Academic Snapshots:** When an academic term report is officially published, its calculated aggregates, grade boundaries, student positions, and raw scores are cryptographically and relationally frozen. Retroactive changes to grading configurations or department definitions for a subsequent academic year have zero mathematical effect on historical records.
 3. **Defense-in-Depth Multi-Tenancy:** Multi-tenancy is enforced across four distinct boundaries: HTTP header/token resolution in FastAPI middleware, dependency-injected SQLAlchemy session scoping, PostgreSQL Row-Level Security (RLS) connection-level policies, and Celery background task payload serialization.
 4. **Lean, Maintainable Operations (The Asynchronous Modular Monolith):** The platform avoids distributed microservice complexity. It is structured as an event-informed **Modular Monolith** using FastAPI (running on Uvicorn workers), backed by PostgreSQL 16, Redis 7, and Celery 5.4. This ensures transactional integrity across enrollment, grading, and reporting while maintaining clear module boundaries ready for future extraction if required.
@@ -218,7 +218,7 @@ flowchart LR
 - **Subject & SubjectOffering:** `Subject` is the catalog item (e.g., "Mathematics", "Catering Craft Practice"). `SubjectOffering` defines a subject taught within a specific `AcademicSession` and `AcademicLevel` (optionally filtered by `Department`, or `department_id = NULL` for universal core or junior levels).
 - **ClassSubject & TeacherAssignment:** `ClassSubject` links a `SubjectOffering` to a concrete `ClassGroup`. `TeacherAssignment` designates which teacher instructs that `ClassSubject`, with assignment timestamps and active status.
 - **StudentSubjectRegistration:** The explicit link between a student's session enrollment (`StudentEnrollment`) and a specific `ClassSubject`. Categorized as `COMPULSORY_CORE`, `DEPARTMENT_CORE`, `TRADE_ELECTIVE`, or `FREE_ELECTIVE`. Ensures teachers of elective/trade subjects (e.g., Catering Craft) only see and grade students who registered for that subject, and enables student-specific total obtainable calculations on report cards.
-- **AssessmentDefinition:** Configures assessment components for a subject or school-wide term (e.g., "First Test", max 20; "Exam", max 60).
+- **AssessmentDefinition:** Configures assessment components for a subject or school-wide term (e.g., "Test 1", max 10; "Test 2", max 10; "Assignments/Attendance", max 10; "Terminal Exam", max 70 for Olivet).
 - **AssessmentScore:** The atomic grade entry for a student in an `AssessmentDefinition`. Contains states: numeric value, `ABSENT`, `EXEMPT`, or `PENDING`.
 - **SubjectResult (Computed):** The aggregated terminal score for a student in a specific `ClassSubject` for a term, including grade, grade point, and subject ranking.
 - **TermReportCard (Computed):** The master report card aggregate for a student's term, containing aggregated totals, class rank, attendance summary, teacher comments, and publication authorization status.
@@ -658,8 +658,8 @@ CREATE TABLE assessment_definitions (
     school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
     academic_term_id UUID NOT NULL REFERENCES academic_terms(id) ON DELETE CASCADE,
     class_subject_id UUID NOT NULL REFERENCES class_subjects(id) ON DELETE CASCADE,
-    name VARCHAR(64) NOT NULL, -- e.g., 'First Test', 'Second Test', 'Terminal Exam'
-    code VARCHAR(16) NOT NULL, -- e.g., 'TEST1', 'TEST2', 'EXAM'
+    name VARCHAR(64) NOT NULL, -- e.g., 'Test 1', 'Test 2', 'Assignments/Attendance', 'Terminal Exam'
+    code VARCHAR(16) NOT NULL, -- e.g., 'TEST1', 'TEST2', 'ASSIGN', 'EXAM'
     assessment_type VARCHAR(32) NOT NULL, -- 'CONTINUOUS_ASSESSMENT', 'EXAMINATION', 'PRACTICAL'
     max_score NUMERIC(5,2) NOT NULL CHECK (max_score > 0),
     weight_percentage NUMERIC(5,2) NOT NULL CHECK (weight_percentage >= 0 AND weight_percentage <= 100),
@@ -973,11 +973,11 @@ Because FastAPI lacks Django's built-in administration dashboard, we integrate *
 {
   "error": {
     "code": "VALIDATION_ERROR",
-    "message": "Score 25.00 exceeds the configured maximum permitted score of 20.00 for Continuous Assessment 1.",
+    "message": "Score 12.00 exceeds the configured maximum permitted score of 10.00 for Test 1.",
     "details": [
       {
         "field": "scores[0].raw_score",
-        "reason": "Must be less than or equal to 20.00"
+        "reason": "Must be less than or equal to 10.00"
       }
     ],
     "path": "/api/v1/assessments/scores/bulk-entry"
@@ -998,7 +998,7 @@ Because FastAPI lacks Django's built-in administration dashboard, we integrate *
 | **Subjects** | `POST` | `/api/v1/class-subjects/assign-teacher` | Assign teacher to class-subject offering | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Subjects** | `POST` | `/api/v1/students/{enrollment_id}/register-subjects` | Register elective/trade subjects for a student | `ACADEMIC_OFFICER`, `TEACHER` (Form Master) |
 | **Subjects** | `POST` | `/api/v1/class-subjects/{class_subject_id}/bulk-register-students` | Bulk register student cohort to a trade/elective subject | `ACADEMIC_OFFICER` |
-| **Assessments**| `POST` | `/api/v1/assessments/definitions` | Configure assessment schema (Test1, Exam) | `ACADEMIC_OFFICER` |
+| **Assessments**| `POST` | `/api/v1/assessments/definitions` | Configure assessment schema (Test 1, Test 2, Assignments/Attendance, Exam) | `ACADEMIC_OFFICER` |
 | **Assessments**| `POST` | `/api/v1/assessments/scores/bulk-entry` | Teacher enters scores for assigned subject/arm | `TEACHER` (Assigned only), `ACADEMIC_OFFICER` |
 | **Assessments**| `POST` | `/api/v1/assessments/submit` | Teacher submits scores for approval | `TEACHER` (Assigned only) |
 | **Assessments**| `POST` | `/api/v1/assessments/approve` | Academic officer verifies & locks scores | `ACADEMIC_OFFICER`, `SCHOOL_ADMIN` |
@@ -1081,8 +1081,8 @@ class BulkScoreEntryRequest(BaseModel):
   "records_updated": 3,
   "errors": [],
   "assessment_summary": {
-    "assessment_name": "Continuous Assessment 1",
-    "max_score": 20.00,
+    "assessment_name": "Test 1",
+    "max_score": 10.00,
     "class_subject": "General Mathematics - SS1 Science O"
   }
 }
@@ -1622,10 +1622,11 @@ When a teacher departs an institution or is transferred, the `deactivate_teacher
 | **SS 3** | **Arts** | `T`, `B`, `H`, `S`, `Y` | SS3 Arts T, SS3 Arts B, SS3 Arts H, SS3 Arts S, SS3 Arts Y |
 
 ### 11.2 Assessment Weightings & Standard Grading Scales
-- **Assessment Components:**
-  - Continuous Assessment 1 (First Test): **20 marks** (Weight: 20%)
-  - Continuous Assessment 2 (Second Test): **20 marks** (Weight: 20%)
-  - Terminal Examination: **60 marks** (Weight: 60%)
+- **Assessment Components (Olivet-specific):**
+  - Test 1: **10 marks** (Weight: 10%)
+  - Test 2: **10 marks** (Weight: 10%)
+  - Assignments/Attendance: **10 marks** (Weight: 10%)
+  - Terminal Examination: **70 marks** (Weight: 70%)
   - **Total Obtainable per Subject:** **100 marks** (Weight: 100%)
 - **Term Structure:**
   - `First Term` (September – December)
@@ -1633,7 +1634,7 @@ When a teacher departs an institution or is transferred, the `deactivate_teacher
   - `Third Term` (May – July)
 
 ### 11.3 Configuration Versioning & Transition Rules
-- Configuration changes (e.g., altering CA weight from 20/20/60 to 30/70) require an **Academic Session Boundary**.
+- Configuration changes (e.g., altering Olivet's assessment weighting from 10/10/10/70 to a different split) require an **Academic Session Boundary**.
 - An existing active term’s assessment weights cannot be altered once score entry has commenced (`DRAFT` scores > 0).
 - When a new academic session is created, the system clones the configuration of the previous session into a new versioned schema row, allowing the school administrator to adjust parameters without affecting past records.
 

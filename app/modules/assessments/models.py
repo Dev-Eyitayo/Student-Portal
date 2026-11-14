@@ -35,8 +35,12 @@ class AssessmentDefinition(Base, TenantMixin):
     class_subject_id: Mapped[UUID] = mapped_column(
         ForeignKey("class_subjects.id", ondelete="CASCADE"), nullable=False
     )
-    name: Mapped[str] = mapped_column(String(64), nullable=False)  # 'First Test', 'Terminal Exam'
-    code: Mapped[str] = mapped_column(String(16), nullable=False)  # 'CA1', 'CA2', 'EXAM'
+    name: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )  # e.g. 'Test 1', 'Test 2', 'Assignments/Attendance', 'Terminal Examination'
+    code: Mapped[str] = mapped_column(
+        String(16), nullable=False
+    )  # e.g. 'TEST1', 'TEST2', 'ASSIGN', 'EXAM'
     assessment_type: Mapped[str] = mapped_column(
         String(32), nullable=False
     )  # 'CONTINUOUS_ASSESSMENT', 'EXAMINATION', 'PRACTICAL'

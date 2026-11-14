@@ -39,9 +39,14 @@ from app.modules.identity.schemas import (
 )
 
 DEFAULT_ASSESSMENT_WEIGHTS = {
-    "CA1": {"name": "Continuous Assessment 1", "max_score": 20, "weight_percentage": 20},
-    "CA2": {"name": "Continuous Assessment 2", "max_score": 20, "weight_percentage": 20},
-    "EXAM": {"name": "Terminal Examination", "max_score": 60, "weight_percentage": 60},
+    "TEST1": {"name": "Test 1", "max_score": 10, "weight_percentage": 10},
+    "TEST2": {"name": "Test 2", "max_score": 10, "weight_percentage": 10},
+    "ASSIGN": {
+        "name": "Assignments/Attendance",
+        "max_score": 10,
+        "weight_percentage": 10,
+    },
+    "EXAM": {"name": "Terminal Examination", "max_score": 70, "weight_percentage": 70},
 }
 
 DEFAULT_GRADING_SCALE = [

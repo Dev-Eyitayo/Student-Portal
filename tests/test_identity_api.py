@@ -2,9 +2,15 @@ import uuid
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
-from app.core.database import async_session_factory
+from app.core.database import (
+    async_session_factory,
+    reset_tenant_scope,
+    set_tenant_scope,
+)
 from app.main import app
+from app.modules.identity.models import SchoolConfiguration
 from app.modules.identity.seed import seed_system_permissions
 
 
@@ -12,6 +18,64 @@ from app.modules.identity.seed import seed_system_permissions
 async def seed_permissions_fixture():
     async with async_session_factory() as session:
         await seed_system_permissions(session)
+
+
+@pytest.mark.asyncio
+async def test_school_onboarding_seeds_olivet_assessment_structure():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        unique_id = uuid.uuid4().hex[:6]
+        school_payload = {
+            "name": f"Olivet Baptist High School {unique_id}",
+            "slug": f"olivet-weights-{unique_id}",
+            "official_code": f"OBHW-{unique_id.upper()}",
+            "state": "Oyo State",
+            "city": "Oyo",
+            "address": "Olivet Heights, Oyo, Nigeria",
+            "country_code": "NG",
+            "admin_email": f"principal.weights.{unique_id}@olivet-test.edu.ng",
+            "admin_first_name": "Adeyemi",
+            "admin_last_name": "Olufemi",
+            "admin_password": "SuperAdminSecurePassword123!",
+        }
+        response = await client.post("/api/v1/identity/schools", json=school_payload)
+        assert response.status_code == 201, response.text
+        school_id = uuid.UUID(response.json()["id"])
+
+    tenant_tokens = set_tenant_scope(school_id)
+    try:
+        async with async_session_factory() as session:
+            config = (
+                await session.execute(
+                    select(SchoolConfiguration).where(SchoolConfiguration.school_id == school_id)
+                )
+            ).scalar_one()
+            weights = config.assessment_weight_schema
+    finally:
+        reset_tenant_scope(tenant_tokens)
+
+    assert set(weights) == {"TEST1", "TEST2", "ASSIGN", "EXAM"}
+    assert weights["TEST1"] == {
+        "name": "Test 1",
+        "max_score": 10,
+        "weight_percentage": 10,
+    }
+    assert weights["TEST2"] == {
+        "name": "Test 2",
+        "max_score": 10,
+        "weight_percentage": 10,
+    }
+    assert weights["ASSIGN"] == {
+        "name": "Assignments/Attendance",
+        "max_score": 10,
+        "weight_percentage": 10,
+    }
+    assert weights["EXAM"] == {
+        "name": "Terminal Examination",
+        "max_score": 70,
+        "weight_percentage": 70,
+    }
+    assert sum(item["weight_percentage"] for item in weights.values()) == 100
 
 
 @pytest.mark.asyncio
