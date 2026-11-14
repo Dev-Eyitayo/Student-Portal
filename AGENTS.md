@@ -107,16 +107,25 @@ Never write business logic or database writes inside FastAPI route handlers. Rou
 1. Accept and validate the request via Pydantic schemas.
 2. Enforce authentication and permissions via `Depends`.
 3. Delegate execution to a function in `services.py`.
-4. Return the response model.
+4. Return a `SuccessResponse[T]` from `app/modules/common/schemas.py`.
 
-### 5.2 Pure Computation Engine
+### 5.2 API Route & Response Contract
+`ARCHITECTURE.md` §6.2 is the single canonical endpoint catalog. All new routes must:
+- Use `/api/v1/<domain>/<plural-resource>[/<id>][/<subresource>]` with an approved domain (`identity`, `structure`, `students`, `enrollments`, `subjects`, `class-subjects`, `assessments`, `computation`, `publication`, `results`, `audit`).
+- Use plural, kebab-case resource names and named identifiers such as `{student_id}`.
+- Reserve verbs for workflow or bulk actions (`submit`, `approve`, `unlock`, `publish-term`, `bulk-import`, `bulk-entry`, `bulk`).
+- Never add legacy flat aliases.
+- Return every success as `{"success": true, "data": ...}`.
+- Return every failure as `{"error": {"code", "message", "details", "path"}}` with a human-friendly `message`.
+
+### 5.3 Pure Computation Engine
 The grading and ranking engine (`app/modules/computation/engine.py`) must remain pure Python:
 - Accept plain Python dictionaries, Decimals, and dataclasses.
 - Return calculated data structures.
 - Use `Decimal` with `ROUND_HALF_UP` for all mark computations.
 - Never import SQLAlchemy models, DB sessions, or HTTP request objects into `engine.py`.
 
-### 5.3 Human-Friendly Error Messaging Standard
+### 5.4 Human-Friendly Error Messaging Standard
 Every error message returned by the API must read like natural, empathetic, actionable human English. Teachers, school administrators, and parents will read these messages:
 - **Never expose raw technical codes** (e.g. `scores:approve`, `IntegrityError`) as the main error message. Technical codes belong in `error.code` or `details`.
 - **Always explain what happened and what to do next**:

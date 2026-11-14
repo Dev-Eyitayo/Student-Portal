@@ -2,13 +2,20 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 import app.models  # noqa: F401  # register every SQLAlchemy model/mapper at startup
 from app.core.config import get_settings
 from app.core.database import async_session_factory
-from app.core.exceptions import DomainException, domain_exception_handler
+from app.core.exceptions import (
+    DomainException,
+    domain_exception_handler,
+    http_exception_handler,
+    request_validation_exception_handler,
+    unhandled_exception_handler,
+)
 from app.core.redis import close_redis, init_redis
 from app.core.rls import verify_rls_enforcement
 from app.modules.identity.router import router as identity_router
@@ -62,6 +69,9 @@ def create_app() -> FastAPI:
 
     # Exception Handlers
     app.add_exception_handler(DomainException, domain_exception_handler)
+    app.add_exception_handler(HTTPException, http_exception_handler)
+    app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
+    app.add_exception_handler(Exception, unhandled_exception_handler)
 
     # Mount API Routers
     app.include_router(identity_router, prefix="/api/v1")

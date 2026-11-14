@@ -54,7 +54,7 @@ async def test_deactivation_revokes_assignments_and_form_master_role():
         }
         school_response = await client.post("/api/v1/identity/schools", json=school_payload)
         assert school_response.status_code == 201, school_response.text
-        school_id = school_response.json()["id"]
+        school_id = school_response.json()["data"]["id"]
         school_uuid = UUID(school_id)
 
         admin_login = await client.post(
@@ -65,9 +65,9 @@ async def test_deactivation_revokes_assignments_and_form_master_role():
             },
         )
         assert admin_login.status_code == 200
-        admin_headers = {"Authorization": f"Bearer {admin_login.json()['access_token']}"}
+        admin_headers = {"Authorization": f"Bearer {admin_login.json()['data']['access_token']}"}
         admin_me = await client.get("/api/v1/identity/me", headers=admin_headers)
-        admin_user_id = UUID(admin_me.json()["id"])
+        admin_user_id = UUID(admin_me.json()["data"]["id"])
 
         invite = await client.post(
             "/api/v1/identity/staff/invite",
@@ -84,15 +84,15 @@ async def test_deactivation_revokes_assignments_and_form_master_role():
         accept = await client.post(
             "/api/v1/identity/staff/accept-invitation",
             json={
-                "invitation_token": invite.json()["invitation_token"],
+                "invitation_token": invite.json()["data"]["invitation_token"],
                 "password": "TeacherStrongPassword2026!",
                 "confirm_password": "TeacherStrongPassword2026!",
             },
         )
         assert accept.status_code == 200
-        teacher_headers = {"Authorization": f"Bearer {accept.json()['access_token']}"}
+        teacher_headers = {"Authorization": f"Bearer {accept.json()['data']['access_token']}"}
         teacher_me = await client.get("/api/v1/identity/me", headers=teacher_headers)
-        teacher_user_id = UUID(teacher_me.json()["id"])
+        teacher_user_id = UUID(teacher_me.json()["data"]["id"])
 
         tokens = set_tenant_scope(school_uuid)
         try:

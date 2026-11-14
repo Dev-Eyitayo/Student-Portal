@@ -30,6 +30,7 @@ from app.core.permissions import require_permission
 from app.core.redis import get_redis
 from app.core.security import decode_access_token, revoke_access_token
 from app.modules.common.models import generate_uuid7
+from app.modules.common.schemas import MessageResponse, SuccessResponse
 from app.modules.identity import services
 from app.modules.identity.bulk_import import MAX_STAFF_IMPORT_BYTES
 from app.modules.identity.models import User
@@ -85,7 +86,11 @@ def _remaining_ttl(exp: float | None, fallback_seconds: int) -> int:
     return max(1, int(exp - time.time()))
 
 
-@router.post("/schools", response_model=SchoolResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/schools",
+    response_model=SuccessResponse[SchoolResponse],
+    status_code=status.HTTP_201_CREATED,
+)
 async def register_school(
     req: SchoolCreateRequest,
     db: AsyncSession = Depends(get_db),
@@ -94,10 +99,10 @@ async def register_school(
     Onboards a new school tenant and establishes the initial school administrative user.
     """
     school, _ = await services.register_school_with_admin(db, req)
-    return school
+    return SuccessResponse[SchoolResponse](data=SchoolResponse.model_validate(school))
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=SuccessResponse[TokenResponse])
 async def login(
     req: LoginRequest,
     response: Response,
@@ -111,10 +116,10 @@ async def login(
     user = await services.authenticate_user(db, req.email, req.password)
     tokens = await services.create_tokens_for_user(user)
     _set_refresh_cookie(response, tokens.refresh_token)
-    return tokens
+    return SuccessResponse[TokenResponse](data=tokens)
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post("/refresh", response_model=SuccessResponse[TokenResponse])
 async def refresh_token(
     req: RefreshTokenRequest,
     response: Response,
@@ -125,10 +130,14 @@ async def refresh_token(
     """
     tokens = await services.refresh_user_tokens(db, req.refresh_token)
     _set_refresh_cookie(response, tokens.refresh_token)
-    return tokens
+    return SuccessResponse[TokenResponse](data=tokens)
 
 
-@router.post("/logout", status_code=status.HTTP_200_OK)
+@router.post(
+    "/logout",
+    response_model=SuccessResponse[MessageResponse],
+    status_code=status.HTTP_200_OK,
+)
 async def logout(
     response: Response,
     req: LogoutRequest | None = Body(default=None),
@@ -172,10 +181,12 @@ async def logout(
             pass
 
     response.delete_cookie(REFRESH_COOKIE_NAME, path=REFRESH_COOKIE_PATH)
-    return {"message": "You have been successfully signed out."}
+    return SuccessResponse[MessageResponse](
+        data=MessageResponse(message="You have been successfully signed out.")
+    )
 
 
-@router.get("/me", response_model=MeResponse)
+@router.get("/me", response_model=SuccessResponse[MeResponse])
 async def get_current_user_profile(
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
@@ -186,25 +197,27 @@ async def get_current_user_profile(
     permissions = await services.get_user_effective_permissions(db, current_user)
     school_name = current_user.school.name if current_user.school else None
 
-    return MeResponse(
-        id=current_user.id,
-        school_id=current_user.school_id,
-        school_name=school_name,
-        email=current_user.email,
-        first_name=current_user.first_name,
-        last_name=current_user.last_name,
-        phone_number=current_user.phone_number,
-        role=current_user.role,
-        is_active=current_user.is_active,
-        is_mfa_enabled=current_user.is_mfa_enabled,
-        staff_profile=current_user.staff_profile,
-        permissions=permissions,
+    return SuccessResponse[MeResponse](
+        data=MeResponse(
+            id=current_user.id,
+            school_id=current_user.school_id,
+            school_name=school_name,
+            email=current_user.email,
+            first_name=current_user.first_name,
+            last_name=current_user.last_name,
+            phone_number=current_user.phone_number,
+            role=current_user.role,
+            is_active=current_user.is_active,
+            is_mfa_enabled=current_user.is_mfa_enabled,
+            staff_profile=current_user.staff_profile,
+            permissions=permissions,
+        )
     )
 
 
 @router.post(
     "/staff/invite",
-    response_model=StaffInviteResponse,
+    response_model=SuccessResponse[StaffInviteResponse],
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_permission("users:manage"))],
 )
@@ -221,10 +234,13 @@ async def invite_staff(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Staff invitation requires an active school context.",
         )
-    return await services.invite_staff_member(db, current_user.school_id, current_user.id, req)
+    invitation = await services.invite_staff_member(
+        db, current_user.school_id, current_user.id, req
+    )
+    return SuccessResponse[StaffInviteResponse](data=invitation)
 
 
-@router.get("/staff/verify-invite", response_model=StaffVerifyInviteResponse)
+@router.get("/staff/verify-invite", response_model=SuccessResponse[StaffVerifyInviteResponse])
 async def verify_invite(
     token: str = Query(..., description="The 72-hour invitation token received by the teacher"),
     db: AsyncSession = Depends(get_db),
@@ -232,10 +248,11 @@ async def verify_invite(
     """
     Verifies an invitation token and returns teacher details to the onboarding page.
     """
-    return await services.verify_staff_invitation(db, token)
+    invitation = await services.verify_staff_invitation(db, token)
+    return SuccessResponse[StaffVerifyInviteResponse](data=invitation)
 
 
-@router.post("/staff/accept-invitation", response_model=TokenResponse)
+@router.post("/staff/accept-invitation", response_model=SuccessResponse[TokenResponse])
 async def accept_invitation(
     req: AcceptInvitationRequest,
     response: Response,
@@ -247,12 +264,12 @@ async def accept_invitation(
     """
     _, tokens = await services.accept_staff_invitation(db, req)
     _set_refresh_cookie(response, tokens.refresh_token)
-    return tokens
+    return SuccessResponse[TokenResponse](data=tokens)
 
 
 @router.post(
     "/staff/bulk-import",
-    response_model=StaffBulkImportAcceptedResponse,
+    response_model=SuccessResponse[StaffBulkImportAcceptedResponse],
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(require_permission("users:manage"))],
 )
@@ -280,7 +297,7 @@ async def bulk_import_staff(
     content = await file.read(MAX_STAFF_IMPORT_BYTES + 1)
     if len(content) > MAX_STAFF_IMPORT_BYTES:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=413,
             detail="This file is too large. Please upload a file smaller than 5 MB.",
         )
     if not content:
@@ -326,18 +343,20 @@ async def bulk_import_staff(
             detail=("We couldn't start the staff import right now. Please try again in a moment."),
         ) from None
 
-    return StaffBulkImportAcceptedResponse(
-        task_id=job_id,
-        message=(
-            "Your staff list has been queued for import. You can check its "
-            "progress using the task ID."
-        ),
+    return SuccessResponse[StaffBulkImportAcceptedResponse](
+        data=StaffBulkImportAcceptedResponse(
+            task_id=job_id,
+            message=(
+                "Your staff list has been queued for import. You can check its "
+                "progress using the task ID."
+            ),
+        )
     )
 
 
 @router.get(
     "/staff/bulk-import/{task_id}",
-    response_model=StaffBulkImportStatusResponse,
+    response_model=SuccessResponse[StaffBulkImportStatusResponse],
     dependencies=[Depends(require_permission("users:manage"))],
 )
 async def get_bulk_import_status(
@@ -374,16 +393,18 @@ async def get_bulk_import_status(
             ),
         }
 
-    return StaffBulkImportStatusResponse(
-        task_id=task_id,
-        state=state,
-        result=result,
+    return SuccessResponse[StaffBulkImportStatusResponse](
+        data=StaffBulkImportStatusResponse(
+            task_id=task_id,
+            state=state,
+            result=result,
+        )
     )
 
 
 @router.post(
     "/users/{user_id}/permissions",
-    response_model=UserPermissionGrantResponse,
+    response_model=SuccessResponse[UserPermissionGrantResponse],
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_permission("users:manage"))],
 )
@@ -408,11 +429,12 @@ async def grant_permission(
         target_user_id=user_id,
         req=req,
     )
-    return grant
+    return SuccessResponse[UserPermissionGrantResponse](data=grant)
 
 
 @router.delete(
     "/users/{user_id}/permissions/{grant_id}",
+    response_model=SuccessResponse[MessageResponse],
     status_code=status.HTTP_200_OK,
     dependencies=[Depends(require_permission("users:manage"))],
 )
@@ -436,12 +458,14 @@ async def revoke_permission(
         target_user_id=user_id,
         grant_id=grant_id,
     )
-    return {"message": "The permission grant has been successfully revoked."}
+    return SuccessResponse[MessageResponse](
+        data=MessageResponse(message="The permission grant has been successfully revoked.")
+    )
 
 
 @router.post(
     "/users/{user_id}/deactivate",
-    response_model=DeactivateUserResponse,
+    response_model=SuccessResponse[DeactivateUserResponse],
     dependencies=[Depends(require_permission("users:manage"))],
 )
 async def deactivate_user(
@@ -459,8 +483,13 @@ async def deactivate_user(
             detail="User management requires an active school context.",
         )
     user = await services.deactivate_user(db, current_user.school_id, user_id)
-    return DeactivateUserResponse(
-        user_id=user.id,
-        is_active=user.is_active,
-        message=f"The account for {user.first_name} {user.last_name} has been deactivated and signed out on all devices.",
+    return SuccessResponse[DeactivateUserResponse](
+        data=DeactivateUserResponse(
+            user_id=user.id,
+            is_active=user.is_active,
+            message=(
+                f"The account for {user.first_name} {user.last_name} has been "
+                "deactivated and signed out on all devices."
+            ),
+        )
     )

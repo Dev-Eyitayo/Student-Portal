@@ -40,7 +40,7 @@ async def test_school_onboarding_seeds_olivet_assessment_structure():
         }
         response = await client.post("/api/v1/identity/schools", json=school_payload)
         assert response.status_code == 201, response.text
-        school_id = uuid.UUID(response.json()["id"])
+        school_id = uuid.UUID(response.json()["data"]["id"])
 
     tenant_tokens = set_tenant_scope(school_id)
     try:
@@ -99,7 +99,7 @@ async def test_full_identity_and_onboarding_lifecycle():
         }
         res_school = await client.post("/api/v1/identity/schools", json=school_payload)
         assert res_school.status_code == 201, res_school.text
-        school_data = res_school.json()
+        school_data = res_school.json()["data"]
         assert school_data["slug"] == f"olivet-{unique_id}"
 
         # 2. Login as School Admin
@@ -109,7 +109,7 @@ async def test_full_identity_and_onboarding_lifecycle():
         }
         res_login = await client.post("/api/v1/identity/login", json=login_payload)
         assert res_login.status_code == 200, res_login.text
-        tokens = res_login.json()
+        tokens = res_login.json()["data"]
         assert "access_token" in tokens
         assert "refresh_token" in tokens
         admin_access_token = tokens["access_token"]
@@ -126,12 +126,12 @@ async def test_full_identity_and_onboarding_lifecycle():
             },
         )
         assert bad_login.status_code == 401
-        assert "incorrect" in bad_login.json()["detail"].lower()
+        assert "incorrect" in bad_login.json()["error"]["message"].lower()
 
         # 4. GET /identity/me
         res_me = await client.get("/api/v1/identity/me", headers=admin_headers)
         assert res_me.status_code == 200, res_me.text
-        me_data = res_me.json()
+        me_data = res_me.json()["data"]
         assert me_data["email"] == f"principal.{unique_id}@olivet-test.edu.ng"
         assert me_data["role"] == "SCHOOL_ADMIN"
         assert "Olivet Baptist High School" in me_data["school_name"]
@@ -142,7 +142,7 @@ async def test_full_identity_and_onboarding_lifecycle():
             "/api/v1/identity/refresh", json={"refresh_token": refresh_token}
         )
         assert res_refresh.status_code == 200, res_refresh.text
-        refreshed_tokens = res_refresh.json()
+        refreshed_tokens = res_refresh.json()["data"]
         assert "access_token" in refreshed_tokens
 
         # 6. Admin invites a Teacher
@@ -159,7 +159,7 @@ async def test_full_identity_and_onboarding_lifecycle():
             "/api/v1/identity/staff/invite", json=invite_payload, headers=admin_headers
         )
         assert res_invite.status_code == 201, res_invite.text
-        invite_data = res_invite.json()
+        invite_data = res_invite.json()["data"]
         assert "invitation_token" in invite_data
         invitation_token = invite_data["invitation_token"]
 
@@ -168,7 +168,7 @@ async def test_full_identity_and_onboarding_lifecycle():
             f"/api/v1/identity/staff/verify-invite?token={invitation_token}"
         )
         assert res_verify.status_code == 200, res_verify.text
-        verify_data = res_verify.json()
+        verify_data = res_verify.json()["data"]
         assert verify_data["email"] == f"teacher.{unique_id}@olivet-test.edu.ng"
         assert verify_data["first_name"] == "Funke"
         assert "Olivet Baptist High School" in verify_data["school_name"]
@@ -183,7 +183,7 @@ async def test_full_identity_and_onboarding_lifecycle():
             "/api/v1/identity/staff/accept-invitation", json=accept_payload
         )
         assert res_accept.status_code == 200, res_accept.text
-        teacher_session = res_accept.json()
+        teacher_session = res_accept.json()["data"]
         teacher_access_token = teacher_session["access_token"]
         teacher_refresh_token = teacher_session["refresh_token"]
         teacher_headers = {"Authorization": f"Bearer {teacher_access_token}"}
@@ -191,7 +191,7 @@ async def test_full_identity_and_onboarding_lifecycle():
         # 9. Teacher checks their profile
         res_teacher_me = await client.get("/api/v1/identity/me", headers=teacher_headers)
         assert res_teacher_me.status_code == 200
-        teacher_me = res_teacher_me.json()
+        teacher_me = res_teacher_me.json()["data"]
         assert teacher_me["role"] == "TEACHER"
         assert teacher_me["is_active"] is True
         teacher_user_id = teacher_me["id"]
@@ -210,12 +210,12 @@ async def test_full_identity_and_onboarding_lifecycle():
 
         # Teacher now has scores:approve in their effective permissions
         res_teacher_updated_me = await client.get("/api/v1/identity/me", headers=teacher_headers)
-        assert "scores:approve" in res_teacher_updated_me.json()["permissions"]
+        assert "scores:approve" in res_teacher_updated_me.json()["data"]["permissions"]
 
         # 11. Teacher logs out (Revokes access token jti via Redis)
         res_logout = await client.post("/api/v1/identity/logout", headers=teacher_headers)
         assert res_logout.status_code == 200
-        assert "successfully signed out" in res_logout.json()["message"]
+        assert "successfully signed out" in res_logout.json()["data"]["message"]
 
         # Calling /me with the logged out token must fail with 401
         res_after_logout = await client.get("/api/v1/identity/me", headers=teacher_headers)
@@ -234,7 +234,7 @@ async def test_full_identity_and_onboarding_lifecycle():
             headers=admin_headers,
         )
         assert res_deactivate.status_code == 200
-        assert res_deactivate.json()["is_active"] is False
+        assert res_deactivate.json()["data"]["is_active"] is False
 
         # Attempting to login as deactivated teacher must fail with 403
         res_inactive_login = await client.post(
@@ -245,4 +245,4 @@ async def test_full_identity_and_onboarding_lifecycle():
             },
         )
         assert res_inactive_login.status_code == 403
-        assert "inactive" in res_inactive_login.json()["detail"].lower()
+        assert "inactive" in res_inactive_login.json()["error"]["message"].lower()

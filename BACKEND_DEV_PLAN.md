@@ -23,7 +23,7 @@ The frontend team is building a separate client (web and mobile). The backend te
 
 The foundational scaffolding is completed and committed to `main`:
 
-- [x] **FastAPI App Factory & Middleware:** CORS, standard RFC 7807/custom domain exception handlers ([`app/main.py`](./app/main.py)).
+- [x] **FastAPI App Factory & Middleware:** CORS, standard success/error envelope handlers and custom domain exception handlers ([`app/main.py`](./app/main.py)).
 - [x] **Async Database Engine:** SQLAlchemy 2.0 with `asyncpg` connection pooling ([`app/core/database.py`](./app/core/database.py)).
 - [x] **Time-Ordered UUIDv7 Standard:** High-throughput B-tree indexing with zero sequential ID exposure ([`app/modules/common/models.py`](./app/modules/common/models.py)).
 - [x] **Defense-in-Depth Multi-Tenancy:** Dependency-injected database sessions setting `SET LOCAL app.current_school_id = :school_id` for PostgreSQL Row-Level Security ([`app/core/dependencies.py`](./app/core/dependencies.py)).
@@ -73,7 +73,7 @@ graph TD
   - `POST /api/v1/identity/staff/bulk-import`: Admin uploads Excel/CSV of school staff roster; Celery worker parses rows, provisions accounts in batch, and queues invitation emails.
   - `GET /api/v1/identity/staff/verify-invite`: Verifies invitation token and returns teacher details to frontend.
   - `POST /api/v1/identity/staff/accept-invitation`: Teacher establishes their password, sets status to `ACTIVE`, and receives initial session tokens.
-- [ ] **Task 1.4: Teacher Deactivation Service (`POST /api/v1/identity/users/{id}/deactivate`)**
+- [ ] **Task 1.4: Teacher Deactivation Service (`POST /api/v1/identity/users/{user_id}/deactivate`)**
   - Updates `is_active = False`.
   - Advances `token_valid_after = clock_timestamp()` to instantly revoke active access tokens across all devices.
   - Revokes active teaching assignments while preserving historical scores, remarks, and audit trails.
@@ -98,7 +98,8 @@ graph TD
 
 #### Tasks & Implementation Details:
 - [ ] **Task 2.1: Academic Structure Endpoints**
-  - `POST /api/v1/structure/sessions` & `POST /api/v1/structure/terms`.
+  - CRUD `/api/v1/structure/sessions` and nested `/api/v1/structure/sessions/{session_id}/terms`.
+  - CRUD `/api/v1/structure/levels`, `/api/v1/structure/departments`, `/api/v1/structure/arms`, and `/api/v1/structure/class-groups`.
   - `POST /api/v1/structure/class-groups`: Instantiates arm cohorts (e.g., `SS1 Science O`, `JSS1 A`).
   - Implements checks to ensure junior secondary levels function seamlessly with `department_id = NULL`.
 - [ ] **Task 2.2: Student Management (`app/modules/students/models.py`, `services.py`)**
@@ -106,12 +107,13 @@ graph TD
   - Composite uniqueness: `(school_id, admission_number)`.
   - Status lifecycle: `ACTIVE`, `SUSPENDED`, `WITHDRAWN`, `TRANSFERRED`, `GRADUATED`.
   - `POST /api/v1/students`: Register individual student.
-  - `POST /api/v1/students/{id}/status`: Admin state transition with mandatory audit log note.
+  - `POST /api/v1/students/{student_id}/status`: Admin state transition with mandatory audit log note.
 - [ ] **Task 2.3: Session Enrollment & Promotion Engine**
-  - `POST /api/v1/students/enrollments`: Enrolls an active student into a `ClassGroup` for a session.
+  - `POST /api/v1/students/{student_id}/enrollments`: Enrolls an active student into a `ClassGroup` for a session.
   - Prevents duplicate active enrollment in the same session (`uq_student_session`).
 - [ ] **Task 2.4: Bulk Student Import Pipeline (Celery)**
   - `POST /api/v1/students/bulk-import`: Accepts Excel (`.xlsx`) or CSV file.
+  - `GET /api/v1/students/bulk-import/{task_id}`: Reports progress and row-level errors.
   - Task: `app.modules.students.tasks.process_bulk_student_import`.
   - Pydantic v2 row-by-row validation, batch inserts (`bulk_create`), and detailed error reporting for invalid rows.
 
@@ -137,13 +139,13 @@ graph TD
   - Support `is_trade_subject = TRUE` for national entrepreneurship/trade subjects.
 - [ ] **Task 3.2: Granular & Cascading Teacher Assignment**
   - Model: `TeacherAssignment` linking `user_id` to `class_subject_id`.
-  - `POST /api/v1/class-subjects/{id}/assign-teacher`: Granular arm-level assignment.
-  - `POST /api/v1/class-subjects/bulk-assign`: Cascading assignment (e.g., assign Mr. Adeola to Chemistry for all SS1 Science arms in one request).
+  - `POST /api/v1/class-subjects/{class_subject_id}/teacher-assignments`: Granular arm-level assignment.
+  - `POST /api/v1/class-subjects/teacher-assignments/bulk`: Cascading assignment (e.g., assign Mr. Adeola to Chemistry for all SS1 Science arms in one request).
   - Support co-teaching: Unique constraint on `(class_subject_id, teacher_id, is_active)`.
 - [ ] **Task 3.3: Student Subject Registration (`student_subject_registrations`)**
   - Model: `StudentSubjectRegistration` with `subject_category`: `COMPULSORY_CORE`, `DEPARTMENT_CORE`, `TRADE_ELECTIVE`, `FREE_ELECTIVE`.
   - Auto-registration hook: Enrolling in a class group automatically registers all compulsory core and department core subjects.
-  - `POST /api/v1/students/{enrollment_id}/register-subjects`: Allows Form Master or Academic Officer to register a student's chosen trade subject (e.g., Catering Craft vs. Data Processing).
+  - `GET` and `POST /api/v1/enrollments/{enrollment_id}/subject-registrations`: Allows Form Master or Academic Officer to register a student's chosen trade subject (e.g., Catering Craft vs. Data Processing).
   - Teacher view filter: When a trade subject teacher queries their roster, the query filters by `student_subject_registrations` to return **only** registered students.
 
 #### Definition of Done:
@@ -307,7 +309,7 @@ graph TD
 
 ### 4.1 Standard Response Envelopes
 
-Every API endpoint must return one of these two structures:
+Every API endpoint must use the canonical domain-namespaced routes in `ARCHITECTURE.md` §6.2 and return one of these two structures:
 
 #### Success Response (`200 OK`, `201 Created`, `202 Accepted`)
 ```json
@@ -322,7 +324,7 @@ Every API endpoint must return one of these two structures:
 {
   "error": {
     "code": "INSUFFICIENT_PERMISSIONS",
-    "message": "Missing required permission: 'scores:approve' for scope 'Science'",
+    "message": "You don't have permission to approve scores for Science. If you need this access, please ask your school administrator or academic officer.",
     "details": [],
     "path": "/api/v1/assessments/approve"
   }

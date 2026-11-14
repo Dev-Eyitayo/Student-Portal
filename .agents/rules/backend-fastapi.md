@@ -30,3 +30,9 @@ Follow these patterns when implementing features:
 5. **Client-Side Document Assembly:**
    - Report cards are assembled and printed to PDF on the client side from verified backend JSON payloads.
    - Do not add server-side PDF compilers or cloud object storage for rendered reports.
+
+6. **Canonical API Contract:**
+   - Follow `ARCHITECTURE.md` §6.2 for every route and method.
+   - Use domain-namespaced, plural, kebab-case paths; do not add flat aliases.
+   - Return `SuccessResponse[T]` for success and the standard error envelope for all failures.
+   - Keep `error.message` human-friendly; technical detail belongs in `error.code` or `error.details`.

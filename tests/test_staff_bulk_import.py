@@ -53,7 +53,7 @@ async def _create_school_and_admin(client: AsyncClient, suffix: str) -> tuple[st
     }
     response = await client.post("/api/v1/identity/schools", json=payload)
     assert response.status_code == 201, response.text
-    school_id = response.json()["id"]
+    school_id = response.json()["data"]["id"]
 
     login = await client.post(
         "/api/v1/identity/login",
@@ -63,7 +63,7 @@ async def _create_school_and_admin(client: AsyncClient, suffix: str) -> tuple[st
         },
     )
     assert login.status_code == 200, login.text
-    return school_id, login.json()["access_token"]
+    return school_id, login.json()["data"]["access_token"]
 
 
 def test_parse_staff_import_file_supports_csv_and_xlsx():
@@ -155,7 +155,7 @@ async def test_staff_bulk_import_queues_and_provisions(monkeypatch):
             headers=headers,
         )
         assert response.status_code == 202, response.text
-        task_id = response.json()["task_id"]
+        task_id = response.json()["data"]["task_id"]
         assert dispatched["task_id"] == task_id
         assert dispatched["queue"] == "bulk_imports"
 
@@ -193,7 +193,7 @@ async def test_staff_bulk_import_queues_and_provisions(monkeypatch):
         invitation_token = queued_email_args[0][3]
         verify = await client.get(f"/api/v1/identity/staff/verify-invite?token={invitation_token}")
         assert verify.status_code == 200, verify.text
-        assert verify.json()["email"] == emails[0]
+        assert verify.json()["data"]["email"] == emails[0]
 
 
 @pytest.mark.asyncio

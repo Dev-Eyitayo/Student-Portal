@@ -49,6 +49,7 @@ For autonomous agents and developers working on this codebase:
 2. **Immutable Academic Snapshots:** Once a term's results are `PUBLISHED`, the student's scores, grades, positions, and grading scale schema are relationally frozen. Retroactive changes to subsequent terms will never alter past transcripts.
 3. **Hybrid Access Control (RBAC + ABAC):** Baseline role defaults (`TEACHER`, `ACADEMIC_OFFICER`) are paired with direct delegated user grants (e.g., an HOD or Form Master receiving scoped administrative rights while remaining a teaching staff).
 4. **Student Subject Registrations:** Electives and trade subjects (e.g., Catering Craft, Data Processing) are registered individually per student (`student_subject_registrations`), ensuring teachers only see enrolled students on score sheets and total obtainable marks are dynamically calculated.
+5. **Canonical API Contract:** Every endpoint uses a domain-namespaced route (`/api/v1/<domain>/...`) and returns either `{"success": true, "data": ...}` or `{"error": {"code", "message", "details", "path"}}`. `ARCHITECTURE.md` §6.2 is authoritative; legacy flat aliases are not supported.
 
 ---
 

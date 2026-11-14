@@ -855,7 +855,7 @@ olivet-platform/
 │   │   ├── security.py          # JWT, Passlib Argon2, TOTP MFA utilities
 │   │   ├── dependencies.py      # Common FastAPI dependencies (Auth, DB, Tenant)
 │   │   ├── middleware.py        # Request timing, Correlation ID, Tenant resolver
-│   │   └── exceptions.py        # Global error handlers (RFC 7807)
+│   │   └── exceptions.py        # Global error handlers (standard error envelope)
 │   ├── modules/
 │   │   ├── common/              # Base SQLAlchemy models, Pagination, Enums
 │   │   │   ├── models.py        # TenantBase, TimestampMixin, UUIDv7 generator
@@ -960,7 +960,21 @@ Because FastAPI lacks Django's built-in administration dashboard, we integrate *
 ## 6. API Architecture & Interface Contracts
 
 ### 6.1 API Conventions, OpenAPI 3.1 Standards & Response Envelopes
+
+#### Route naming rules
+
 - **Base URI:** `/api/v1/`
+- **Mandatory domain namespace:** every route must start with `/api/v1/<domain>/...`. The only exception is the system health route, `/api/v1/health`.
+- **Allowed domains:** `identity`, `structure`, `students`, `enrollments`, `subjects`, `class-subjects`, `assessments`, `computation`, `publication`, `results`, and `audit`.
+- **Resource segments:** use lowercase, plural, kebab-case nouns (for example `/class-subjects`, `/teacher-assignments`, `/subject-registrations`).
+- **Identifiers:** use named path parameters such as `{student_id}`, `{class_subject_id}`, and `{enrollment_id}`. Never use generic `{id}` in new routes.
+- **Nesting:** nest a resource only when it cannot exist without its parent (for example, terms under sessions, teacher assignments under class subjects, and subject registrations under enrollments).
+- **Workflow actions:** verbs are allowed only for non-CRUD transitions and bulk operations, such as `/submit`, `/approve`, `/unlock`, `/publish-term`, `/bulk-import`, `/bulk-entry`, and `/bulk`.
+- **No legacy aliases:** do not add parallel flat routes for namespaced endpoints. The catalog below is the single canonical contract.
+- **OpenAPI generation:** FastAPI routers must produce this exact structure. If a new domain is required, add it here before implementing the route.
+
+#### Standard response envelopes
+
 - **Standard Success Envelope:**
 ```json
 {
@@ -985,26 +999,69 @@ Because FastAPI lacks Django's built-in administration dashboard, we integrate *
 }
 ```
 
+Every success response must use `SuccessResponse[T]` from `app/modules/common/schemas.py`. Every failure, including authentication, validation, domain, and unexpected failures, must use the error envelope. Technical codes belong in `error.code`; `error.message` must remain human-friendly and actionable.
+
 ### 6.2 Endpoint Catalog by Domain
 
-| Domain | Verb | URI Endpoint | Description | Permitted Roles |
+This catalog is authoritative. `BACKEND_DEV_PLAN.md`, module routers, tests, and frontend clients must match these paths exactly.
+
+| Domain | Method | Canonical Path | Description | Permitted Roles |
 |---|---|---|---|---|
-| **Identity / Auth**| `POST` | `/api/v1/identity/users/{user_id}/permissions` | Delegate admin permission to staff (HOD, Form Master, etc.) | `SCHOOL_ADMIN` |
-| **Identity / Auth**| `DELETE` | `/api/v1/identity/users/{user_id}/permissions/{grant_id}` | Revoke delegated permission grant | `SCHOOL_ADMIN` |
-| **Structure** | `POST` | `/api/v1/sessions` | Create academic session | `SCHOOL_ADMIN` |
-| **Structure** | `POST` | `/api/v1/class-groups` | Instantiate session class cohort (e.g., SS1 Science O) | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
-| **Students** | `POST` | `/api/v1/students` | Register student record | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
-| **Students** | `POST` | `/api/v1/enrollments` | Enroll student into class group for session | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
-| **Subjects** | `POST` | `/api/v1/class-subjects/assign-teacher` | Assign teacher to class-subject offering | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
-| **Subjects** | `POST` | `/api/v1/students/{enrollment_id}/register-subjects` | Register elective/trade subjects for a student | `ACADEMIC_OFFICER`, `TEACHER` (Form Master) |
-| **Subjects** | `POST` | `/api/v1/class-subjects/{class_subject_id}/bulk-register-students` | Bulk register student cohort to a trade/elective subject | `ACADEMIC_OFFICER` |
-| **Assessments**| `POST` | `/api/v1/assessments/definitions` | Configure assessment schema (Test 1, Test 2, Assignments/Attendance, Exam) | `ACADEMIC_OFFICER` |
-| **Assessments**| `POST` | `/api/v1/assessments/scores/bulk-entry` | Teacher enters scores for assigned subject/arm | `TEACHER` (Assigned only), `ACADEMIC_OFFICER` |
-| **Assessments**| `POST` | `/api/v1/assessments/submit` | Teacher submits scores for approval | `TEACHER` (Assigned only) |
-| **Assessments**| `POST` | `/api/v1/assessments/approve` | Academic officer verifies & locks scores | `ACADEMIC_OFFICER`, `SCHOOL_ADMIN` |
-| **Computation**| `POST` | `/api/v1/computation/calculate-term` | Trigger calculation of positions & grades | `ACADEMIC_OFFICER`, `SCHOOL_ADMIN` |
-| **Publication**| `POST` | `/api/v1/publication/publish-term` | Seal snapshots and authorize distribution | `SCHOOL_ADMIN` (Principal) |
-| **Distribution**| `GET` | `/api/v1/results/verify/{token}` | Public token verification & report card fetch | `ANONYMOUS` (Validated via token & DOB) |
+| **Identity** | `POST` | `/api/v1/identity/schools` | Onboard a school tenant and initial administrator | `SUPER_ADMIN` |
+| **Identity** | `POST` | `/api/v1/identity/login` | Authenticate and issue tokens | `ANONYMOUS` |
+| **Identity** | `POST` | `/api/v1/identity/refresh` | Rotate refresh token | `ANONYMOUS` |
+| **Identity** | `POST` | `/api/v1/identity/logout` | Revoke access and refresh tokens | `AUTHENTICATED` |
+| **Identity** | `GET` | `/api/v1/identity/me` | Current profile and effective permissions | `AUTHENTICATED` |
+| **Identity** | `POST` | `/api/v1/identity/staff/invite` | Invite a staff member | `SCHOOL_ADMIN` |
+| **Identity** | `POST` | `/api/v1/identity/staff/bulk-import` | Queue a bulk staff import | `SCHOOL_ADMIN` |
+| **Identity** | `GET` | `/api/v1/identity/staff/bulk-import/{task_id}` | Check bulk staff import status | `SCHOOL_ADMIN` |
+| **Identity** | `GET` | `/api/v1/identity/staff/verify-invite` | Verify an invitation token | `ANONYMOUS` |
+| **Identity** | `POST` | `/api/v1/identity/staff/accept-invitation` | Accept an invitation and set a password | `ANONYMOUS` |
+| **Identity** | `POST` | `/api/v1/identity/users/{user_id}/permissions` | Delegate a scoped permission | `SCHOOL_ADMIN` |
+| **Identity** | `DELETE` | `/api/v1/identity/users/{user_id}/permissions/{grant_id}` | Revoke a delegated permission | `SCHOOL_ADMIN` |
+| **Identity** | `POST` | `/api/v1/identity/users/{user_id}/deactivate` | Deactivate a staff account | `SCHOOL_ADMIN` |
+| **Structure** | `GET`, `POST` | `/api/v1/structure/sessions` | List or create academic sessions | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/sessions/{session_id}` | Read, update, or retire a session | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Structure** | `GET`, `POST` | `/api/v1/structure/sessions/{session_id}/terms` | List or create terms for a session | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/terms/{term_id}` | Read, update, or retire a term | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Structure** | `GET`, `POST` | `/api/v1/structure/levels` | List or create academic levels | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/levels/{level_id}` | Read, update, or retire a level | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Structure** | `GET`, `POST` | `/api/v1/structure/departments` | List or create departments | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/departments/{department_id}` | Read, update, or retire a department | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Structure** | `GET`, `POST` | `/api/v1/structure/arms` | List or create class arms | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/arms/{arm_id}` | Read, update, or retire a class arm | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Structure** | `GET`, `POST` | `/api/v1/structure/class-groups` | List or instantiate class cohorts | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/class-groups/{class_group_id}` | Read, update, or retire a class group | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Students** | `GET`, `POST` | `/api/v1/students` | List or register students | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Students** | `GET`, `PATCH` | `/api/v1/students/{student_id}` | Read or update a student | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Students** | `POST` | `/api/v1/students/{student_id}/status` | Transition student lifecycle status with an audit note | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Students** | `GET`, `POST` | `/api/v1/students/{student_id}/enrollments` | List enrollment history or enroll a student | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Students** | `POST` | `/api/v1/students/bulk-import` | Queue a bulk student import | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Students** | `GET` | `/api/v1/students/bulk-import/{task_id}` | Check bulk student import status | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Enrollments** | `GET`, `PATCH` | `/api/v1/enrollments/{enrollment_id}` | Read or update an enrollment | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Enrollments** | `GET`, `POST` | `/api/v1/enrollments/{enrollment_id}/subject-registrations` | List or register subjects for an enrollment | `ACADEMIC_OFFICER`, `TEACHER` (Form Master) |
+| **Subjects** | `GET`, `POST` | `/api/v1/subjects` | List or create subjects | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Subjects** | `GET`, `PATCH`, `DELETE` | `/api/v1/subjects/{subject_id}` | Read, update, or retire a subject | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Subjects** | `GET`, `POST` | `/api/v1/subjects/offerings` | List or create session offerings | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Subjects** | `GET`, `PATCH`, `DELETE` | `/api/v1/subjects/offerings/{offering_id}` | Read, update, or retire an offering | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Subjects** | `GET`, `POST` | `/api/v1/class-subjects` | List or link offerings to class groups | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Subjects** | `GET`, `PATCH`, `DELETE` | `/api/v1/class-subjects/{class_subject_id}` | Read, update, or retire a class subject | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Subjects** | `GET`, `POST` | `/api/v1/class-subjects/{class_subject_id}/teacher-assignments` | List or create teacher assignments | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Subjects** | `POST` | `/api/v1/class-subjects/teacher-assignments/bulk` | Cascading teacher assignment across arms | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Subjects** | `POST` | `/api/v1/class-subjects/{class_subject_id}/subject-registrations/bulk` | Bulk-register a cohort for a trade or elective | `ACADEMIC_OFFICER` |
+| **Assessments** | `GET`, `POST` | `/api/v1/assessments/definitions` | List or configure assessment components | `ACADEMIC_OFFICER` |
+| **Assessments** | `GET`, `PATCH` | `/api/v1/assessments/definitions/{definition_id}` | Read or update an assessment component | `ACADEMIC_OFFICER` |
+| **Assessments** | `GET` | `/api/v1/assessments/scores` | Read a class-subject score sheet | `TEACHER` (Assigned only), `ACADEMIC_OFFICER` |
+| **Assessments** | `POST` | `/api/v1/assessments/scores/bulk-entry` | Enter or update a score sheet | `TEACHER` (Assigned only), `ACADEMIC_OFFICER` |
+| **Assessments** | `POST` | `/api/v1/assessments/submit` | Submit scores for review | `TEACHER` (Assigned only) |
+| **Assessments** | `POST` | `/api/v1/assessments/approve` | Approve and lock scores | `ACADEMIC_OFFICER`, `SCHOOL_ADMIN` |
+| **Assessments** | `POST` | `/api/v1/assessments/unlock` | Unlock scores with a mandatory reason | `ACADEMIC_OFFICER`, `SCHOOL_ADMIN` |
+| **Computation** | `POST` | `/api/v1/computation/calculate-term` | Calculate grades, totals, and positions | `ACADEMIC_OFFICER`, `SCHOOL_ADMIN` |
+| **Computation** | `GET` | `/api/v1/computation/broadsheet/{class_group_id}` | Term broadsheet for a class group | `ACADEMIC_OFFICER`, `SCHOOL_ADMIN`, `TEACHER` (Form Master) |
+| **Publication** | `POST` | `/api/v1/publication/publish-term` | Seal result snapshots and authorize distribution | `SCHOOL_ADMIN` (Principal) |
+| **Results** | `GET` | `/api/v1/results/verify/{token}` | Public token verification and report-card payload | `ANONYMOUS` (token + DOB/admission PIN) |
+| **Results** | `GET` | `/api/v1/results/verify-qr` | QR payload verification | `ANONYMOUS` |
+| **Audit** | `GET` | `/api/v1/audit/logs` | Query tenant audit logs | `SCHOOL_ADMIN` (with `audit:view`) |
 
 ### 6.3 End-to-End JSON Request/Response Payloads & Pydantic v2 Schemas
 
