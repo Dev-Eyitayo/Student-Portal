@@ -99,6 +99,21 @@ class ResourceNotFoundException(DomainException):
         )
 
 
+class ConflictException(DomainException):
+    def __init__(
+        self,
+        message: str,
+        code: str = "CONFLICT",
+        details: list[dict[str, Any]] | None = None,
+    ):
+        super().__init__(
+            code=code,
+            message=message,
+            status_code=status.HTTP_409_CONFLICT,
+            details=details,
+        )
+
+
 class ValidationException(DomainException):
     def __init__(self, message: str, details: list[dict[str, Any]] | None = None):
         super().__init__(

@@ -18,8 +18,10 @@ from app.core.exceptions import (
 )
 from app.core.redis import close_redis, init_redis
 from app.core.rls import verify_rls_enforcement
+from app.modules.academic_structure.router import router as structure_router
 from app.modules.identity.router import router as identity_router
 from app.modules.identity.seed import seed_system_permissions
+from app.modules.students.router import router as students_router
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -75,6 +77,8 @@ def create_app() -> FastAPI:
 
     # Mount API Routers
     app.include_router(identity_router, prefix="/api/v1")
+    app.include_router(structure_router, prefix="/api/v1")
+    app.include_router(students_router, prefix="/api/v1")
 
     # Healthcheck
     @app.get("/api/v1/health", tags=["System"])

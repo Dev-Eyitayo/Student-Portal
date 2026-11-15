@@ -97,25 +97,25 @@ graph TD
 3. Build the asynchronous bulk student import pipeline.
 
 #### Tasks & Implementation Details:
-- [ ] **Task 2.1: Academic Structure Endpoints**
+- [x] **Task 2.1: Academic Structure Endpoints**
   - CRUD `/api/v1/structure/sessions` and nested `/api/v1/structure/sessions/{session_id}/terms`.
   - CRUD `/api/v1/structure/levels`, `/api/v1/structure/departments`, `/api/v1/structure/arms`, and `/api/v1/structure/class-groups`.
   - `POST /api/v1/structure/class-groups`: Instantiates arm cohorts (e.g., `SS1 Science O`, `JSS1 A`).
   - Implements checks to ensure junior secondary levels function seamlessly with `department_id = NULL`.
-- [ ] **Task 2.2: Student Management (`app/modules/students/models.py`, `services.py`)**
+- [x] **Task 2.2: Student Management (`app/modules/students/models.py`, `services.py`)**
   - Define `Student` and `StudentEnrollment` models as specified in `ARCHITECTURE.md`.
   - Composite uniqueness: `(school_id, admission_number)`.
-  - Status lifecycle: `ACTIVE`, `SUSPENDED`, `WITHDRAWN`, `TRANSFERRED`, `GRADUATED`.
+  - Status lifecycle: `ADMITTED`, `ACTIVE`, `SUSPENDED`, `WITHDRAWN`, `TRANSFERRED`, `GRADUATED`.
   - `POST /api/v1/students`: Register individual student.
   - `POST /api/v1/students/{student_id}/status`: Admin state transition with mandatory audit log note.
-- [ ] **Task 2.3: Session Enrollment & Promotion Engine**
-  - `POST /api/v1/students/{student_id}/enrollments`: Enrolls an active student into a `ClassGroup` for a session.
-  - Prevents duplicate active enrollment in the same session (`uq_student_session`).
-- [ ] **Task 2.4: Bulk Student Import Pipeline (Celery)**
+- [x] **Task 2.3: Session Enrollment & Promotion Engine**
+  - `POST /api/v1/students/{student_id}/enrollments`: Enrolls an admitted or active student into a `ClassGroup` for a session.
+  - Prevents duplicate enrollment in the same session (`uq_student_session`).
+- [x] **Task 2.4: Bulk Student Import Pipeline (Celery)**
   - `POST /api/v1/students/bulk-import`: Accepts Excel (`.xlsx`) or CSV file.
   - `GET /api/v1/students/bulk-import/{task_id}`: Reports progress and row-level errors.
-  - Task: `app.modules.students.tasks.process_bulk_student_import`.
-  - Pydantic v2 row-by-row validation, batch inserts (`bulk_create`), and detailed error reporting for invalid rows.
+  - Task: `app.modules.students.tasks.process_student_bulk_import`.
+  - Pydantic v2 row-by-row validation, atomic batch inserts, and detailed error reporting for invalid rows.
 
 #### Definition of Done:
 - Successfully import 1,000 student records via Celery task in under 15 seconds.
