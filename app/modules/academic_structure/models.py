@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date
 from typing import Optional
 from uuid import UUID
 
@@ -6,12 +6,10 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Date,
-    DateTime,
     ForeignKey,
     Index,
     SmallInteger,
     String,
-    UniqueConstraint,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -29,15 +27,27 @@ class AcademicSession(Base, TenantMixin, TimestampMixin):
     is_current: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("school_id", "name", name="uq_school_session_name"),
+        Index(
+            "uq_school_session_name_active",
+            "school_id",
+            "name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        Index(
+            "uq_current_session_per_school",
+            "school_id",
+            unique=True,
+            postgresql_where=text("is_current AND deleted_at IS NULL"),
+        ),
         CheckConstraint("end_date > start_date", name="chk_session_dates"),
     )
 
     terms: Mapped[list["AcademicTerm"]] = relationship(
-        "AcademicTerm", back_populates="academic_session", cascade="all, delete-orphan"
+        "AcademicTerm", back_populates="academic_session", passive_deletes=True
     )
     class_groups: Mapped[list["ClassGroup"]] = relationship(
-        "ClassGroup", back_populates="academic_session", cascade="all, delete-orphan"
+        "ClassGroup", back_populates="academic_session", passive_deletes=True
     )
 
 
@@ -46,7 +56,7 @@ class AcademicTerm(Base, TenantMixin, TimestampMixin):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
     academic_session_id: Mapped[UUID] = mapped_column(
-        ForeignKey("academic_sessions.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("academic_sessions.id", ondelete="RESTRICT"), nullable=False
     )
     name: Mapped[str] = mapped_column(
         String(32), nullable=False
@@ -58,8 +68,27 @@ class AcademicTerm(Base, TenantMixin, TimestampMixin):
     is_locked_for_scoring: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("academic_session_id", "term_order", name="uq_session_term_order"),
-        UniqueConstraint("academic_session_id", "name", name="uq_session_term_name"),
+        Index(
+            "uq_session_term_order_active",
+            "academic_session_id",
+            "term_order",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        Index(
+            "uq_session_term_name_active",
+            "academic_session_id",
+            "name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        Index(
+            "uq_current_term_per_school",
+            "school_id",
+            unique=True,
+            postgresql_where=text("is_current AND deleted_at IS NULL"),
+        ),
+        CheckConstraint("term_order > 0", name="chk_term_order_positive"),
         CheckConstraint("end_date > start_date", name="chk_term_dates"),
     )
 
@@ -68,7 +97,7 @@ class AcademicTerm(Base, TenantMixin, TimestampMixin):
     )
 
 
-class AcademicLevel(Base, TenantMixin):
+class AcademicLevel(Base, TenantMixin, TimestampMixin):
     __tablename__ = "academic_levels"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
@@ -78,41 +107,64 @@ class AcademicLevel(Base, TenantMixin):
     category: Mapped[str] = mapped_column(
         String(32), nullable=False
     )  # 'JUNIOR_SECONDARY', 'SENIOR_SECONDARY'
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False
-    )
 
     __table_args__ = (
-        UniqueConstraint("school_id", "code", name="uq_school_level_code"),
-        UniqueConstraint("school_id", "level_order", name="uq_school_level_order"),
+        Index(
+            "uq_school_level_code_active",
+            "school_id",
+            "code",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        Index(
+            "uq_school_level_order_active",
+            "school_id",
+            "level_order",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        CheckConstraint(
+            "category IN ('JUNIOR_SECONDARY', 'SENIOR_SECONDARY')",
+            name="chk_level_category",
+        ),
     )
 
 
-class Department(Base, TenantMixin):
+class Department(Base, TenantMixin, TimestampMixin):
     __tablename__ = "departments"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
     name: Mapped[str] = mapped_column(String(64), nullable=False)  # 'Science', 'Arts', 'Commercial'
     code: Mapped[str] = mapped_column(String(16), nullable=False)  # 'SCI', 'ART', 'COMM'
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False
+
+    __table_args__ = (
+        Index(
+            "uq_school_department_code_active",
+            "school_id",
+            "code",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
 
-    __table_args__ = (UniqueConstraint("school_id", "code", name="uq_school_department_code"),)
 
-
-class ClassArm(Base, TenantMixin):
+class ClassArm(Base, TenantMixin, TimestampMixin):
     __tablename__ = "class_arms"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
     name: Mapped[str] = mapped_column(
         String(32), nullable=False
     )  # e.g., 'O', 'L', 'I', 'V', 'A', 'B'
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False
-    )
 
-    __table_args__ = (UniqueConstraint("school_id", "name", name="uq_school_arm_name"),)
+    __table_args__ = (
+        Index(
+            "uq_school_arm_name_active",
+            "school_id",
+            "name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
 
 
 class ClassGroup(Base, TenantMixin, TimestampMixin):
@@ -125,7 +177,7 @@ class ClassGroup(Base, TenantMixin, TimestampMixin):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
     academic_session_id: Mapped[UUID] = mapped_column(
-        ForeignKey("academic_sessions.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("academic_sessions.id", ondelete="RESTRICT"), nullable=False
     )
     academic_level_id: Mapped[UUID] = mapped_column(
         ForeignKey("academic_levels.id", ondelete="RESTRICT"), nullable=False
@@ -142,12 +194,24 @@ class ClassGroup(Base, TenantMixin, TimestampMixin):
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_class_group_composition_with_dept",
+            "school_id",
             "academic_session_id",
             "academic_level_id",
             "department_id",
             "class_arm_id",
-            name="uq_class_group_composition",
+            unique=True,
+            postgresql_where=text("department_id IS NOT NULL AND deleted_at IS NULL"),
+        ),
+        Index(
+            "uq_class_group_composition_no_dept",
+            "school_id",
+            "academic_session_id",
+            "academic_level_id",
+            "class_arm_id",
+            unique=True,
+            postgresql_where=text("department_id IS NULL AND deleted_at IS NULL"),
         ),
         Index("idx_class_groups_lookup", "school_id", "academic_session_id", "academic_level_id"),
     )

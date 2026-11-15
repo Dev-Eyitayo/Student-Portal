@@ -1,11 +1,10 @@
-from datetime import date, datetime
+from datetime import date
 from typing import TYPE_CHECKING, Optional
 from uuid import UUID
 
 from sqlalchemy import (
     CheckConstraint,
     Date,
-    DateTime,
     ForeignKey,
     Index,
     String,
@@ -35,18 +34,21 @@ class Student(Base, TenantMixin, TimestampMixin):
     guardian_phone: Mapped[str] = mapped_column(String(32), nullable=False)
     enrollment_date: Mapped[date] = mapped_column(Date, nullable=False)
     status: Mapped[str] = mapped_column(
-        String(32), default="ACTIVE", nullable=False
-    )  # ACTIVE, TRANSFERRED, GRADUATED, WITHDRAWN, SUSPENDED
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+        String(32), default="ADMITTED", nullable=False
+    )  # ADMITTED, ACTIVE, TRANSFERRED, GRADUATED, WITHDRAWN, SUSPENDED
 
     __table_args__ = (
         UniqueConstraint("school_id", "admission_number", name="uq_school_admission_number"),
         CheckConstraint("gender IN ('M', 'F')", name="chk_student_gender"),
+        CheckConstraint(
+            "status IN ('ADMITTED', 'ACTIVE', 'SUSPENDED', 'WITHDRAWN', 'TRANSFERRED', 'GRADUATED')",
+            name="chk_student_status",
+        ),
         Index("idx_students_search", "school_id", "last_name", "first_name"),
     )
 
     enrollments: Mapped[list["StudentEnrollment"]] = relationship(
-        "StudentEnrollment", back_populates="student", cascade="all, delete-orphan"
+        "StudentEnrollment", back_populates="student", passive_deletes=True
     )
 
 
@@ -55,10 +57,10 @@ class StudentEnrollment(Base, TenantMixin, TimestampMixin):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
     student_id: Mapped[UUID] = mapped_column(
-        ForeignKey("students.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("students.id", ondelete="RESTRICT"), nullable=False
     )
     academic_session_id: Mapped[UUID] = mapped_column(
-        ForeignKey("academic_sessions.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("academic_sessions.id", ondelete="RESTRICT"), nullable=False
     )
     class_group_id: Mapped[UUID] = mapped_column(
         ForeignKey("class_groups.id", ondelete="RESTRICT"), nullable=False
@@ -72,6 +74,10 @@ class StudentEnrollment(Base, TenantMixin, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint("student_id", "academic_session_id", name="uq_student_session"),
+        CheckConstraint(
+            "enrollment_status IN ('ENROLLED', 'PROMOTED', 'REPEATING', 'TRANSFERRED', 'WITHDRAWN')",
+            name="chk_enrollment_status",
+        ),
         Index("idx_enrollments_class", "class_group_id", "enrollment_status"),
     )
 

@@ -10,7 +10,7 @@ celery_app = Celery(
     "olivet",
     broker=broker_url,
     backend=settings.CELERY_RESULT_BACKEND,
-    include=["app.modules.identity.tasks"],
+    include=["app.modules.identity.tasks", "app.modules.students.tasks"],
 )
 
 celery_app.conf.update(
@@ -28,6 +28,7 @@ celery_app.conf.update(
     task_routes={
         "app.modules.identity.tasks.process_staff_bulk_import": {"queue": "bulk_imports"},
         "app.modules.identity.tasks.send_staff_invitation_email": {"queue": "notifications"},
+        "app.modules.students.tasks.process_student_bulk_import": {"queue": "bulk_imports"},
     },
 )
 

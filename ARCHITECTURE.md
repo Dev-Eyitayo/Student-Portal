@@ -239,19 +239,45 @@ stateDiagram-v2
     PUBLISHED --> [*]
 ```
 
-#### 3.3.2 Student Enrollment Lifecycle
+#### 3.3.2 Student & Enrollment Lifecycles
+
+Student lifecycle status is tracked independently from the status of each historical session enrollment:
+
 ```mermaid
 stateDiagram-v2
     [*] --> ADMITTED: Student registered
-    ADMITTED --> ACTIVE: Enrolled into ClassGroup for Session
-    ACTIVE --> PROMOTED: Session concluded, passed criteria
-    ACTIVE --> REPEATING: Session concluded, retained in level
-    ACTIVE --> TRANSFERRED: Moved to another school/arm
+    ADMITTED --> ACTIVE: First enrollment created
+    ADMITTED --> WITHDRAWN: Exited before enrollment
+    ACTIVE --> SUSPENDED: Disciplinary or administrative suspension
+    SUSPENDED --> ACTIVE: Suspension lifted
     ACTIVE --> WITHDRAWN: Exited before completion
-    ACTIVE --> GRADUATED: Completed terminal level (SS3)
-    PROMOTED --> ACTIVE: Re-enrolled in new Session
-    REPEATING --> ACTIVE: Re-enrolled in new Session
+    ACTIVE --> TRANSFERRED: Moved to another school
+    ACTIVE --> GRADUATED: Completed terminal level
+    SUSPENDED --> WITHDRAWN: Exited while suspended
+    SUSPENDED --> TRANSFERRED: Moved while suspended
+    WITHDRAWN --> [*]
+    TRANSFERRED --> [*]
+    GRADUATED --> [*]
 ```
+
+`WITHDRAWN` and `TRANSFERRED` also archive the student record with `deleted_at`; historical reads remain available.
+
+Each `StudentEnrollment` follows its own terminal state machine:
+
+```mermaid
+stateDiagram-v2
+    [*] --> ENROLLED: Enrolled into ClassGroup for Session
+    ENROLLED --> PROMOTED: Session concluded, passed criteria
+    ENROLLED --> REPEATING: Session concluded, retained in level
+    ENROLLED --> TRANSFERRED: Moved to another school/arm
+    ENROLLED --> WITHDRAWN: Exited before completion
+    PROMOTED --> [*]
+    REPEATING --> [*]
+    TRANSFERRED --> [*]
+    WITHDRAWN --> [*]
+```
+
+A promotion records `promoted_to_class_group_id`; the student is then enrolled into the target class group for the later session as a new historical enrollment row.
 
 ### 3.4 Platform-Level vs. Tenant-Scoped Entity Hierarchy
 
@@ -460,25 +486,29 @@ CREATE INDEX idx_user_permission_grants_lookup ON user_permission_grants(user_id
 
 #### 4.3.2 Academic Structure Tables
 
+Uniqueness for soft-retirable structure records is enforced with partial unique indexes scoped to rows where `deleted_at IS NULL`.
+
 ##### `academic_sessions` & `academic_terms`
 ```sql
 CREATE TABLE academic_sessions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY, -- application-generated UUIDv7
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
     name VARCHAR(32) NOT NULL, -- e.g., '2024/2025'
     start_date DATE NOT NULL,
     end_date DATE NOT NULL,
     is_current BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_school_session_name UNIQUE (school_id, name),
+    deleted_at TIMESTAMPTZ NULL,
     CONSTRAINT chk_session_dates CHECK (end_date > start_date)
 );
+CREATE UNIQUE INDEX uq_school_session_name_active ON academic_sessions(school_id, name) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX uq_current_session_per_school ON academic_sessions(school_id) WHERE is_current AND deleted_at IS NULL;
 
 CREATE TABLE academic_terms (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
-    academic_session_id UUID NOT NULL REFERENCES academic_sessions(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY, -- application-generated UUIDv7
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
+    academic_session_id UUID NOT NULL REFERENCES academic_sessions(id) ON DELETE RESTRICT,
     name VARCHAR(32) NOT NULL, -- e.g., 'First Term', 'Second Term', 'Third Term'
     term_order SMALLINT NOT NULL, -- 1, 2, 3
     start_date DATE NOT NULL,
@@ -487,50 +517,60 @@ CREATE TABLE academic_terms (
     is_locked_for_scoring BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_session_term_order UNIQUE (academic_session_id, term_order),
-    CONSTRAINT uq_session_term_name UNIQUE (academic_session_id, name),
+    deleted_at TIMESTAMPTZ NULL,
+    CONSTRAINT chk_term_order_positive CHECK (term_order > 0),
     CONSTRAINT chk_term_dates CHECK (end_date > start_date)
 );
+CREATE UNIQUE INDEX uq_session_term_name_active ON academic_terms(academic_session_id, name) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX uq_session_term_order_active ON academic_terms(academic_session_id, term_order) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX uq_current_term_per_school ON academic_terms(school_id) WHERE is_current AND deleted_at IS NULL;
 ```
 
 ##### `academic_levels`, `departments` & `class_arms`
 ```sql
 CREATE TABLE academic_levels (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY, -- application-generated UUIDv7
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
     name VARCHAR(64) NOT NULL, -- e.g., 'JSS 1', 'SS 1'
     code VARCHAR(16) NOT NULL, -- e.g., 'JSS1', 'SS1'
     level_order SMALLINT NOT NULL, -- Sequence: 1, 2, 3, 4, 5, 6
     category VARCHAR(32) NOT NULL, -- 'JUNIOR_SECONDARY', 'SENIOR_SECONDARY'
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_school_level_code UNIQUE (school_id, code),
-    CONSTRAINT uq_school_level_order UNIQUE (school_id, level_order)
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ NULL,
+    CONSTRAINT chk_level_category CHECK (category IN ('JUNIOR_SECONDARY', 'SENIOR_SECONDARY'))
 );
+CREATE UNIQUE INDEX uq_school_level_code_active ON academic_levels(school_id, code) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX uq_school_level_order_active ON academic_levels(school_id, level_order) WHERE deleted_at IS NULL;
 
 CREATE TABLE departments (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY, -- application-generated UUIDv7
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
     name VARCHAR(64) NOT NULL, -- e.g., 'Science', 'Arts', 'Commercial'
     code VARCHAR(16) NOT NULL, -- e.g., 'SCI', 'ART', 'COMM'
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_school_department_code UNIQUE (school_id, code)
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ NULL
 );
+CREATE UNIQUE INDEX uq_school_department_code_active ON departments(school_id, code) WHERE deleted_at IS NULL;
 
 CREATE TABLE class_arms (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY, -- application-generated UUIDv7
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
     name VARCHAR(32) NOT NULL, -- e.g., 'O', 'L', 'I', 'V', 'A', 'B'
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_school_arm_name UNIQUE (school_id, name)
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ NULL
 );
+CREATE UNIQUE INDEX uq_school_arm_name_active ON class_arms(school_id, name) WHERE deleted_at IS NULL;
 ```
 
 ##### `class_groups` (Class Cohort Instances)
 ```sql
 CREATE TABLE class_groups (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
-    academic_session_id UUID NOT NULL REFERENCES academic_sessions(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY, -- application-generated UUIDv7
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
+    academic_session_id UUID NOT NULL REFERENCES academic_sessions(id) ON DELETE RESTRICT,
     academic_level_id UUID NOT NULL REFERENCES academic_levels(id) ON DELETE RESTRICT,
     department_id UUID REFERENCES departments(id) ON DELETE RESTRICT, -- NULLABLE for JSS or non-departmental schools
     class_arm_id UUID NOT NULL REFERENCES class_arms(id) ON DELETE RESTRICT,
@@ -538,8 +578,14 @@ CREATE TABLE class_groups (
     display_name VARCHAR(128) NOT NULL, -- e.g., 'SS1 Science O' or 'JSS1 A'
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_class_group_composition UNIQUE (academic_session_id, academic_level_id, department_id, class_arm_id)
+    deleted_at TIMESTAMPTZ NULL
 );
+CREATE UNIQUE INDEX uq_class_group_composition_with_dept
+    ON class_groups(school_id, academic_session_id, academic_level_id, department_id, class_arm_id)
+    WHERE department_id IS NOT NULL AND deleted_at IS NULL;
+CREATE UNIQUE INDEX uq_class_group_composition_no_dept
+    ON class_groups(school_id, academic_session_id, academic_level_id, class_arm_id)
+    WHERE department_id IS NULL AND deleted_at IS NULL;
 CREATE INDEX idx_class_groups_lookup ON class_groups(school_id, academic_session_id, academic_level_id);
 ```
 
@@ -548,37 +594,45 @@ CREATE INDEX idx_class_groups_lookup ON class_groups(school_id, academic_session
 ##### `students` & `student_enrollments`
 ```sql
 CREATE TABLE students (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY, -- application-generated UUIDv7
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
     admission_number VARCHAR(64) NOT NULL,
     first_name VARCHAR(64) NOT NULL,
     middle_name VARCHAR(64),
     last_name VARCHAR(64) NOT NULL,
     date_of_birth DATE NOT NULL,
-    gender CHAR(1) NOT NULL CHECK (gender IN ('M', 'F')),
+    gender CHAR(1) NOT NULL,
     guardian_name VARCHAR(128) NOT NULL,
     guardian_email VARCHAR(255) NOT NULL,
     guardian_phone VARCHAR(32) NOT NULL,
     enrollment_date DATE NOT NULL,
-    status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE', -- ACTIVE, TRANSFERRED, GRADUATED, WITHDRAWN, SUSPENDED
+    status VARCHAR(32) NOT NULL, -- application default: 'ADMITTED'
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     deleted_at TIMESTAMPTZ NULL,
-    CONSTRAINT uq_school_admission_number UNIQUE (school_id, admission_number)
+    CONSTRAINT uq_school_admission_number UNIQUE (school_id, admission_number),
+    CONSTRAINT chk_student_gender CHECK (gender IN ('M', 'F')),
+    CONSTRAINT chk_student_status CHECK (
+        status IN ('ADMITTED', 'ACTIVE', 'SUSPENDED', 'WITHDRAWN', 'TRANSFERRED', 'GRADUATED')
+    )
 );
-CREATE INDEX idx_students_search ON students(school_id, last_name, first_name) WHERE deleted_at IS NULL;
+CREATE INDEX idx_students_search ON students(school_id, last_name, first_name);
 
 CREATE TABLE student_enrollments (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
-    student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-    academic_session_id UUID NOT NULL REFERENCES academic_sessions(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY, -- application-generated UUIDv7
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
+    student_id UUID NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+    academic_session_id UUID NOT NULL REFERENCES academic_sessions(id) ON DELETE RESTRICT,
     class_group_id UUID NOT NULL REFERENCES class_groups(id) ON DELETE RESTRICT,
-    enrollment_status VARCHAR(32) NOT NULL DEFAULT 'ENROLLED', -- ENROLLED, PROMOTED, REPEATING, TRANSFERRED, WITHDRAWN
+    enrollment_status VARCHAR(32) NOT NULL, -- application default: 'ENROLLED'
     promoted_to_class_group_id UUID REFERENCES class_groups(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_student_session UNIQUE (student_id, academic_session_id)
+    deleted_at TIMESTAMPTZ NULL,
+    CONSTRAINT uq_student_session UNIQUE (student_id, academic_session_id),
+    CONSTRAINT chk_enrollment_status CHECK (
+        enrollment_status IN ('ENROLLED', 'PROMOTED', 'REPEATING', 'TRANSFERRED', 'WITHDRAWN')
+    )
 );
 CREATE INDEX idx_enrollments_class ON student_enrollments(class_group_id, enrollment_status);
 ```
@@ -1330,10 +1384,10 @@ Heavy computational and I/O-bound operations are strictly isolated from HTTP web
 ```
 
 ### 8.2 Bulk Student Import Pipeline
-- Handled via `app.modules.students.tasks.process_bulk_student_import`.
+- Handled via `app.modules.students.tasks.process_student_bulk_import`.
 - Accepts Excel (`.xlsx`) or CSV files uploaded to temporary staging storage.
 - Validates rows sequentially using Pydantic v2 schemas.
-- Implements atomic batch inserts via SQLAlchemy `session.execute(insert(Student), records)`.
+- Implements atomic batch inserts via SQLAlchemy ORM batch operations.
 - Generates a row-by-row error report if validation fails, returning it to the initiating administrator without committing partial dirty records.
 
 ### 8.3 Client-Side Document Assembly & PDF Generation Architecture
