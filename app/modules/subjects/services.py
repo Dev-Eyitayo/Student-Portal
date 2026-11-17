@@ -7,9 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
     ConflictException,
+    InsufficientPermissionException,
     ResourceNotFoundException,
     ValidationException,
 )
+from app.core.permissions import build_scope_filter, get_permission_scope, require_scoped_permission
 from app.modules.academic_structure.models import (
     AcademicLevel,
     AcademicSession,
@@ -145,6 +147,45 @@ async def _get_active_class_group(
     if not class_group:
         raise ResourceNotFoundException("class group", class_group_id)
     return class_group
+
+
+async def _resolve_class_group_scope(db: AsyncSession, class_group_id: UUID) -> ClassGroup:
+    stmt = select(ClassGroup).where(ClassGroup.id == class_group_id)
+    return (await db.execute(stmt)).scalar_one()
+
+
+async def _require_class_subject_scope(
+    db: AsyncSession,
+    current_user: User,
+    class_subject: ClassSubject,
+    permission_code: str,
+) -> None:
+    class_group = await _resolve_class_group_scope(db, class_subject.class_group_id)
+    await require_scoped_permission(
+        db,
+        current_user,
+        permission_code,
+        department_id=class_group.department_id,
+        academic_level_id=class_group.academic_level_id,
+        class_group_id=class_group.id,
+    )
+
+
+async def _require_enrollment_scope(
+    db: AsyncSession,
+    current_user: User,
+    enrollment: StudentEnrollment,
+    permission_code: str,
+) -> None:
+    class_group = await _resolve_class_group_scope(db, enrollment.class_group_id)
+    await require_scoped_permission(
+        db,
+        current_user,
+        permission_code,
+        department_id=class_group.department_id,
+        academic_level_id=class_group.academic_level_id,
+        class_group_id=class_group.id,
+    )
 
 
 async def _validate_teacher(db: AsyncSession, school_id: UUID, teacher_id: UUID) -> User:
@@ -318,6 +359,7 @@ def _offering_query(
 async def list_offerings(
     db: AsyncSession,
     school_id: UUID,
+    current_user: User,
     *,
     subject_id: UUID | None,
     academic_session_id: UUID | None,
@@ -326,6 +368,10 @@ async def list_offerings(
     page_size: int,
     include_retired: bool,
 ) -> tuple[list[SubjectOffering], PageMeta]:
+    scope = await get_permission_scope(db, current_user, "subjects:manage")
+    if not scope.has_any_access:
+        raise InsufficientPermissionException(permission_code="subjects:manage")
+
     stmt = _offering_query(
         school_id,
         subject_id=subject_id,
@@ -333,6 +379,14 @@ async def list_offerings(
         academic_level_id=academic_level_id,
         include_retired=include_retired,
     )
+    if not scope.unscoped:
+        stmt = stmt.where(
+            build_scope_filter(
+                scope,
+                department_column=SubjectOffering.department_id,
+                academic_level_column=SubjectOffering.academic_level_id,
+            )
+        )
     return await paginate(db, stmt, page=page, page_size=page_size)
 
 
@@ -364,6 +418,7 @@ async def create_offering(
     db: AsyncSession,
     school_id: UUID,
     req: OfferingCreateRequest,
+    current_user: User,
     audit: AuditContext,
 ) -> SubjectOffering:
     subject = await _get_subject(db, school_id, req.subject_id)
@@ -387,6 +442,13 @@ async def create_offering(
         raise ResourceNotFoundException("academic level", req.academic_level_id)
 
     department = await _validate_offering_department(db, school_id, level, req.department_id)
+    await require_scoped_permission(
+        db,
+        current_user,
+        "subjects:manage",
+        department_id=department.id if department else None,
+        academic_level_id=level.id,
+    )
 
     offering = SubjectOffering(
         school_id=school_id,
@@ -424,8 +486,18 @@ async def create_offering(
     return offering
 
 
-async def get_offering(db: AsyncSession, school_id: UUID, offering_id: UUID) -> SubjectOffering:
-    return await _get_offering(db, school_id, offering_id)
+async def get_offering(
+    db: AsyncSession, school_id: UUID, offering_id: UUID, current_user: User
+) -> SubjectOffering:
+    offering = await _get_offering(db, school_id, offering_id)
+    await require_scoped_permission(
+        db,
+        current_user,
+        "subjects:manage",
+        department_id=offering.department_id,
+        academic_level_id=offering.academic_level_id,
+    )
+    return offering
 
 
 async def update_offering(
@@ -433,9 +505,17 @@ async def update_offering(
     school_id: UUID,
     offering_id: UUID,
     req: OfferingUpdateRequest,
+    current_user: User,
     audit: AuditContext,
 ) -> SubjectOffering:
     offering = await _get_offering(db, school_id, offering_id)
+    await require_scoped_permission(
+        db,
+        current_user,
+        "subjects:manage",
+        department_id=offering.department_id,
+        academic_level_id=offering.academic_level_id,
+    )
 
     active_links = await db.execute(
         select(func.count()).where(
@@ -478,9 +558,17 @@ async def retire_offering(
     db: AsyncSession,
     school_id: UUID,
     offering_id: UUID,
+    current_user: User,
     audit: AuditContext,
 ) -> SubjectOffering:
     offering = await _get_offering(db, school_id, offering_id)
+    await require_scoped_permission(
+        db,
+        current_user,
+        "subjects:manage",
+        department_id=offering.department_id,
+        academic_level_id=offering.academic_level_id,
+    )
     offering.deleted_at = datetime.now(UTC)
     await db.flush()
     record_audit_log(
@@ -524,6 +612,7 @@ async def _class_subject_active_usage_count(db: AsyncSession, class_subject_id: 
 async def list_class_subjects(
     db: AsyncSession,
     school_id: UUID,
+    current_user: User,
     *,
     class_group_id: UUID | None,
     subject_offering_id: UUID | None,
@@ -531,6 +620,10 @@ async def list_class_subjects(
     page_size: int,
     include_retired: bool,
 ) -> tuple[list[ClassSubject], PageMeta]:
+    scope = await get_permission_scope(db, current_user, "subjects:manage")
+    if not scope.has_any_access:
+        raise InsufficientPermissionException(permission_code="subjects:manage")
+
     stmt = select(ClassSubject).where(ClassSubject.school_id == school_id)
     if not include_retired:
         stmt = stmt.where(ClassSubject.deleted_at.is_(None))
@@ -538,6 +631,15 @@ async def list_class_subjects(
         stmt = stmt.where(ClassSubject.class_group_id == class_group_id)
     if subject_offering_id is not None:
         stmt = stmt.where(ClassSubject.subject_offering_id == subject_offering_id)
+    if not scope.unscoped:
+        stmt = stmt.join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id).where(
+            build_scope_filter(
+                scope,
+                department_column=ClassGroup.department_id,
+                academic_level_column=ClassGroup.academic_level_id,
+                class_group_column=ClassGroup.id,
+            )
+        )
     return await paginate(db, stmt, page=page, page_size=page_size)
 
 
@@ -579,6 +681,7 @@ async def create_class_subject(
     db: AsyncSession,
     school_id: UUID,
     req: ClassSubjectCreateRequest,
+    current_user: User,
     audit: AuditContext,
 ) -> ClassSubject:
     offering = await _get_offering(db, school_id, req.subject_offering_id)
@@ -588,6 +691,14 @@ async def create_class_subject(
             "This class group does not belong to the same academic session as the subject "
             "offering. Please choose a class group from the matching session."
         )
+    await require_scoped_permission(
+        db,
+        current_user,
+        "subjects:manage",
+        department_id=class_group.department_id,
+        academic_level_id=class_group.academic_level_id,
+        class_group_id=class_group.id,
+    )
 
     existing_stmt = select(ClassSubject.id).where(
         ClassSubject.subject_offering_id == offering.id,
@@ -627,18 +738,22 @@ async def create_class_subject(
 
 
 async def get_class_subject(
-    db: AsyncSession, school_id: UUID, class_subject_id: UUID
+    db: AsyncSession, school_id: UUID, class_subject_id: UUID, current_user: User
 ) -> ClassSubject:
-    return await _get_class_subject(db, school_id, class_subject_id)
+    class_subject = await _get_class_subject(db, school_id, class_subject_id)
+    await _require_class_subject_scope(db, current_user, class_subject, "subjects:manage")
+    return class_subject
 
 
 async def retire_class_subject(
     db: AsyncSession,
     school_id: UUID,
     class_subject_id: UUID,
+    current_user: User,
     audit: AuditContext,
 ) -> ClassSubject:
     class_subject = await _get_class_subject(db, school_id, class_subject_id)
+    await _require_class_subject_scope(db, current_user, class_subject, "subjects:manage")
     usage_count = await _class_subject_active_usage_count(db, class_subject.id)
     if usage_count > 0:
         raise ValidationException(
@@ -674,12 +789,14 @@ async def list_teacher_assignments(
     db: AsyncSession,
     school_id: UUID,
     class_subject_id: UUID,
+    current_user: User,
     *,
     page: int,
     page_size: int,
     include_inactive: bool,
 ) -> tuple[list[TeacherAssignment], PageMeta]:
-    await _get_class_subject(db, school_id, class_subject_id)
+    class_subject = await _get_class_subject(db, school_id, class_subject_id)
+    await _require_class_subject_scope(db, current_user, class_subject, "teachers:assign")
     stmt = select(TeacherAssignment).where(
         TeacherAssignment.school_id == school_id,
         TeacherAssignment.class_subject_id == class_subject_id,
@@ -738,9 +855,11 @@ async def create_teacher_assignment(
     class_subject_id: UUID,
     teacher_id: UUID,
     assigned_by_id: UUID,
+    current_user: User,
     audit: AuditContext,
 ) -> TeacherAssignment:
     class_subject = await _get_class_subject(db, school_id, class_subject_id)
+    await _require_class_subject_scope(db, current_user, class_subject, "teachers:assign")
     teacher = await _validate_teacher(db, school_id, teacher_id)
 
     assignment, already_active = await _assign_teacher_to_class_subject(
@@ -776,8 +895,12 @@ async def deactivate_teacher_assignment(
     school_id: UUID,
     class_subject_id: UUID,
     assignment_id: UUID,
+    current_user: User,
     audit: AuditContext,
 ) -> TeacherAssignment:
+    class_subject = await _get_class_subject(db, school_id, class_subject_id)
+    await _require_class_subject_scope(db, current_user, class_subject, "teachers:assign")
+
     stmt = select(TeacherAssignment).where(
         TeacherAssignment.id == assignment_id,
         TeacherAssignment.class_subject_id == class_subject_id,
@@ -813,6 +936,7 @@ async def bulk_assign_teacher(
     school_id: UUID,
     req: TeacherAssignmentBulkCreateRequest,
     assigned_by_id: UUID,
+    current_user: User,
     audit: AuditContext,
 ) -> tuple[list[TeacherAssignment], list[TeacherAssignmentBulkSkip]]:
     offering = await _get_offering(db, school_id, req.subject_offering_id)
@@ -837,6 +961,23 @@ async def bulk_assign_teacher(
                 TeacherAssignmentBulkSkip(
                     class_group_id=class_group_id,
                     reason="This class group does not belong to the same academic session as the subject offering.",
+                )
+            )
+            continue
+        try:
+            await require_scoped_permission(
+                db,
+                current_user,
+                "teachers:assign",
+                department_id=class_group.department_id,
+                academic_level_id=class_group.academic_level_id,
+                class_group_id=class_group.id,
+            )
+        except InsufficientPermissionException:
+            skipped.append(
+                TeacherAssignmentBulkSkip(
+                    class_group_id=class_group_id,
+                    reason="You don't have permission to assign teachers for this class group.",
                 )
             )
             continue
@@ -888,11 +1029,14 @@ async def list_subject_registrations(
     db: AsyncSession,
     school_id: UUID,
     enrollment_id: UUID,
+    current_user: User,
     *,
     page: int,
     page_size: int,
     include_inactive: bool,
 ) -> tuple[list[StudentSubjectRegistration], PageMeta]:
+    enrollment = await _get_enrollment(db, school_id, enrollment_id)
+    await _require_enrollment_scope(db, current_user, enrollment, "subjects:register_electives")
     stmt = select(StudentSubjectRegistration).where(
         StudentSubjectRegistration.school_id == school_id,
         StudentSubjectRegistration.student_enrollment_id == enrollment_id,
@@ -964,6 +1108,7 @@ async def create_subject_registration(
     school_id: UUID,
     enrollment_id: UUID,
     class_subject_id: UUID,
+    current_user: User,
     audit: AuditContext,
 ) -> StudentSubjectRegistration:
     enrollment = await _get_enrollment(db, school_id, enrollment_id)
@@ -972,6 +1117,7 @@ async def create_subject_registration(
         raise ValidationException(
             "This subject is not offered to the student's current class group."
         )
+    await _require_enrollment_scope(db, current_user, enrollment, "subjects:register_electives")
 
     offering_stmt = select(SubjectOffering).where(
         SubjectOffering.id == class_subject.subject_offering_id
@@ -1011,8 +1157,12 @@ async def deactivate_subject_registration(
     school_id: UUID,
     enrollment_id: UUID,
     registration_id: UUID,
+    current_user: User,
     audit: AuditContext,
 ) -> StudentSubjectRegistration:
+    enrollment = await _get_enrollment(db, school_id, enrollment_id)
+    await _require_enrollment_scope(db, current_user, enrollment, "subjects:register_electives")
+
     stmt = select(StudentSubjectRegistration).where(
         StudentSubjectRegistration.id == registration_id,
         StudentSubjectRegistration.student_enrollment_id == enrollment_id,
@@ -1047,9 +1197,13 @@ async def bulk_register_subject(
     school_id: UUID,
     class_subject_id: UUID,
     enrollment_ids: list[UUID],
+    current_user: User,
     audit: AuditContext,
 ) -> tuple[list[StudentSubjectRegistration], list[tuple[UUID, str]]]:
     class_subject = await _get_class_subject(db, school_id, class_subject_id)
+    await _require_class_subject_scope(
+        db, current_user, class_subject, "subjects:register_electives"
+    )
     offering_stmt = select(SubjectOffering).where(
         SubjectOffering.id == class_subject.subject_offering_id
     )

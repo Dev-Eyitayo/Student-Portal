@@ -1654,81 +1654,116 @@ flowchart TD
     ScopeCheck -- No --> Deny
 ```
 
-#### FastAPI Hybrid Permission Dependency Factory
+> **Implementation note (2026-11):** the snippet below reflects the as-built
+> `app/core/permissions.py`, which differs from an earlier draft in two ways
+> found during implementation. First, the scoped-grant query guards each
+> column comparison with its own `scope_type` (`and_(scope_type == "DEPARTMENT",
+> department_id == target_dept_id)`, not a bare `department_id == target_dept_id`
+> inside the `or_`) — without that guard, SQLAlchemy compiles `Column == None`
+> as `IS NULL`, so a `DEPARTMENT`-scoped grant would wrongly satisfy an
+> `ACADEMIC_LEVEL`/`CLASS_GROUP` check whenever the caller doesn't supply that
+> dimension, which is the normal case. Second, `scope_extractor` only works when
+> the target resource's scope is derivable from the `Request` before the route
+> body is parsed (path/query params); for the many routes where the resource
+> (and therefore its department/level/class-group) is only known after the
+> service layer resolves a request body or looks up a parent record, the
+> scoped check instead happens inside the service function itself, via
+> `require_scoped_permission(db, user, code, department_id=..., ...)`, called
+> once the resource is in hand. `require_permission` (the FastAPI dependency)
+> and `require_scoped_permission` (the service-layer call) share the same
+> underlying `user_has_permission` check, so the semantics are identical either
+> way.
+
+#### Core Hybrid Permission Check
 ```python
 # app/core/permissions.py
-from typing import Callable, Optional
 from uuid import UUID
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, Request
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_
-from app.core.dependencies import get_tenant_db
-from app.core.security import get_current_authenticated_user
-from app.modules.identity.models import User, Permission, RoleDefaultPermission, UserPermissionGrant
+from app.core.dependencies import get_current_authenticated_user, get_tenant_db
+from app.core.exceptions import InsufficientPermissionException
+from app.modules.identity.models import Permission, RoleDefaultPermission, User, UserPermissionGrant
 
-def require_permission(
+async def user_has_permission(
+    db: AsyncSession,
+    user: User,
     permission_code: str,
-    scope_extractor: Optional[Callable[[Request], dict]] = None
-):
-    """
-    FastAPI dependency factory enforcing the Hybrid Permission Model:
-    Evaluates: Role Defaults + Direct User Grants matching the resource scope.
-    """
+    *,
+    department_id: UUID | None = None,
+    academic_level_id: UUID | None = None,
+    class_group_id: UUID | None = None,
+) -> bool:
+    if user.role in ("SUPER_ADMIN", "SCHOOL_ADMIN"):
+        return True
+
+    scope_requested = department_id is not None or academic_level_id is not None or class_group_id is not None
+    stmt_role = (
+        select(Permission)
+        .join(RoleDefaultPermission, RoleDefaultPermission.permission_id == Permission.id)
+        .where(RoleDefaultPermission.role == user.role, Permission.code == permission_code)
+    )
+    if (await db.execute(stmt_role)).scalar_one_or_none() and not scope_requested:
+        return True
+
+    stmt_grant = (
+        select(UserPermissionGrant)
+        .join(Permission, Permission.id == UserPermissionGrant.permission_id)
+        .where(
+            UserPermissionGrant.user_id == user.id,
+            UserPermissionGrant.school_id == user.school_id,
+            UserPermissionGrant.deleted_at.is_(None),
+            Permission.code == permission_code,
+            or_(
+                UserPermissionGrant.scope_type == "SCHOOL_WIDE",
+                and_(UserPermissionGrant.scope_type == "DEPARTMENT", UserPermissionGrant.department_id == department_id),
+                and_(UserPermissionGrant.scope_type == "ACADEMIC_LEVEL", UserPermissionGrant.academic_level_id == academic_level_id),
+                and_(UserPermissionGrant.scope_type == "CLASS_GROUP", UserPermissionGrant.class_group_id == class_group_id),
+            ),
+        )
+    )
+    return (await db.execute(stmt_grant)).scalar_one_or_none() is not None
+
+
+async def require_scoped_permission(
+    db: AsyncSession, user: User, permission_code: str, *,
+    department_id: UUID | None = None, academic_level_id: UUID | None = None, class_group_id: UUID | None = None,
+) -> None:
+    """Called from service code once the target resource is resolved. Checked
+    in two passes: an unscoped role-default/SCHOOL_WIDE/admin bypass first
+    (so e.g. an ACADEMIC_OFFICER's baseline permission isn't wrongly rejected
+    just because this resource happens to carry a scope), then the resource's
+    real scope against any DEPARTMENT/ACADEMIC_LEVEL/CLASS_GROUP grant."""
+    if await user_has_permission(db, user, permission_code):
+        return
+    if await user_has_permission(db, user, permission_code, department_id=department_id,
+                                   academic_level_id=academic_level_id, class_group_id=class_group_id):
+        return
+    raise InsufficientPermissionException(permission_code=permission_code)
+
+
+def require_permission(permission_code: str, scope_extractor=None):
+    """FastAPI dependency factory for routes whose scope is derivable from the
+    Request alone (path/query params). Delegates to user_has_permission."""
     async def permission_checker(
         request: Request,
         current_user: User = Depends(get_current_authenticated_user),
-        db: AsyncSession = Depends(get_tenant_db)
+        db: AsyncSession = Depends(get_tenant_db),
     ) -> bool:
-        # 1. School Admin and Platform Super Admin bypass fine-grained checks
-        if current_user.role in ("SUPER_ADMIN", "SCHOOL_ADMIN"):
-            return True
-
-        # 2. Check Role-level default permissions
-        stmt_role = (
-            select(Permission)
-            .join(RoleDefaultPermission, RoleDefaultPermission.permission_id == Permission.id)
-            .where(
-                RoleDefaultPermission.role == current_user.role,
-                Permission.code == permission_code
-            )
-        )
-        role_has_perm = (await db.execute(stmt_role)).scalar_one_or_none()
-        if role_has_perm and not scope_extractor:
-            return True
-
-        # 3. Extract target resource context (if resource-scoped check)
         target_context = scope_extractor(request) if scope_extractor else {}
-        target_dept_id = target_context.get("department_id")
-        target_level_id = target_context.get("academic_level_id")
-        target_class_group_id = target_context.get("class_group_id")
-
-        # 4. Check Direct Scoped User Grants
-        stmt_grant = (
-            select(UserPermissionGrant)
-            .join(Permission, Permission.id == UserPermissionGrant.permission_id)
-            .where(
-                UserPermissionGrant.user_id == current_user.id,
-                UserPermissionGrant.school_id == current_user.school_id,
-                Permission.code == permission_code,
-                or_(
-                    UserPermissionGrant.scope_type == "SCHOOL_WIDE",
-                    UserPermissionGrant.department_id == target_dept_id,
-                    UserPermissionGrant.academic_level_id == target_level_id,
-                    UserPermissionGrant.class_group_id == target_class_group_id
-                )
-            )
+        allowed = await user_has_permission(
+            db, current_user, permission_code,
+            department_id=target_context.get("department_id"),
+            academic_level_id=target_context.get("academic_level_id"),
+            class_group_id=target_context.get("class_group_id"),
         )
-        matching_grant = (await db.execute(stmt_grant)).scalar_one_or_none()
-        if matching_grant:
-            return True
-
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access denied: Missing required permission '{permission_code}' for the requested scope."
-        )
-
+        if not allowed:
+            raise InsufficientPermissionException(permission_code=permission_code)
+        return True
     return permission_checker
 ```
+
+Resource-aware routes (class groups, subject offerings, class subjects, teacher assignments, student subject registrations, enrollments, assessment definitions, score sheets) call `require_scoped_permission` directly from their service function instead of passing a `scope_extractor` to the router-level dependency. Cross-cutting list endpoints (e.g. `GET /structure/class-groups`) keep the plain router-level `require_permission(code)` with no scope, since there is no single target resource to scope against.
 
 ### 10.3 IDOR Defense, Input Sanitization & Threat Modeling
 
@@ -1736,7 +1771,7 @@ def require_permission(
 
 | Threat Vector | Potential Vulnerability in Academic SaaS | Architectural Mitigation Strategy |
 |---|---|---|
-| **BOLA / IDOR** | Teacher alters student score in a different class arm by guessing `class_subject_id`. | FastAPI dependency injection (`verify_teacher_subject_access`) validates ownership against `TeacherAssignment`. Direct ID query without tenant scoping is blocked. |
+| **BOLA / IDOR** | Teacher alters or reads another class arm's scores by guessing `class_subject_id`. | `assessments.services._check_class_subject_access` validates ownership against `TeacherAssignment` (score entry, submission, and read), falling back to scoped/`SCHOOL_WIDE` delegation for non-owning staff. Direct ID query without tenant scoping is blocked. |
 | **Cross-Tenant Leakage** | Tenant A queries results of Tenant B via predictable URLs. | Multi-tier enforcement: RLS database policies + `get_tenant_db` dependency + UUIDv7 IDs + Tenant prefix validation. |
 | **Grade Tampering** | Rogue actor changes published terminal exam score. | Immutability triggers on `subject_results` prevent updates once `status = 'PUBLISHED'`. All adjustments require a formal `CORRECTION_REQUEST` and are logged to immutable `audit_logs`. |
 | **Insecure Direct Object File Access** | Public download of minor student report cards without authentication. | No static PDF files are stored or exposed. Access to report card payloads requires a cryptographically signed, expiring token validated against student verification parameters (e.g. Date of Birth). |
@@ -1995,6 +2030,11 @@ All core architectural questions have been formally reviewed and confirmed:
    - *Assessment definition auto-provisioning (M3 → M4 boundary):* Creating a `ClassSubject` calls `assessments.services.seed_assessment_definitions_for_class_subject`, which clones the school's active `school_configurations.assessment_weight_schema` into concrete `assessment_definitions` rows for every `AcademicTerm` already present in the offering's `AcademicSession` at creation time.
    - *Score-sheet lifecycle (M4):* Added a new `score_sheet_statuses` table (see §4.3.4) keyed by `(academic_term_id, class_subject_id)` to carry the DRAFT → SUBMITTED → APPROVED state — the originally specified `subject_results.status` column is a Computed-entity field normally written by the M5 Computation Engine, not by teachers submitting raw scores, so it could not serve this purpose.
    - *Teacher-assignment and student-registration removal:* Added `DELETE /class-subjects/{id}/teacher-assignments/{assignment_id}` and `DELETE /enrollments/{id}/subject-registrations/{registration_id}` (both deactivate, never hard-delete) — the original endpoint catalog specified creating these links but not removing a single one independently of deactivating the whole teacher account or re-running a bulk import.
+
+7. **Scoped Delegation Enforcement, Resolved Platform-Wide: [RESOLVED & APPROVED]**
+   - *Problem found:* `DEPARTMENT`/`ACADEMIC_LEVEL`/`CLASS_GROUP`-scoped grants could never pass a router-level `require_permission(code)` dependency, because that dependency has no way to see the target resource's scope before the request body is parsed or a parent record is looked up — it would reject any non-`SCHOOL_WIDE` grant outright, regardless of what §10.2's scope-matching logic would otherwise allow.
+   - *Fix:* for every resource with a real department/level/class-group dimension — class groups, subject offerings, class subjects, teacher assignments, student subject registrations, enrollments, assessment definitions, and score sheets — the router-level dependency was removed from the single-resource (create/get/update/retire) routes and replaced with a `require_scoped_permission` call inside the service function, once the resource (and therefore its scope) is resolved. See §10.2 for the mechanism.
+   - *List endpoints, resolved in the same pass:* `GET /structure/class-groups`, `GET /subjects/offerings`, `GET /class-subjects`, `GET /assessments/definitions`, and `GET /students/{id}/enrollments` now call `get_permission_scope` + `build_scope_filter` (§10.2) to add a `WHERE department_id IN (...) OR academic_level_id IN (...) OR class_group_id IN (...)` clause for callers who hold only scoped grants, rather than requiring unscoped access or rejecting outright. A caller with no applicable grant at all (not even a scoped one) still gets `403` on the list itself. The subject catalog list (`GET /subjects`) and staff/user management (`users:manage`, `permissions:delegate`) have no department/level/class-group dimension in the data model and remain unscoped-only — there is nothing to filter them by.
 
 ---
 *End of Architectural Specification. Document maintained under strict version control.*

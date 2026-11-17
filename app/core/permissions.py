@@ -1,8 +1,9 @@
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from uuid import UUID
 
 from fastapi import Depends, Request
-from sqlalchemy import and_, or_, select
+from sqlalchemy import ColumnElement, and_, false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_authenticated_user, get_tenant_db
@@ -83,6 +84,112 @@ async def user_has_permission(
     )
     matching_grant = (await db.execute(stmt_grant)).scalar_one_or_none()
     return matching_grant is not None
+
+
+async def require_scoped_permission(
+    db: AsyncSession,
+    user: User,
+    permission_code: str,
+    *,
+    department_id: UUID | None = None,
+    academic_level_id: UUID | None = None,
+    class_group_id: UUID | None = None,
+) -> None:
+    if await user_has_permission(db, user, permission_code):
+        return
+    if await user_has_permission(
+        db,
+        user,
+        permission_code,
+        department_id=department_id,
+        academic_level_id=academic_level_id,
+        class_group_id=class_group_id,
+    ):
+        return
+    raise InsufficientPermissionException(permission_code=permission_code)
+
+
+@dataclass
+class PermissionScope:
+    """The effective scope a user holds for one permission code, for use in
+    list queries that can't check a single resource's scope the way
+    require_scoped_permission does -- they need to filter many rows instead.
+    """
+
+    unscoped: bool
+    department_ids: set[UUID] = field(default_factory=set)
+    academic_level_ids: set[UUID] = field(default_factory=set)
+    class_group_ids: set[UUID] = field(default_factory=set)
+
+    @property
+    def has_any_access(self) -> bool:
+        return self.unscoped or bool(
+            self.department_ids or self.academic_level_ids or self.class_group_ids
+        )
+
+
+async def get_permission_scope(
+    db: AsyncSession, user: User, permission_code: str
+) -> PermissionScope:
+    if user.role in ("SUPER_ADMIN", "SCHOOL_ADMIN"):
+        return PermissionScope(unscoped=True)
+
+    stmt_role = (
+        select(Permission)
+        .join(RoleDefaultPermission, RoleDefaultPermission.permission_id == Permission.id)
+        .where(RoleDefaultPermission.role == user.role, Permission.code == permission_code)
+    )
+    if (await db.execute(stmt_role)).scalar_one_or_none():
+        return PermissionScope(unscoped=True)
+
+    stmt_grants = (
+        select(UserPermissionGrant)
+        .join(Permission, Permission.id == UserPermissionGrant.permission_id)
+        .where(
+            UserPermissionGrant.user_id == user.id,
+            UserPermissionGrant.school_id == user.school_id,
+            UserPermissionGrant.deleted_at.is_(None),
+            Permission.code == permission_code,
+        )
+    )
+    grants = (await db.execute(stmt_grants)).scalars().all()
+
+    scope = PermissionScope(unscoped=False)
+    for grant in grants:
+        if grant.scope_type == "SCHOOL_WIDE":
+            scope.unscoped = True
+        elif grant.scope_type == "DEPARTMENT" and grant.department_id is not None:
+            scope.department_ids.add(grant.department_id)
+        elif grant.scope_type == "ACADEMIC_LEVEL" and grant.academic_level_id is not None:
+            scope.academic_level_ids.add(grant.academic_level_id)
+        elif grant.scope_type == "CLASS_GROUP" and grant.class_group_id is not None:
+            scope.class_group_ids.add(grant.class_group_id)
+    return scope
+
+
+def build_scope_filter(
+    scope: PermissionScope,
+    *,
+    department_column: ColumnElement | None = None,
+    academic_level_column: ColumnElement | None = None,
+    class_group_column: ColumnElement | None = None,
+) -> ColumnElement[bool]:
+    """Builds the WHERE clause for a list query restricted to a non-unscoped
+    PermissionScope. Pass only the columns that dimension applies to for this
+    resource (e.g. a SubjectOffering has no class group, so omit that column).
+    Call only when scope.unscoped is False -- there is nothing to filter
+    otherwise.
+    """
+    conditions: list[ColumnElement[bool]] = []
+    if department_column is not None and scope.department_ids:
+        conditions.append(department_column.in_(scope.department_ids))
+    if academic_level_column is not None and scope.academic_level_ids:
+        conditions.append(academic_level_column.in_(scope.academic_level_ids))
+    if class_group_column is not None and scope.class_group_ids:
+        conditions.append(class_group_column.in_(scope.class_group_ids))
+    if not conditions:
+        return false()
+    return or_(*conditions)
 
 
 def require_permission(

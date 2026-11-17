@@ -13,7 +13,12 @@ from app.core.exceptions import (
     ScoresIncompleteException,
     ValidationException,
 )
-from app.core.permissions import user_has_permission
+from app.core.permissions import (
+    build_scope_filter,
+    get_permission_scope,
+    require_scoped_permission,
+    user_has_permission,
+)
 from app.modules.academic_structure.models import AcademicTerm, ClassGroup
 from app.modules.assessments.models import AssessmentDefinition, AssessmentScore, ScoreSheetStatus
 from app.modules.assessments.schemas import (
@@ -157,6 +162,14 @@ async def _check_class_subject_access(
     current_user: User,
     permission_code: str,
 ) -> None:
+    """
+    Deliberately does not delegate straight to require_scoped_permission: a
+    TEACHER's role-default scores:enter/scores:submit is ownership-gated (only
+    for subjects they are actually assigned to), not an unscoped baseline the
+    way ACADEMIC_OFFICER's role defaults are. Calling require_scoped_permission
+    directly would treat that role-default as unscoped and let any teacher
+    touch any class subject's scores, defeating the ownership check entirely.
+    """
     from app.modules.subjects.services import is_teacher_assigned_to_class_subject
 
     if current_user.role in ("SUPER_ADMIN", "SCHOOL_ADMIN"):
@@ -192,12 +205,17 @@ async def _check_class_subject_access(
 async def list_definitions(
     db: AsyncSession,
     school_id: UUID,
+    current_user: User,
     *,
     academic_term_id: UUID | None,
     class_subject_id: UUID | None,
     page: int,
     page_size: int,
 ) -> tuple[list[AssessmentDefinition], PageMeta]:
+    scope = await get_permission_scope(db, current_user, "subjects:manage")
+    if not scope.has_any_access:
+        raise InsufficientPermissionException(permission_code="subjects:manage")
+
     stmt: Select[tuple[AssessmentDefinition]] = select(AssessmentDefinition).where(
         AssessmentDefinition.school_id == school_id
     )
@@ -205,18 +223,51 @@ async def list_definitions(
         stmt = stmt.where(AssessmentDefinition.academic_term_id == academic_term_id)
     if class_subject_id is not None:
         stmt = stmt.where(AssessmentDefinition.class_subject_id == class_subject_id)
+    if not scope.unscoped:
+        stmt = (
+            stmt.join(ClassSubject, ClassSubject.id == AssessmentDefinition.class_subject_id)
+            .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+            .where(
+                build_scope_filter(
+                    scope,
+                    department_column=ClassGroup.department_id,
+                    academic_level_column=ClassGroup.academic_level_id,
+                    class_group_column=ClassGroup.id,
+                )
+            )
+        )
     stmt = stmt.order_by(AssessmentDefinition.sequence_order.asc())
     return await paginate(db, stmt, page=page, page_size=page_size)
+
+
+async def _require_class_subject_scope(
+    db: AsyncSession,
+    current_user: User,
+    class_subject: ClassSubject,
+    permission_code: str = "subjects:manage",
+) -> None:
+    class_group_stmt = select(ClassGroup).where(ClassGroup.id == class_subject.class_group_id)
+    class_group = (await db.execute(class_group_stmt)).scalar_one()
+    await require_scoped_permission(
+        db,
+        current_user,
+        permission_code,
+        department_id=class_group.department_id,
+        academic_level_id=class_group.academic_level_id,
+        class_group_id=class_group.id,
+    )
 
 
 async def create_definition(
     db: AsyncSession,
     school_id: UUID,
     req: AssessmentDefinitionCreateRequest,
+    current_user: User,
     audit: AuditContext,
 ) -> AssessmentDefinition:
     await _get_term(db, school_id, req.academic_term_id)
-    await _get_class_subject(db, school_id, req.class_subject_id)
+    class_subject = await _get_class_subject(db, school_id, req.class_subject_id)
+    await _require_class_subject_scope(db, current_user, class_subject)
 
     definition = AssessmentDefinition(
         school_id=school_id,
@@ -224,7 +275,7 @@ async def create_definition(
         class_subject_id=req.class_subject_id,
         name=req.name.strip(),
         code=req.code.strip().upper(),
-        assessment_type=req.assessment_type,
+        assessment_type=req.assessment_type.value,
         max_score=req.max_score,
         weight_percentage=req.weight_percentage,
         sequence_order=req.sequence_order,
@@ -251,9 +302,12 @@ async def create_definition(
 
 
 async def get_definition(
-    db: AsyncSession, school_id: UUID, definition_id: UUID
+    db: AsyncSession, school_id: UUID, definition_id: UUID, current_user: User
 ) -> AssessmentDefinition:
-    return await _get_definition(db, school_id, definition_id)
+    definition = await _get_definition(db, school_id, definition_id)
+    class_subject = await _get_class_subject(db, school_id, definition.class_subject_id)
+    await _require_class_subject_scope(db, current_user, class_subject)
+    return definition
 
 
 async def update_definition(
@@ -261,9 +315,12 @@ async def update_definition(
     school_id: UUID,
     definition_id: UUID,
     req: AssessmentDefinitionUpdateRequest,
+    current_user: User,
     audit: AuditContext,
 ) -> AssessmentDefinition:
     definition = await _get_definition(db, school_id, definition_id)
+    class_subject = await _get_class_subject(db, school_id, definition.class_subject_id)
+    await _require_class_subject_scope(db, current_user, class_subject)
 
     score_count = await db.execute(
         select(func.count()).where(AssessmentScore.assessment_definition_id == definition.id)
@@ -312,6 +369,7 @@ async def get_score_sheet(
     school_id: UUID,
     class_subject_id: UUID,
     assessment_definition_id: UUID,
+    current_user: User,
 ) -> tuple[AssessmentDefinition, list[ScoreSheetRow]]:
     class_subject = await _get_class_subject(db, school_id, class_subject_id)
     definition = await _get_definition(db, school_id, assessment_definition_id)
@@ -319,9 +377,11 @@ async def get_score_sheet(
         raise ValidationException(
             "This assessment component does not belong to the selected class subject."
         )
+    await _check_class_subject_access(db, school_id, class_subject, current_user, "scores:enter")
 
     roster_stmt = (
         select(Student, StudentEnrollment.id, AssessmentScore)
+        .select_from(StudentSubjectRegistration)
         .join(
             StudentEnrollment,
             StudentEnrollment.id == StudentSubjectRegistration.student_enrollment_id,

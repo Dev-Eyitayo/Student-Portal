@@ -6,12 +6,18 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+class AssessmentType(StrEnum):
+    CONTINUOUS_ASSESSMENT = "CONTINUOUS_ASSESSMENT"
+    EXAMINATION = "EXAMINATION"
+    PRACTICAL = "PRACTICAL"
+
+
 class AssessmentDefinitionCreateRequest(BaseModel):
     academic_term_id: UUID
     class_subject_id: UUID
     name: str = Field(..., min_length=1, max_length=64)
     code: str = Field(..., min_length=1, max_length=16)
-    assessment_type: str = Field(..., pattern="^(CONTINUOUS_ASSESSMENT|EXAMINATION|PRACTICAL)$")
+    assessment_type: AssessmentType
     max_score: Decimal = Field(..., gt=0, max_digits=5, decimal_places=2)
     weight_percentage: Decimal = Field(..., ge=0, le=100, max_digits=5, decimal_places=2)
     sequence_order: int = Field(default=1, ge=1)
@@ -33,7 +39,7 @@ class AssessmentDefinitionResponse(BaseModel):
     class_subject_id: UUID
     name: str
     code: str
-    assessment_type: str
+    assessment_type: AssessmentType
     max_score: Decimal
     weight_percentage: Decimal
     sequence_order: int

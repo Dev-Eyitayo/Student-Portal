@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_authenticated_user, get_tenant_db
-from app.core.permissions import require_permission
 from app.modules.assessments import services
 from app.modules.assessments.schemas import (
     AssessmentDefinitionCreateRequest,
@@ -50,7 +49,6 @@ def _audit_context(request: Request, current_user: User) -> AuditContext:
 @router.get(
     "/definitions",
     response_model=SuccessResponse[Page[AssessmentDefinitionResponse]],
-    dependencies=[Depends(require_permission("subjects:manage"))],
 )
 async def list_definitions(
     academic_term_id: UUID | None = Query(None),
@@ -63,6 +61,7 @@ async def list_definitions(
     items, meta = await services.list_definitions(
         db,
         _school_id(current_user),
+        current_user,
         academic_term_id=academic_term_id,
         class_subject_id=class_subject_id,
         page=page,
@@ -77,7 +76,6 @@ async def list_definitions(
     "/definitions",
     response_model=SuccessResponse[AssessmentDefinitionResponse],
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("subjects:manage"))],
 )
 async def create_definition(
     req: AssessmentDefinitionCreateRequest,
@@ -86,7 +84,7 @@ async def create_definition(
     db: AsyncSession = Depends(get_tenant_db),
 ):
     definition = await services.create_definition(
-        db, _school_id(current_user), req, _audit_context(request, current_user)
+        db, _school_id(current_user), req, current_user, _audit_context(request, current_user)
     )
     return SuccessResponse[AssessmentDefinitionResponse](
         data=AssessmentDefinitionResponse.model_validate(definition)
@@ -96,14 +94,15 @@ async def create_definition(
 @router.get(
     "/definitions/{definition_id}",
     response_model=SuccessResponse[AssessmentDefinitionResponse],
-    dependencies=[Depends(require_permission("subjects:manage"))],
 )
 async def get_definition(
     definition_id: UUID,
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
-    definition = await services.get_definition(db, _school_id(current_user), definition_id)
+    definition = await services.get_definition(
+        db, _school_id(current_user), definition_id, current_user
+    )
     return SuccessResponse[AssessmentDefinitionResponse](
         data=AssessmentDefinitionResponse.model_validate(definition)
     )
@@ -112,7 +111,6 @@ async def get_definition(
 @router.patch(
     "/definitions/{definition_id}",
     response_model=SuccessResponse[AssessmentDefinitionResponse],
-    dependencies=[Depends(require_permission("subjects:manage"))],
 )
 async def update_definition(
     definition_id: UUID,
@@ -122,7 +120,12 @@ async def update_definition(
     db: AsyncSession = Depends(get_tenant_db),
 ):
     definition = await services.update_definition(
-        db, _school_id(current_user), definition_id, req, _audit_context(request, current_user)
+        db,
+        _school_id(current_user),
+        definition_id,
+        req,
+        current_user,
+        _audit_context(request, current_user),
     )
     return SuccessResponse[AssessmentDefinitionResponse](
         data=AssessmentDefinitionResponse.model_validate(definition)
@@ -137,7 +140,6 @@ async def update_definition(
 @router.get(
     "/scores",
     response_model=SuccessResponse[ScoreSheetResponse],
-    dependencies=[Depends(require_permission("scores:enter"))],
 )
 async def get_score_sheet(
     class_subject_id: UUID,
@@ -145,8 +147,9 @@ async def get_score_sheet(
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
+    # Authorization is resource-scoped in services.get_score_sheet, not a router dependency.
     definition, rows = await services.get_score_sheet(
-        db, _school_id(current_user), class_subject_id, assessment_definition_id
+        db, _school_id(current_user), class_subject_id, assessment_definition_id, current_user
     )
     return SuccessResponse[ScoreSheetResponse](
         data=ScoreSheetResponse(
@@ -159,7 +162,6 @@ async def get_score_sheet(
 @router.post(
     "/scores/bulk-entry",
     response_model=SuccessResponse[BulkScoreEntryResponse],
-    dependencies=[Depends(require_permission("scores:enter"))],
 )
 async def bulk_score_entry(
     req: BulkScoreEntryRequest,
@@ -181,7 +183,6 @@ async def bulk_score_entry(
 @router.post(
     "/submit",
     response_model=SuccessResponse[ScoreSheetStatusResponse],
-    dependencies=[Depends(require_permission("scores:submit"))],
 )
 async def submit_score_sheet(
     req: ScoreSheetActionRequest,
@@ -205,7 +206,6 @@ async def submit_score_sheet(
 @router.post(
     "/approve",
     response_model=SuccessResponse[ScoreSheetStatusResponse],
-    dependencies=[Depends(require_permission("scores:approve"))],
 )
 async def approve_score_sheet(
     req: ScoreSheetActionRequest,
@@ -229,7 +229,6 @@ async def approve_score_sheet(
 @router.post(
     "/unlock",
     response_model=SuccessResponse[ScoreSheetStatusResponse],
-    dependencies=[Depends(require_permission("scores:unlock"))],
 )
 async def unlock_score_sheet(
     req: ScoreSheetUnlockRequest,

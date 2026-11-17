@@ -1,8 +1,29 @@
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+
+
+class UserRole(StrEnum):
+    SUPER_ADMIN = "SUPER_ADMIN"
+    SCHOOL_ADMIN = "SCHOOL_ADMIN"
+    ACADEMIC_OFFICER = "ACADEMIC_OFFICER"
+    TEACHER = "TEACHER"
+
+
+class StaffRole(StrEnum):
+    SCHOOL_ADMIN = "SCHOOL_ADMIN"
+    ACADEMIC_OFFICER = "ACADEMIC_OFFICER"
+    TEACHER = "TEACHER"
+
+
+class PermissionScopeType(StrEnum):
+    SCHOOL_WIDE = "SCHOOL_WIDE"
+    DEPARTMENT = "DEPARTMENT"
+    ACADEMIC_LEVEL = "ACADEMIC_LEVEL"
+    CLASS_GROUP = "CLASS_GROUP"
 
 
 class TokenResponse(BaseModel):
@@ -44,7 +65,7 @@ class UserResponse(BaseModel):
     first_name: str
     last_name: str
     phone_number: str | None = None
-    role: str
+    role: UserRole
     is_active: bool
     is_mfa_enabled: bool
     staff_profile: StaffProfileResponse | None = None
@@ -60,7 +81,7 @@ class MeResponse(BaseModel):
     first_name: str
     last_name: str
     phone_number: str | None = None
-    role: str
+    role: UserRole
     is_active: bool
     is_mfa_enabled: bool
     staff_profile: StaffProfileResponse | None = None
@@ -72,14 +93,14 @@ class StaffInviteRequest(BaseModel):
     first_name: str = Field(..., min_length=1, max_length=64)
     last_name: str = Field(..., min_length=1, max_length=64)
     phone_number: str | None = Field(None, max_length=32)
-    role: str = Field("TEACHER", description="Role: TEACHER, ACADEMIC_OFFICER, SCHOOL_ADMIN")
+    role: StaffRole = StaffRole.TEACHER
     staff_id_number: str = Field(..., min_length=1, max_length=64)
     specialization: str | None = Field(None, max_length=128)
 
 
 class StaffInviteResponse(BaseModel):
     email: EmailStr
-    role: str
+    role: StaffRole
     invitation_token: str
     expires_at: datetime
     message: str
@@ -90,7 +111,7 @@ class StaffVerifyInviteResponse(BaseModel):
     first_name: str
     last_name: str
     school_name: str
-    role: str
+    role: StaffRole
 
 
 class AcceptInvitationRequest(BaseModel):
@@ -107,9 +128,7 @@ class AcceptInvitationRequest(BaseModel):
 
 class PermissionGrantRequest(BaseModel):
     permission_code: str
-    scope_type: str = Field(
-        "SCHOOL_WIDE", description="SCHOOL_WIDE, DEPARTMENT, ACADEMIC_LEVEL, CLASS_GROUP"
-    )
+    scope_type: PermissionScopeType = PermissionScopeType.SCHOOL_WIDE
     department_id: UUID | None = None
     academic_level_id: UUID | None = None
     class_group_id: UUID | None = None
@@ -130,7 +149,7 @@ class UserPermissionGrantResponse(BaseModel):
     id: UUID
     permission_id: UUID
     permission_code: str | None = None
-    scope_type: str
+    scope_type: PermissionScopeType
     department_id: UUID | None = None
     academic_level_id: UUID | None = None
     class_group_id: UUID | None = None

@@ -387,7 +387,7 @@ async def invite_staff_member(
         first_name=req.first_name.strip(),
         last_name=req.last_name.strip(),
         phone_number=req.phone_number.strip() if req.phone_number else None,
-        role=req.role,
+        role=req.role.value,
         is_active=False,
     )
     db.add(user)
@@ -756,7 +756,7 @@ async def grant_user_permission(
             and_(
                 UserPermissionGrant.user_id == target_user_id,
                 UserPermissionGrant.permission_id == permission.id,
-                UserPermissionGrant.scope_type == req.scope_type,
+                UserPermissionGrant.scope_type == req.scope_type.value,
                 UserPermissionGrant.department_id == req.department_id,
                 UserPermissionGrant.academic_level_id == req.academic_level_id,
                 UserPermissionGrant.class_group_id == req.class_group_id,
@@ -775,7 +775,7 @@ async def grant_user_permission(
         user_id=target_user_id,
         permission_id=permission.id,
         granted_by_id=granter_id,
-        scope_type=req.scope_type,
+        scope_type=req.scope_type.value,
         department_id=req.department_id,
         academic_level_id=req.academic_level_id,
         class_group_id=req.class_group_id,
@@ -792,7 +792,7 @@ async def grant_user_permission(
             "after": {
                 "user_id": target_user_id,
                 "permission_code": permission.code,
-                "scope_type": req.scope_type,
+                "scope_type": req.scope_type.value,
             }
         },
     )
