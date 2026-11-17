@@ -27,6 +27,7 @@ from app.modules.students.schemas import (
     StudentStatusUpdateRequest,
     StudentUpdateRequest,
 )
+from app.modules.subjects.services import auto_register_compulsory_subjects
 
 ALLOWED_STUDENT_STATUSES = {
     "ADMITTED",
@@ -458,6 +459,7 @@ async def create_enrollment(
         student.status = "ACTIVE"
     db.add(enrollment)
     await db.flush()
+    await auto_register_compulsory_subjects(db, school_id, enrollment, class_group, audit)
     record_audit_log(
         db,
         audit,

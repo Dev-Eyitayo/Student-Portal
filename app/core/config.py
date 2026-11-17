@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Security
     SECRET_KEY: str = "default-insecure-dev-secret-key-change-in-production-1234567890"
-    ALGORITHM: str = "HS256"  # Uses RS256 with key files in prod; HS256 for local dev
+    ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 

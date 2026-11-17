@@ -129,7 +129,7 @@ class RoleDefaultPermission(Base):
     )
 
 
-class UserPermissionGrant(Base):
+class UserPermissionGrant(Base, TimestampMixin):
     __tablename__ = "user_permission_grants"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
@@ -157,19 +157,18 @@ class UserPermissionGrant(Base):
     class_group_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("class_groups.id", ondelete="CASCADE"), nullable=True
     )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False
-    )
 
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_user_permission_grant_active",
             "user_id",
             "permission_id",
             "scope_type",
             "department_id",
             "academic_level_id",
             "class_group_id",
-            name="uq_user_permission_grant",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
         ),
         Index("idx_user_permission_grants_lookup", "user_id", "school_id"),
     )

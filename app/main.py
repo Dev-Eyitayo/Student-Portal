@@ -19,9 +19,15 @@ from app.core.exceptions import (
 from app.core.redis import close_redis, init_redis
 from app.core.rls import verify_rls_enforcement
 from app.modules.academic_structure.router import router as structure_router
+from app.modules.assessments.router import router as assessments_router
 from app.modules.identity.router import router as identity_router
 from app.modules.identity.seed import seed_system_permissions
 from app.modules.students.router import router as students_router
+from app.modules.subjects.router import (
+    class_subjects_router,
+    enrollment_registrations_router,
+)
+from app.modules.subjects.router import router as subjects_router
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -79,6 +85,10 @@ def create_app() -> FastAPI:
     app.include_router(identity_router, prefix="/api/v1")
     app.include_router(structure_router, prefix="/api/v1")
     app.include_router(students_router, prefix="/api/v1")
+    app.include_router(subjects_router, prefix="/api/v1")
+    app.include_router(class_subjects_router, prefix="/api/v1")
+    app.include_router(enrollment_registrations_router, prefix="/api/v1")
+    app.include_router(assessments_router, prefix="/api/v1")
 
     # Healthcheck
     @app.get("/api/v1/health", tags=["System"])

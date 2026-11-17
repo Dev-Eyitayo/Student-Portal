@@ -639,49 +639,75 @@ CREATE INDEX idx_enrollments_class ON student_enrollments(class_group_id, enroll
 
 #### 4.3.4 Subjects, Assignments & Assessments
 
+> **M3/M4 implementation note (2026-11):** the DDL below reflects what was actually
+> built, which differs from the original draft in three ways found during
+> implementation: (1) `subjects`, `subject_offerings`, and `class_subjects` gained
+> full soft-delete (`updated_at`/`deleted_at`) and their uniqueness is enforced via
+> partial indexes `WHERE deleted_at IS NULL` (a plain `UNIQUE` constraint does not
+> prevent duplicate rows where `department_id IS NULL`, since SQL `NULL <> NULL`);
+> (2) `teacher_assignments.uq_active_teacher_class_subject` is a partial index
+> `WHERE is_active`, not a plain constraint, so a teacher can be reassigned to the
+> same class subject after a prior assignment ends; (3) `class_subjects`' FKs to
+> `teacher_assignments`/`student_subject_registrations` are `ON DELETE RESTRICT`,
+> not `CASCADE` — those child rows are retired (soft-deleted), never hard-deleted
+> as a side effect of retiring their parent.
+
 ##### `subjects`, `subject_offerings` & `class_subjects`
 ```sql
 CREATE TABLE subjects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
     name VARCHAR(128) NOT NULL, -- e.g., 'General Mathematics', 'Catering Craft Practice'
     code VARCHAR(16) NOT NULL, -- e.g., 'MTH', 'CCP'
     is_elective BOOLEAN NOT NULL DEFAULT FALSE,
     is_trade_subject BOOLEAN NOT NULL DEFAULT FALSE, -- Identifies national senior trade/entrepreneurship subjects
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_school_subject_code UNIQUE (school_id, code)
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ NULL
 );
+CREATE UNIQUE INDEX uq_school_subject_code_active ON subjects(school_id, code) WHERE deleted_at IS NULL;
 
 CREATE TABLE subject_offerings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
     subject_id UUID NOT NULL REFERENCES subjects(id) ON DELETE RESTRICT,
     academic_session_id UUID NOT NULL REFERENCES academic_sessions(id) ON DELETE CASCADE,
     academic_level_id UUID NOT NULL REFERENCES academic_levels(id) ON DELETE RESTRICT,
     department_id UUID REFERENCES departments(id) ON DELETE RESTRICT, -- Nullable: applies to all depts or junior levels if null
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_offering_unique UNIQUE (subject_id, academic_session_id, academic_level_id, department_id)
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ NULL
 );
+-- Two partial indexes (rather than one plain UNIQUE) because NULL <> NULL in SQL:
+-- a plain constraint would not prevent duplicate (subject, session, level, NULL) rows.
+CREATE UNIQUE INDEX uq_offering_no_dept_active ON subject_offerings(subject_id, academic_session_id, academic_level_id)
+    WHERE department_id IS NULL AND deleted_at IS NULL;
+CREATE UNIQUE INDEX uq_offering_with_dept_active ON subject_offerings(subject_id, academic_session_id, academic_level_id, department_id)
+    WHERE department_id IS NOT NULL AND deleted_at IS NULL;
 
 CREATE TABLE class_subjects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
     subject_offering_id UUID NOT NULL REFERENCES subject_offerings(id) ON DELETE RESTRICT,
     class_group_id UUID NOT NULL REFERENCES class_groups(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_class_subject UNIQUE (subject_offering_id, class_group_id)
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ NULL
 );
+CREATE UNIQUE INDEX uq_class_subject_active ON class_subjects(subject_offering_id, class_group_id) WHERE deleted_at IS NULL;
 
 CREATE TABLE student_subject_registrations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
     student_enrollment_id UUID NOT NULL REFERENCES student_enrollments(id) ON DELETE CASCADE,
-    class_subject_id UUID NOT NULL REFERENCES class_subjects(id) ON DELETE CASCADE,
-    subject_category VARCHAR(32) NOT NULL DEFAULT 'COMPULSORY_CORE', 
-    -- 'COMPULSORY_CORE', 'DEPARTMENT_CORE', 'TRADE_ELECTIVE', 'FREE_ELECTIVE'
+    class_subject_id UUID NOT NULL REFERENCES class_subjects(id) ON DELETE RESTRICT,
+    subject_category VARCHAR(32) NOT NULL DEFAULT 'COMPULSORY_CORE',
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_student_subject_registration UNIQUE (student_enrollment_id, class_subject_id)
+    CONSTRAINT uq_student_subject_registration UNIQUE (student_enrollment_id, class_subject_id),
+    CONSTRAINT chk_subject_category CHECK (
+        subject_category IN ('COMPULSORY_CORE', 'DEPARTMENT_CORE', 'TRADE_ELECTIVE', 'FREE_ELECTIVE')
+    )
 );
 CREATE INDEX idx_student_subject_reg ON student_subject_registrations(class_subject_id, is_active);
 CREATE INDEX idx_student_subject_enrollment ON student_subject_registrations(student_enrollment_id, is_active);
@@ -691,21 +717,24 @@ CREATE INDEX idx_student_subject_enrollment ON student_subject_registrations(stu
 ```sql
 CREATE TABLE teacher_assignments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
     teacher_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    class_subject_id UUID NOT NULL REFERENCES class_subjects(id) ON DELETE CASCADE,
+    class_subject_id UUID NOT NULL REFERENCES class_subjects(id) ON DELETE RESTRICT,
     assigned_by_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     start_date DATE NOT NULL DEFAULT CURRENT_DATE,
     end_date DATE NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_active_teacher_class_subject UNIQUE (class_subject_id, teacher_id, is_active)
+    deleted_at TIMESTAMPTZ NULL
 );
+-- Partial, not plain: uniqueness only applies while is_active, so a teacher can be
+-- reassigned to the same class subject after a prior assignment has ended.
+CREATE UNIQUE INDEX uq_active_teacher_class_subject ON teacher_assignments(class_subject_id, teacher_id) WHERE is_active;
 CREATE INDEX idx_teacher_assignments_lookup ON teacher_assignments(teacher_id, is_active);
 ```
 
-##### `assessment_definitions` & `assessment_scores`
+##### `assessment_definitions`, `assessment_scores` & `score_sheet_statuses`
 ```sql
 CREATE TABLE assessment_definitions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -721,6 +750,9 @@ CREATE TABLE assessment_definitions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT uq_term_class_subject_assessment_code UNIQUE (academic_term_id, class_subject_id, code)
 );
+-- Auto-provisioned: creating a ClassSubject clones the school's active
+-- school_configurations.assessment_weight_schema into one row per code, per
+-- AcademicTerm in the offering's session (see §16 Decision 6).
 
 CREATE TABLE assessment_scores (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -740,6 +772,30 @@ CREATE TABLE assessment_scores (
     )
 );
 CREATE INDEX idx_scores_enrollment ON assessment_scores(student_enrollment_id);
+
+-- Added during M4 implementation (see §16 Decision 6): the DRAFT -> SUBMITTED ->
+-- APPROVED lifecycle has nowhere else to live at score-entry time, since
+-- subject_results (the only other table with a matching `status` column) is a
+-- Computed table normally written by the Computation Engine (M5), not teachers.
+CREATE TABLE score_sheet_statuses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
+    academic_term_id UUID NOT NULL REFERENCES academic_terms(id) ON DELETE RESTRICT,
+    class_subject_id UUID NOT NULL REFERENCES class_subjects(id) ON DELETE RESTRICT,
+    status VARCHAR(16) NOT NULL DEFAULT 'DRAFT', -- 'DRAFT', 'SUBMITTED', 'APPROVED'
+    submitted_by_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    submitted_at TIMESTAMPTZ NULL,
+    approved_by_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    approved_at TIMESTAMPTZ NULL,
+    unlocked_by_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    unlocked_at TIMESTAMPTZ NULL,
+    unlock_reason VARCHAR(500) NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ NULL,
+    CONSTRAINT chk_score_sheet_status CHECK (status IN ('DRAFT', 'SUBMITTED', 'APPROVED')),
+    CONSTRAINT uq_score_sheet_status UNIQUE (academic_term_id, class_subject_id)
+);
 ```
 
 #### 4.3.5 Computed Results, Snapshots & Distribution
@@ -1094,13 +1150,15 @@ This catalog is authoritative. `BACKEND_DEV_PLAN.md`, module routers, tests, and
 | **Students** | `GET` | `/api/v1/students/bulk-import/{task_id}` | Check bulk student import status | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Enrollments** | `GET`, `PATCH` | `/api/v1/enrollments/{enrollment_id}` | Read or update an enrollment | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Enrollments** | `GET`, `POST` | `/api/v1/enrollments/{enrollment_id}/subject-registrations` | List or register subjects for an enrollment | `ACADEMIC_OFFICER`, `TEACHER` (Form Master) |
+| **Enrollments** | `DELETE` | `/api/v1/enrollments/{enrollment_id}/subject-registrations/{registration_id}` | Deactivate a student's subject registration | `ACADEMIC_OFFICER`, `TEACHER` (Form Master) |
 | **Subjects** | `GET`, `POST` | `/api/v1/subjects` | List or create subjects | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Subjects** | `GET`, `PATCH`, `DELETE` | `/api/v1/subjects/{subject_id}` | Read, update, or retire a subject | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Subjects** | `GET`, `POST` | `/api/v1/subjects/offerings` | List or create session offerings | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Subjects** | `GET`, `PATCH`, `DELETE` | `/api/v1/subjects/offerings/{offering_id}` | Read, update, or retire an offering | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Subjects** | `GET`, `POST` | `/api/v1/class-subjects` | List or link offerings to class groups | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
-| **Subjects** | `GET`, `PATCH`, `DELETE` | `/api/v1/class-subjects/{class_subject_id}` | Read, update, or retire a class subject | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Subjects** | `GET`, `DELETE` | `/api/v1/class-subjects/{class_subject_id}` | Read or retire a class subject (no mutable fields beyond retirement, so `PATCH` was dropped during implementation) | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Subjects** | `GET`, `POST` | `/api/v1/class-subjects/{class_subject_id}/teacher-assignments` | List or create teacher assignments | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Subjects** | `DELETE` | `/api/v1/class-subjects/{class_subject_id}/teacher-assignments/{assignment_id}` | Deactivate a single teacher assignment | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Subjects** | `POST` | `/api/v1/class-subjects/teacher-assignments/bulk` | Cascading teacher assignment across arms | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Subjects** | `POST` | `/api/v1/class-subjects/{class_subject_id}/subject-registrations/bulk` | Bulk-register a cohort for a trade or elective | `ACADEMIC_OFFICER` |
 | **Assessments** | `GET`, `POST` | `/api/v1/assessments/definitions` | List or configure assessment components | `ACADEMIC_OFFICER` |
@@ -1931,6 +1989,12 @@ All core architectural questions have been formally reviewed and confirmed:
 5. **Storage Provider Strategy (Branding & Signatures): [RESOLVED & APPROVED]**
    - *Decision:* Design an abstract `StorageService` interface supporting both **AWS S3** and **Cloudinary** (with local disk storage for development).
    - *Scope:* Storage is required only for institutional branding assets (logos, stamps, signatures); rendered student report cards require zero object storage as they are generated client-side on-demand.
+
+6. **M3/M4 Implementation Gaps, Resolved During Build: [RESOLVED & APPROVED]**
+   - *Auto-registration category (M3):* On `StudentEnrollment` creation, every `ClassSubject` reachable from the enrollment's `ClassGroup` whose `Subject.is_elective = FALSE` is auto-registered: `COMPULSORY_CORE` if its `SubjectOffering.department_id IS NULL`, else `DEPARTMENT_CORE`. Electives (`is_elective = TRUE`, including trade subjects) are never auto-registered — they always go through `POST /enrollments/{id}/subject-registrations`, categorized `TRADE_ELECTIVE` (if `is_trade_subject`) or `FREE_ELECTIVE`.
+   - *Assessment definition auto-provisioning (M3 → M4 boundary):* Creating a `ClassSubject` calls `assessments.services.seed_assessment_definitions_for_class_subject`, which clones the school's active `school_configurations.assessment_weight_schema` into concrete `assessment_definitions` rows for every `AcademicTerm` already present in the offering's `AcademicSession` at creation time.
+   - *Score-sheet lifecycle (M4):* Added a new `score_sheet_statuses` table (see §4.3.4) keyed by `(academic_term_id, class_subject_id)` to carry the DRAFT → SUBMITTED → APPROVED state — the originally specified `subject_results.status` column is a Computed-entity field normally written by the M5 Computation Engine, not by teachers submitting raw scores, so it could not serve this purpose.
+   - *Teacher-assignment and student-registration removal:* Added `DELETE /class-subjects/{id}/teacher-assignments/{assignment_id}` and `DELETE /enrollments/{id}/subject-registrations/{registration_id}` (both deactivate, never hard-delete) — the original endpoint catalog specified creating these links but not removing a single one independently of deactivating the whole teacher account or re-running a bulk import.
 
 ---
 *End of Architectural Specification. Document maintained under strict version control.*

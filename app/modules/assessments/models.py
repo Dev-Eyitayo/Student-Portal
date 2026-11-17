@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 from uuid import UUID
 
 from sqlalchemy import (
@@ -105,3 +105,49 @@ class AssessmentScore(Base, TenantMixin, TimestampMixin):
     student_enrollment: Mapped["StudentEnrollment"] = relationship("StudentEnrollment")
     recorded_by: Mapped["User"] = relationship("User", foreign_keys=[recorded_by_id])
     last_modified_by: Mapped["User"] = relationship("User", foreign_keys=[last_modified_by_id])
+
+
+class ScoreSheetStatus(Base, TenantMixin, TimestampMixin):
+    """Tracks the DRAFT -> SUBMITTED -> APPROVED review lifecycle for one
+    teacher's score sheet (every assessment component of a class subject,
+    for a single term) ahead of the term-wide computation/publication step.
+    """
+
+    __tablename__ = "score_sheet_statuses"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
+    academic_term_id: Mapped[UUID] = mapped_column(
+        ForeignKey("academic_terms.id", ondelete="RESTRICT"), nullable=False
+    )
+    class_subject_id: Mapped[UUID] = mapped_column(
+        ForeignKey("class_subjects.id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="DRAFT", nullable=False
+    )  # 'DRAFT', 'SUBMITTED', 'APPROVED'
+    submitted_by_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    unlocked_by_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    unlocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    unlock_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('DRAFT', 'SUBMITTED', 'APPROVED')", name="chk_score_sheet_status"
+        ),
+        UniqueConstraint("academic_term_id", "class_subject_id", name="uq_score_sheet_status"),
+    )
+
+    academic_term: Mapped["AcademicTerm"] = relationship("AcademicTerm")
+    class_subject: Mapped["ClassSubject"] = relationship("ClassSubject")
+    submitted_by: Mapped[Optional["User"]] = relationship("User", foreign_keys=[submitted_by_id])
+    approved_by: Mapped[Optional["User"]] = relationship("User", foreign_keys=[approved_by_id])
+    unlocked_by: Mapped[Optional["User"]] = relationship("User", foreign_keys=[unlocked_by_id])

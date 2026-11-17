@@ -90,5 +90,5 @@ class StudentEnrollment(Base, TenantMixin, TimestampMixin):
     subject_registrations: Mapped[list["StudentSubjectRegistration"]] = relationship(
         "StudentSubjectRegistration",
         back_populates="student_enrollment",
-        cascade="all, delete-orphan",
+        passive_deletes=True,
     )

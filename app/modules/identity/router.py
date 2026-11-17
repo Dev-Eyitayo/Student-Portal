@@ -12,6 +12,7 @@ from fastapi import (
     File,
     HTTPException,
     Query,
+    Request,
     Response,
     UploadFile,
     status,
@@ -86,6 +87,10 @@ def _remaining_ttl(exp: float | None, fallback_seconds: int) -> int:
     return max(1, int(exp - time.time()))
 
 
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "0.0.0.0"
+
+
 @router.post(
     "/schools",
     response_model=SuccessResponse[SchoolResponse],
@@ -93,12 +98,13 @@ def _remaining_ttl(exp: float | None, fallback_seconds: int) -> int:
 )
 async def register_school(
     req: SchoolCreateRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """
     Onboards a new school tenant and establishes the initial school administrative user.
     """
-    school, _ = await services.register_school_with_admin(db, req)
+    school, _ = await services.register_school_with_admin(db, req, _client_ip(request))
     return SuccessResponse[SchoolResponse](data=SchoolResponse.model_validate(school))
 
 
@@ -223,6 +229,7 @@ async def get_current_user_profile(
 )
 async def invite_staff(
     req: StaffInviteRequest,
+    request: Request,
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
@@ -235,7 +242,7 @@ async def invite_staff(
             detail="Staff invitation requires an active school context.",
         )
     invitation = await services.invite_staff_member(
-        db, current_user.school_id, current_user.id, req
+        db, current_user.school_id, current_user.id, req, _client_ip(request)
     )
     return SuccessResponse[StaffInviteResponse](data=invitation)
 
@@ -255,6 +262,7 @@ async def verify_invite(
 @router.post("/staff/accept-invitation", response_model=SuccessResponse[TokenResponse])
 async def accept_invitation(
     req: AcceptInvitationRequest,
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
@@ -262,7 +270,7 @@ async def accept_invitation(
     Completes teacher onboarding by setting their password, activating the account,
     and returning initial session tokens.
     """
-    _, tokens = await services.accept_staff_invitation(db, req)
+    _, tokens = await services.accept_staff_invitation(db, req, _client_ip(request))
     _set_refresh_cookie(response, tokens.refresh_token)
     return SuccessResponse[TokenResponse](data=tokens)
 
@@ -411,6 +419,7 @@ async def get_bulk_import_status(
 async def grant_permission(
     user_id: UUID,
     req: PermissionGrantRequest,
+    request: Request,
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
@@ -428,6 +437,7 @@ async def grant_permission(
         granter_id=current_user.id,
         target_user_id=user_id,
         req=req,
+        actor_ip=_client_ip(request),
     )
     return SuccessResponse[UserPermissionGrantResponse](data=grant)
 
@@ -441,6 +451,7 @@ async def grant_permission(
 async def revoke_permission(
     user_id: UUID,
     grant_id: UUID,
+    request: Request,
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
@@ -457,6 +468,8 @@ async def revoke_permission(
         school_id=current_user.school_id,
         target_user_id=user_id,
         grant_id=grant_id,
+        actor_id=current_user.id,
+        actor_ip=_client_ip(request),
     )
     return SuccessResponse[MessageResponse](
         data=MessageResponse(message="The permission grant has been successfully revoked.")
@@ -470,6 +483,7 @@ async def revoke_permission(
 )
 async def deactivate_user(
     user_id: UUID,
+    request: Request,
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
@@ -482,7 +496,9 @@ async def deactivate_user(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User management requires an active school context.",
         )
-    user = await services.deactivate_user(db, current_user.school_id, user_id)
+    user = await services.deactivate_user(
+        db, current_user.school_id, user_id, current_user.id, _client_ip(request)
+    )
     return SuccessResponse[DeactivateUserResponse](
         data=DeactivateUserResponse(
             user_id=user.id,
