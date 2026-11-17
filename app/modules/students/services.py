@@ -10,14 +10,17 @@ from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import (
     ConflictException,
+    InsufficientPermissionException,
     ResourceNotFoundException,
     ValidationException,
 )
+from app.core.permissions import build_scope_filter, get_permission_scope, require_scoped_permission
 from app.modules.academic_structure.models import AcademicSession, ClassGroup
 from app.modules.audit.services import AuditContext, record_audit_log
 from app.modules.common.models import generate_uuid7
 from app.modules.common.pagination import paginate
 from app.modules.common.schemas import PageMeta
+from app.modules.identity.models import User
 from app.modules.students.bulk_import import ParsedStudentRow
 from app.modules.students.models import Student, StudentEnrollment
 from app.modules.students.schemas import (
@@ -407,11 +410,16 @@ async def list_student_enrollments(
     db: AsyncSession,
     school_id: UUID,
     student_id: UUID,
+    current_user: User,
     *,
     page: int,
     page_size: int,
 ) -> tuple[list[StudentEnrollment], PageMeta]:
     await _get_student(db, school_id, student_id)
+    scope = await get_permission_scope(db, current_user, "students:enroll")
+    if not scope.has_any_access:
+        raise InsufficientPermissionException(permission_code="students:enroll")
+
     stmt = (
         _enrollment_query(school_id)
         .join(
@@ -421,6 +429,15 @@ async def list_student_enrollments(
         .where(StudentEnrollment.student_id == student_id)
         .order_by(AcademicSession.start_date.desc())
     )
+    if not scope.unscoped:
+        stmt = stmt.join(ClassGroup, ClassGroup.id == StudentEnrollment.class_group_id).where(
+            build_scope_filter(
+                scope,
+                department_column=ClassGroup.department_id,
+                academic_level_column=ClassGroup.academic_level_id,
+                class_group_column=ClassGroup.id,
+            )
+        )
     return await paginate(db, stmt, page=page, page_size=page_size)
 
 
@@ -429,6 +446,7 @@ async def create_enrollment(
     school_id: UUID,
     student_id: UUID,
     req: EnrollmentCreateRequest,
+    current_user: User,
     audit: AuditContext,
 ) -> StudentEnrollment:
     student = await _get_student(db, school_id, student_id)
@@ -439,6 +457,14 @@ async def create_enrollment(
         )
 
     class_group = await _get_active_class_group(db, school_id, req.class_group_id)
+    await require_scoped_permission(
+        db,
+        current_user,
+        "students:enroll",
+        department_id=class_group.department_id,
+        academic_level_id=class_group.academic_level_id,
+        class_group_id=class_group.id,
+    )
     if await _enrollment_exists(db, student.id, class_group.academic_session_id):
         raise ConflictException(
             message=(
@@ -486,12 +512,31 @@ async def create_enrollment(
     return await _get_enrollment(db, school_id, enrollment.id)
 
 
+async def _require_enrollment_scope(
+    db: AsyncSession,
+    current_user: User,
+    enrollment: StudentEnrollment,
+    permission_code: str,
+) -> None:
+    await require_scoped_permission(
+        db,
+        current_user,
+        permission_code,
+        department_id=enrollment.class_group.department_id,
+        academic_level_id=enrollment.class_group.academic_level_id,
+        class_group_id=enrollment.class_group_id,
+    )
+
+
 async def get_enrollment(
     db: AsyncSession,
     school_id: UUID,
     enrollment_id: UUID,
+    current_user: User,
 ) -> StudentEnrollment:
-    return await _get_enrollment(db, school_id, enrollment_id)
+    enrollment = await _get_enrollment(db, school_id, enrollment_id)
+    await _require_enrollment_scope(db, current_user, enrollment, "students:enroll")
+    return enrollment
 
 
 async def update_enrollment(
@@ -499,9 +544,11 @@ async def update_enrollment(
     school_id: UUID,
     enrollment_id: UUID,
     req: EnrollmentUpdateRequest,
+    current_user: User,
     audit: AuditContext,
 ) -> StudentEnrollment:
     enrollment = await _get_enrollment(db, school_id, enrollment_id)
+    await _require_enrollment_scope(db, current_user, enrollment, "students:enroll")
     target_status = req.enrollment_status.strip().upper()
     if target_status not in ALLOWED_ENROLLMENT_STATUSES:
         raise ValidationException(

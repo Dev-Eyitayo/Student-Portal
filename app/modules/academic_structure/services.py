@@ -7,9 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
     ConflictException,
+    InsufficientPermissionException,
     ResourceNotFoundException,
     ValidationException,
 )
+from app.core.permissions import build_scope_filter, get_permission_scope, require_scoped_permission
 from app.modules.academic_structure.models import (
     AcademicLevel,
     AcademicSession,
@@ -838,7 +840,7 @@ async def create_level(
         name=req.name.strip(),
         code=code,
         level_order=req.level_order,
-        category=req.category,
+        category=req.category.value,
     )
     db.add(level)
     await db.flush()
@@ -888,7 +890,7 @@ async def update_level(
     if req.level_order is not None:
         level.level_order = req.level_order
     if req.category is not None:
-        level.category = req.category
+        level.category = req.category.value
 
     await db.flush()
     record_audit_log(
@@ -1183,6 +1185,7 @@ def _class_group_query(
 async def list_class_groups(
     db: AsyncSession,
     school_id: UUID,
+    current_user: User,
     *,
     session_id: UUID | None,
     level_id: UUID | None,
@@ -1191,6 +1194,10 @@ async def list_class_groups(
     page_size: int,
     include_retired: bool,
 ) -> tuple[list[ClassGroup], PageMeta]:
+    scope = await get_permission_scope(db, current_user, "structure:manage")
+    if not scope.has_any_access:
+        raise InsufficientPermissionException(permission_code="structure:manage")
+
     stmt = _class_group_query(
         school_id,
         session_id=session_id,
@@ -1198,6 +1205,15 @@ async def list_class_groups(
         department_id=department_id,
         include_retired=include_retired,
     )
+    if not scope.unscoped:
+        stmt = stmt.where(
+            build_scope_filter(
+                scope,
+                department_column=ClassGroup.department_id,
+                academic_level_column=ClassGroup.academic_level_id,
+                class_group_column=ClassGroup.id,
+            )
+        )
     return await paginate(db, stmt, page=page, page_size=page_size)
 
 
@@ -1205,6 +1221,7 @@ async def create_class_group(
     db: AsyncSession,
     school_id: UUID,
     req: ClassGroupCreateRequest,
+    current_user: User,
     audit: AuditContext,
 ) -> ClassGroup:
     session = await _get_session(db, school_id, req.academic_session_id)
@@ -1219,6 +1236,14 @@ async def create_class_group(
         )
     if req.department_id is not None:
         department = await _get_department(db, school_id, req.department_id)
+
+    await require_scoped_permission(
+        db,
+        current_user,
+        "structure:manage",
+        department_id=department.id if department else None,
+        academic_level_id=level.id,
+    )
 
     if req.class_teacher_id is not None:
         await _validate_class_teacher(db, school_id, req.class_teacher_id)
@@ -1265,12 +1290,31 @@ async def create_class_group(
     return class_group
 
 
+async def _require_class_group_scope(
+    db: AsyncSession,
+    current_user: User,
+    class_group: ClassGroup,
+    permission_code: str = "structure:manage",
+) -> None:
+    await require_scoped_permission(
+        db,
+        current_user,
+        permission_code,
+        department_id=class_group.department_id,
+        academic_level_id=class_group.academic_level_id,
+        class_group_id=class_group.id,
+    )
+
+
 async def get_class_group(
     db: AsyncSession,
     school_id: UUID,
     class_group_id: UUID,
+    current_user: User,
 ) -> ClassGroup:
-    return await _get_class_group(db, school_id, class_group_id)
+    class_group = await _get_class_group(db, school_id, class_group_id)
+    await _require_class_group_scope(db, current_user, class_group)
+    return class_group
 
 
 async def update_class_group(
@@ -1278,9 +1322,11 @@ async def update_class_group(
     school_id: UUID,
     class_group_id: UUID,
     req: ClassGroupUpdateRequest,
+    current_user: User,
     audit: AuditContext,
 ) -> ClassGroup:
     class_group = await _get_class_group(db, school_id, class_group_id)
+    await _require_class_group_scope(db, current_user, class_group)
     changes = req.model_dump(exclude_unset=True)
 
     if "class_teacher_id" in req.model_fields_set:
@@ -1312,9 +1358,11 @@ async def retire_class_group(
     db: AsyncSession,
     school_id: UUID,
     class_group_id: UUID,
+    current_user: User,
     audit: AuditContext,
 ) -> ClassGroup:
     class_group = await _get_class_group(db, school_id, class_group_id)
+    await _require_class_group_scope(db, current_user, class_group)
     enrollment_count = await _class_group_enrollment_count(db, class_group.id)
     if enrollment_count > 0:
         raise ValidationException(

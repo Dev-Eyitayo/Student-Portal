@@ -262,7 +262,7 @@ sequenceDiagram
 | Login, refresh, logout | **LIVE** | JWT access token, HTTP-only refresh cookie, Redis revocation. |
 | Current user and effective permissions | **LIVE** | `GET /identity/me`. |
 | Staff invitations | **LIVE** | 72-hour invitation token. |
-| Staff permission grants | **PARTIAL** | Grant create/revoke is live, but route-level scope enforcement is incomplete and there is no grant-list endpoint. |
+| Staff permission grants | **PARTIAL** | Grant create/revoke is live and `DEPARTMENT`/`ACADEMIC_LEVEL`/`CLASS_GROUP` scoping is enforced for structure, subjects, teacher assignments, enrollments, and scores, but there is still no grant-list endpoint. |
 | Staff deactivation | **LIVE** | Deactivated users cannot authenticate. |
 | Structure configuration | **LIVE** | Sessions, terms, levels, departments, arms, class groups. |
 | Student registration and lifecycle | **LIVE** | Create, update, status transitions. |
@@ -313,7 +313,7 @@ Rules the frontend must preserve when these become live:
 - Use server-provided display names for class groups, but allow custom display names.
 - Distinguish subjects, offerings, class subjects, and registrations in every screen and selector.
 - Do not assume every student in a class takes every subject.
-- Do not assume `/identity/me` proves class-level visibility. It returns permission codes only, and the score-sheet read route is not assignment-scoped yet.
+- Do not assume `/identity/me` proves class-level visibility. It returns permission codes only, not which department/level/class-group a scoped grant covers -- the backend enforces that scope on each resource, but the frontend still can't read it back from `/me`.
 - Do not build result publication or PDF export against live routes yet.
 - Display human-friendly `error.message` text and use `error.code` only for branching.
 - Support empty states for schools before sessions, terms, class groups, subjects, and enrollments exist.

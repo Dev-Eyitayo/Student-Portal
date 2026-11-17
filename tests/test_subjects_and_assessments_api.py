@@ -629,3 +629,430 @@ async def test_subjects_tenant_isolation_and_permission_denial():
         )
         assert forbidden.status_code == 403
         assert forbidden.json()["error"]["code"] == "INSUFFICIENT_PERMISSIONS"
+
+
+@pytest.mark.asyncio
+async def test_score_sheet_read_enforces_teacher_ownership():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        suffix = uuid.uuid4().hex[:6]
+        school_id, admin_token = await _create_school_and_admin(client, suffix)
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+        structure = await _setup_structure(client, admin_headers, suffix)
+        assigned_email, assigned_password = await _create_teacher(school_id, suffix, label="a")
+        other_email, other_password = await _create_teacher(school_id, suffix, label="b")
+
+        subject = await _post(
+            client,
+            "/api/v1/subjects",
+            {"name": "General Mathematics", "code": f"MTH{suffix}"},
+            admin_headers,
+        )
+        offering = await _post(
+            client,
+            "/api/v1/subjects/offerings",
+            {
+                "subject_id": subject["id"],
+                "academic_session_id": structure["session"]["id"],
+                "academic_level_id": structure["level"]["id"],
+            },
+            admin_headers,
+        )
+        class_subject = await _post(
+            client,
+            "/api/v1/class-subjects",
+            {
+                "subject_offering_id": offering["id"],
+                "class_group_id": structure["class_group"]["id"],
+            },
+            admin_headers,
+        )
+        definitions = (
+            await client.get(
+                "/api/v1/assessments/definitions",
+                params={
+                    "academic_term_id": structure["term"]["id"],
+                    "class_subject_id": class_subject["id"],
+                },
+                headers=admin_headers,
+            )
+        ).json()["data"]["items"]
+
+        assigned_headers = await _login(client, assigned_email, assigned_password)
+        assigned_teacher_id = (
+            await client.get("/api/v1/identity/me", headers=assigned_headers)
+        ).json()["data"]["id"]
+        await _post(
+            client,
+            f"/api/v1/class-subjects/{class_subject['id']}/teacher-assignments",
+            {"teacher_id": assigned_teacher_id},
+            admin_headers,
+        )
+
+        # The assigned teacher can read the sheet.
+        allowed_resp = await client.get(
+            "/api/v1/assessments/scores",
+            params={
+                "class_subject_id": class_subject["id"],
+                "assessment_definition_id": definitions[0]["id"],
+            },
+            headers=assigned_headers,
+        )
+        assert allowed_resp.status_code == 200, allowed_resp.text
+
+        # An unassigned teacher cannot read the same sheet.
+        other_headers = await _login(client, other_email, other_password)
+        blocked_resp = await client.get(
+            "/api/v1/assessments/scores",
+            params={
+                "class_subject_id": class_subject["id"],
+                "assessment_definition_id": definitions[0]["id"],
+            },
+            headers=other_headers,
+        )
+        assert blocked_resp.status_code == 403, blocked_resp.text
+        assert blocked_resp.json()["error"]["code"] == "INSUFFICIENT_PERMISSIONS"
+
+
+@pytest.mark.asyncio
+async def test_department_scoped_delegate_can_approve_scores():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        suffix = uuid.uuid4().hex[:6]
+        school_id, admin_token = await _create_school_and_admin(client, suffix)
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+        session = await _post(
+            client,
+            "/api/v1/structure/sessions",
+            {
+                "name": f"2024/2025 D{suffix}",
+                "start_date": "2024-09-09",
+                "end_date": "2025-07-18",
+                "is_current": True,
+            },
+            admin_headers,
+        )
+        term = await _post(
+            client,
+            f"/api/v1/structure/sessions/{session['id']}/terms",
+            {
+                "name": "First Term",
+                "term_order": 1,
+                "start_date": "2024-09-09",
+                "end_date": "2024-12-13",
+                "is_current": True,
+            },
+            admin_headers,
+        )
+        level = await _post(
+            client,
+            "/api/v1/structure/levels",
+            {
+                "name": "SS 1",
+                "code": f"SS1{suffix}",
+                "level_order": 4,
+                "category": "SENIOR_SECONDARY",
+            },
+            admin_headers,
+        )
+        department = await _post(
+            client,
+            "/api/v1/structure/departments",
+            {"name": "Science", "code": f"SCI{suffix}"},
+            admin_headers,
+        )
+        arm = await _post(client, "/api/v1/structure/arms", {"name": f"O{suffix}"}, admin_headers)
+        class_group = await _post(
+            client,
+            "/api/v1/structure/class-groups",
+            {
+                "academic_session_id": session["id"],
+                "academic_level_id": level["id"],
+                "department_id": department["id"],
+                "class_arm_id": arm["id"],
+            },
+            admin_headers,
+        )
+
+        subject = await _post(
+            client,
+            "/api/v1/subjects",
+            {"name": "Chemistry", "code": f"CHM{suffix}"},
+            admin_headers,
+        )
+        offering = await _post(
+            client,
+            "/api/v1/subjects/offerings",
+            {
+                "subject_id": subject["id"],
+                "academic_session_id": session["id"],
+                "academic_level_id": level["id"],
+                "department_id": department["id"],
+            },
+            admin_headers,
+        )
+        class_subject = await _post(
+            client,
+            "/api/v1/class-subjects",
+            {"subject_offering_id": offering["id"], "class_group_id": class_group["id"]},
+            admin_headers,
+        )
+
+        teacher_email, teacher_password = await _create_teacher(school_id, suffix, label="chem")
+        teacher_headers = await _login(client, teacher_email, teacher_password)
+        teacher_id = (await client.get("/api/v1/identity/me", headers=teacher_headers)).json()[
+            "data"
+        ]["id"]
+        await _post(
+            client,
+            f"/api/v1/class-subjects/{class_subject['id']}/teacher-assignments",
+            {"teacher_id": teacher_id},
+            admin_headers,
+        )
+
+        enrollment = await _enroll_student(client, admin_headers, suffix, class_group["id"])
+
+        # Register a department-scoped HOD: a plain TEACHER role with a delegated,
+        # DEPARTMENT-scoped scores:approve grant -- no school-wide or role-default access.
+        hod_email, hod_password = await _create_teacher(school_id, suffix, label="hod")
+        hod_headers = await _login(client, hod_email, hod_password)
+        hod_id = (await client.get("/api/v1/identity/me", headers=hod_headers)).json()["data"]["id"]
+        grant_resp = await client.post(
+            f"/api/v1/identity/users/{hod_id}/permissions",
+            json={
+                "permission_code": "scores:approve",
+                "scope_type": "DEPARTMENT",
+                "department_id": department["id"],
+            },
+            headers=admin_headers,
+        )
+        assert grant_resp.status_code == 201, grant_resp.text
+
+        definitions = (
+            await client.get(
+                "/api/v1/assessments/definitions",
+                params={"academic_term_id": term["id"], "class_subject_id": class_subject["id"]},
+                headers=admin_headers,
+            )
+        ).json()["data"]["items"]
+        for definition in definitions:
+            await client.post(
+                "/api/v1/assessments/scores/bulk-entry",
+                json={
+                    "class_subject_id": class_subject["id"],
+                    "assessment_definition_id": definition["id"],
+                    "scores": [
+                        {
+                            "student_enrollment_id": enrollment["id"],
+                            "score_status": "SCORED",
+                            "raw_score": min(5, float(definition["max_score"])),
+                        }
+                    ],
+                },
+                headers=teacher_headers,
+            )
+        submit_resp = await client.post(
+            "/api/v1/assessments/submit",
+            json={"academic_term_id": term["id"], "class_subject_id": class_subject["id"]},
+            headers=teacher_headers,
+        )
+        assert submit_resp.status_code == 200, submit_resp.text
+
+        # The department-scoped HOD -- not school-wide, not role-default, not the
+        # assigned teacher -- can approve scores for this Science class subject.
+        approve_resp = await client.post(
+            "/api/v1/assessments/approve",
+            json={"academic_term_id": term["id"], "class_subject_id": class_subject["id"]},
+            headers=hod_headers,
+        )
+        assert approve_resp.status_code == 200, approve_resp.text
+        assert approve_resp.json()["data"]["status"] == "APPROVED"
+
+
+async def _grant(
+    client: AsyncClient, admin_headers: dict, user_id: str, code: str, department_id: str
+) -> None:
+    resp = await client.post(
+        f"/api/v1/identity/users/{user_id}/permissions",
+        json={"permission_code": code, "scope_type": "DEPARTMENT", "department_id": department_id},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201, resp.text
+
+
+@pytest.mark.asyncio
+async def test_department_scoped_delegate_can_manage_structure_subjects_and_enrollment():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        suffix = uuid.uuid4().hex[:6]
+        school_id, admin_token = await _create_school_and_admin(client, suffix)
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+        session = await _post(
+            client,
+            "/api/v1/structure/sessions",
+            {
+                "name": f"2024/2025 D{suffix}",
+                "start_date": "2024-09-09",
+                "end_date": "2025-07-18",
+                "is_current": True,
+            },
+            admin_headers,
+        )
+        await _post(
+            client,
+            f"/api/v1/structure/sessions/{session['id']}/terms",
+            {
+                "name": "First Term",
+                "term_order": 1,
+                "start_date": "2024-09-09",
+                "end_date": "2024-12-13",
+                "is_current": True,
+            },
+            admin_headers,
+        )
+        level = await _post(
+            client,
+            "/api/v1/structure/levels",
+            {
+                "name": "SS 1",
+                "code": f"SS1{suffix}",
+                "level_order": 4,
+                "category": "SENIOR_SECONDARY",
+            },
+            admin_headers,
+        )
+        science = await _post(
+            client,
+            "/api/v1/structure/departments",
+            {"name": "Science", "code": f"SCI{suffix}"},
+            admin_headers,
+        )
+        arts = await _post(
+            client,
+            "/api/v1/structure/departments",
+            {"name": "Arts", "code": f"ART{suffix}"},
+            admin_headers,
+        )
+        arm = await _post(client, "/api/v1/structure/arms", {"name": f"O{suffix}"}, admin_headers)
+
+        delegate_email, delegate_password = await _create_teacher(school_id, suffix, label="deleg")
+        delegate_headers = await _login(client, delegate_email, delegate_password)
+        delegate_id = (await client.get("/api/v1/identity/me", headers=delegate_headers)).json()[
+            "data"
+        ]["id"]
+        for code in ("structure:manage", "subjects:manage", "students:enroll"):
+            await _grant(client, admin_headers, delegate_id, code, science["id"])
+
+        science_group = await _post(
+            client,
+            "/api/v1/structure/class-groups",
+            {
+                "academic_session_id": session["id"],
+                "academic_level_id": level["id"],
+                "department_id": science["id"],
+                "class_arm_id": arm["id"],
+            },
+            delegate_headers,
+        )
+
+        forbidden_group = await client.post(
+            "/api/v1/structure/class-groups",
+            json={
+                "academic_session_id": session["id"],
+                "academic_level_id": level["id"],
+                "department_id": arts["id"],
+                "class_arm_id": arm["id"],
+            },
+            headers=delegate_headers,
+        )
+        assert forbidden_group.status_code == 403, forbidden_group.text
+
+        # The admin (unscoped) creates an Arts class group the delegate has no grant for.
+        arts_group = await _post(
+            client,
+            "/api/v1/structure/class-groups",
+            {
+                "academic_session_id": session["id"],
+                "academic_level_id": level["id"],
+                "department_id": arts["id"],
+                "class_arm_id": arm["id"],
+            },
+            admin_headers,
+        )
+
+        # Listing as the delegate returns only the Science group, not Arts --
+        # a filtered view, not a 403 and not the whole school's class groups.
+        delegate_list = await client.get("/api/v1/structure/class-groups", headers=delegate_headers)
+        assert delegate_list.status_code == 200, delegate_list.text
+        delegate_group_ids = {g["id"] for g in delegate_list.json()["data"]["items"]}
+        assert science_group["id"] in delegate_group_ids
+        assert arts_group["id"] not in delegate_group_ids
+
+        # The admin's unscoped list still sees both.
+        admin_list = await client.get("/api/v1/structure/class-groups", headers=admin_headers)
+        admin_group_ids = {g["id"] for g in admin_list.json()["data"]["items"]}
+        assert science_group["id"] in admin_group_ids
+        assert arts_group["id"] in admin_group_ids
+
+        subject = await _post(
+            client,
+            "/api/v1/subjects",
+            {"name": "Physics", "code": f"PHY{suffix}"},
+            admin_headers,
+        )
+        offering = await _post(
+            client,
+            "/api/v1/subjects/offerings",
+            {
+                "subject_id": subject["id"],
+                "academic_session_id": session["id"],
+                "academic_level_id": level["id"],
+                "department_id": science["id"],
+            },
+            admin_headers,
+        )
+
+        class_subject = await _post(
+            client,
+            "/api/v1/class-subjects",
+            {"subject_offering_id": offering["id"], "class_group_id": science_group["id"]},
+            delegate_headers,
+        )
+        assert class_subject["class_group_id"] == science_group["id"]
+
+        student = await _post(
+            client,
+            "/api/v1/students",
+            {
+                "admission_number": f"OBHS/{suffix}/0002",
+                "first_name": "Ngozi",
+                "last_name": "Eze",
+                "date_of_birth": "2010-01-15",
+                "gender": "FEMALE",
+                "guardian_name": "Mrs Eze",
+                "guardian_email": f"guardian2.{suffix}@olivet-test.edu.ng",
+                "guardian_phone": "08039876543",
+                "enrollment_date": "2024-09-09",
+            },
+            admin_headers,
+        )
+
+        enrollment = await _post(
+            client,
+            f"/api/v1/students/{student['id']}/enrollments",
+            {"class_group_id": science_group["id"]},
+            delegate_headers,
+        )
+        assert enrollment["class_group_id"] == science_group["id"]
+
+        # A plain teacher with no role default and no grant at all is denied
+        # outright on the list endpoint, not given an empty-but-successful list.
+        bystander_email, bystander_password = await _create_teacher(school_id, suffix, label="by")
+        bystander_headers = await _login(client, bystander_email, bystander_password)
+        bystander_list = await client.get(
+            "/api/v1/structure/class-groups", headers=bystander_headers
+        )
+        assert bystander_list.status_code == 403, bystander_list.text

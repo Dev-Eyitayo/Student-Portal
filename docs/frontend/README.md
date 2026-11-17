@@ -39,7 +39,7 @@ Current milestone status:
 | M6 | Term publication, report-card payloads, result access tokens, notifications | **PLANNED** |
 | M7 | Admin dashboard, Olivet seed script, security hardening, performance verification | **PLANNED** |
 
-Milestone `LIVE` means the main workflow exists. Scoped permission enforcement remains **PARTIAL** within M1: grant management is live, but most routes are not scope-aware and `/identity/me` does not return grant scopes.
+Milestone `LIVE` means the main workflow exists. Scoped permission enforcement remains **PARTIAL** within M1 only because `/identity/me` does not return grant scopes and there is no grant-list endpoint; actual enforcement -- including list filtering -- is live across structure/students/subjects/assessments. See [personas-and-permissions.md](./personas-and-permissions.md) for exactly which routes are scope-aware.
 
 ## API quick reference
 
@@ -114,7 +114,7 @@ Paginated endpoints return:
 - There is no teacher-facing "my class subjects" or "my assignments" discovery endpoint yet.
 - MFA flags exist on users, but no MFA enrollment or challenge flow is live.
 - School onboarding is currently a public endpoint. Do not expose it in normal staff navigation without an explicit product decision.
-- Most route permissions are not scope-aware. Do not infer that a scoped grant automatically unlocks every endpoint. See [personas-and-permissions.md](./personas-and-permissions.md).
+- A scoped grant now filters list endpoints (e.g. `GET /structure/class-groups`) down to the caller's department/level/class-group, not an all-or-nothing `403`/everything. The exceptions are the subject catalog (`GET /subjects`) and staff/user management, which have no scope dimension to filter by. See [personas-and-permissions.md](./personas-and-permissions.md) for the full breakdown.
 - Bulk imports are asynchronous. A `202 Accepted` response is not a completed import.
 
 ## Recommended reading order

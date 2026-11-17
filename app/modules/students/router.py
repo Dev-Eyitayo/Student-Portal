@@ -45,7 +45,6 @@ from app.modules.students.tasks import (
 router = APIRouter(tags=["Students & Enrollments"])
 
 student_permissions = [Depends(require_permission("students:register"))]
-enrollment_permissions = [Depends(require_permission("students:enroll"))]
 status_permissions = [Depends(require_permission("students:status"))]
 bulk_import_permissions = [Depends(require_permission("students:bulk_import"))]
 
@@ -304,7 +303,6 @@ async def update_student_status(
 @router.get(
     "/students/{student_id}/enrollments",
     response_model=SuccessResponse[Page[EnrollmentResponse]],
-    dependencies=enrollment_permissions,
 )
 async def list_student_enrollments(
     student_id: UUID,
@@ -317,6 +315,7 @@ async def list_student_enrollments(
         db,
         _school_id(current_user),
         student_id,
+        current_user,
         page=page,
         page_size=page_size,
     )
@@ -329,7 +328,6 @@ async def list_student_enrollments(
     "/students/{student_id}/enrollments",
     response_model=SuccessResponse[EnrollmentResponse],
     status_code=status.HTTP_201_CREATED,
-    dependencies=enrollment_permissions,
 )
 async def create_enrollment(
     student_id: UUID,
@@ -338,11 +336,13 @@ async def create_enrollment(
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
+    # Authorization is resource-scoped in services.create_enrollment, not a router dependency.
     enrollment = await services.create_enrollment(
         db,
         _school_id(current_user),
         student_id,
         req,
+        current_user,
         _audit_context(request, current_user),
     )
     return SuccessResponse[EnrollmentResponse](data=EnrollmentResponse.model_validate(enrollment))
@@ -351,7 +351,6 @@ async def create_enrollment(
 @router.get(
     "/enrollments/{enrollment_id}",
     response_model=SuccessResponse[EnrollmentResponse],
-    dependencies=enrollment_permissions,
 )
 async def get_enrollment(
     enrollment_id: UUID,
@@ -362,6 +361,7 @@ async def get_enrollment(
         db,
         _school_id(current_user),
         enrollment_id,
+        current_user,
     )
     return SuccessResponse[EnrollmentResponse](data=EnrollmentResponse.model_validate(enrollment))
 
@@ -369,7 +369,6 @@ async def get_enrollment(
 @router.patch(
     "/enrollments/{enrollment_id}",
     response_model=SuccessResponse[EnrollmentResponse],
-    dependencies=enrollment_permissions,
 )
 async def update_enrollment(
     enrollment_id: UUID,
@@ -383,6 +382,7 @@ async def update_enrollment(
         _school_id(current_user),
         enrollment_id,
         req,
+        current_user,
         _audit_context(request, current_user),
     )
     return SuccessResponse[EnrollmentResponse](data=EnrollmentResponse.model_validate(enrollment))

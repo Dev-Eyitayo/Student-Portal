@@ -36,6 +36,12 @@ router = APIRouter(
     dependencies=[Depends(require_permission("structure:manage"))],
 )
 
+# No blanket dependency: class-group auth is resource-scoped in the service layer.
+class_groups_router = APIRouter(
+    prefix="/structure/class-groups",
+    tags=["Academic Structure"],
+)
+
 
 def _school_id(current_user: User) -> UUID:
     if current_user.school_id is None:
@@ -520,7 +526,10 @@ async def retire_arm(
     )
 
 
-@router.get("/class-groups", response_model=SuccessResponse[Page[ClassGroupResponse]])
+@class_groups_router.get(
+    "",
+    response_model=SuccessResponse[Page[ClassGroupResponse]],
+)
 async def list_class_groups(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
@@ -534,6 +543,7 @@ async def list_class_groups(
     items, meta = await services.list_class_groups(
         db,
         _school_id(current_user),
+        current_user,
         session_id=session_id,
         level_id=level_id,
         department_id=department_id,
@@ -546,8 +556,8 @@ async def list_class_groups(
     )
 
 
-@router.post(
-    "/class-groups",
+@class_groups_router.post(
+    "",
     response_model=SuccessResponse[ClassGroupResponse],
     status_code=status.HTTP_201_CREATED,
 )
@@ -561,13 +571,14 @@ async def create_class_group(
         db,
         _school_id(current_user),
         req,
+        current_user,
         _audit_context(request, current_user),
     )
     return SuccessResponse[ClassGroupResponse](data=ClassGroupResponse.model_validate(class_group))
 
 
-@router.get(
-    "/class-groups/{class_group_id}",
+@class_groups_router.get(
+    "/{class_group_id}",
     response_model=SuccessResponse[ClassGroupResponse],
 )
 async def get_class_group(
@@ -575,12 +586,14 @@ async def get_class_group(
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
-    class_group = await services.get_class_group(db, _school_id(current_user), class_group_id)
+    class_group = await services.get_class_group(
+        db, _school_id(current_user), class_group_id, current_user
+    )
     return SuccessResponse[ClassGroupResponse](data=ClassGroupResponse.model_validate(class_group))
 
 
-@router.patch(
-    "/class-groups/{class_group_id}",
+@class_groups_router.patch(
+    "/{class_group_id}",
     response_model=SuccessResponse[ClassGroupResponse],
 )
 async def update_class_group(
@@ -595,13 +608,14 @@ async def update_class_group(
         _school_id(current_user),
         class_group_id,
         req,
+        current_user,
         _audit_context(request, current_user),
     )
     return SuccessResponse[ClassGroupResponse](data=ClassGroupResponse.model_validate(class_group))
 
 
-@router.delete(
-    "/class-groups/{class_group_id}",
+@class_groups_router.delete(
+    "/{class_group_id}",
     response_model=SuccessResponse[MessageResponse],
 )
 async def retire_class_group(
@@ -614,6 +628,7 @@ async def retire_class_group(
         db,
         _school_id(current_user),
         class_group_id,
+        current_user,
         _audit_context(request, current_user),
     )
     return SuccessResponse[MessageResponse](

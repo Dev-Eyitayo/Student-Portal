@@ -50,15 +50,15 @@ Authorization is a backend responsibility. The frontend uses permissions to shap
 ### Head of department
 
 - **Not a role.**
-- Representable as a permission grant scoped to `DEPARTMENT`, for example `scores:approve` for Science.
-- The grant model supports this persona, but scoped enforcement is only wired into assessment service checks. Most route-level guards are unscoped.
-- Do not present department-scoped delegation as fully effective across the product until the backend applies scope extractors consistently.
+- Representable as a permission grant scoped to `DEPARTMENT`, for example `scores:approve` for Science, or `structure:manage`/`subjects:manage`/`teachers:assign`/`subjects:register_electives`/`students:enroll` scoped to the HOD's department.
+- Scoped enforcement is live for all of those: class groups, subject offerings, class subjects, teacher assignments, student subject registrations, score sheets, and enrollments all resolve the target resource's department/level before checking the grant.
+- Does not extend to staff/user management (`users:manage`, `permissions:delegate`) or the subject catalog itself (`subjects:manage` on `/subjects` directly) -- neither has a department dimension in the data model, so those remain `SCHOOL_WIDE`-or-role-default only.
 
 ### Academic-level coordinator
 
 - **Not a role.**
-- Representable as a permission grant scoped to `ACADEMIC_LEVEL`, for example an SS1 coordinator with level-scoped approval.
-- The same enforcement limitation as a head of department applies.
+- Representable as a permission grant scoped to `ACADEMIC_LEVEL`, for example an SS1 coordinator with level-scoped approval, structure management, or enrollment.
+- Same live enforcement as a head of department.
 - There is no coordinator field on `AcademicLevel`.
 
 ### Parent, guardian, or student
@@ -220,73 +220,62 @@ Supported scope types:
 
 `DELETE /api/v1/identity/users/{user_id}/permissions/{grant_id}` soft-deletes the grant. Revocation requires `users:manage`.
 
-### Current enforcement limits
+### Current enforcement
 
-- Route-level checks call `require_permission` without scope extractors. This means a role default or a `SCHOOL_WIDE` grant is the reliable way to pass a route guard.
-- A scoped grant is evaluated against resource scope only in assessment service authorization after the route guard has passed.
-- Because of that, a non-admin user with only a `DEPARTMENT`, `ACADEMIC_LEVEL`, or `CLASS_GROUP` grant may not reach an action whose route guard is unscoped, even though `/me` lists the permission code.
-- The API does not currently validate that the supplied id field matches the selected `scope_type`. The frontend must send exactly the matching id and leave the others `null`.
-- Treat department, level, and class-group delegation as **PARTIAL** until route-level scoping is completed.
+- Every mutation and single-resource read on something with a real department/level/class-group dimension -- class groups, subject offerings, class subjects, teacher assignments, student subject registrations, enrollments, assessment definitions, and score sheets -- resolves that resource's own scope and checks it against the caller's grants. A `DEPARTMENT`- or `ACADEMIC_LEVEL`-scoped grant now reliably works for exactly the resources inside that scope, and is correctly rejected outside it.
+- List endpoints for those same resource types (`GET /structure/class-groups`, `GET /subjects/offerings`, `GET /class-subjects`, `GET /assessments/definitions`, `GET /students/{id}/enrollments`) are also scope-filtered: a department-scoped delegate calling one of these gets back only the rows inside their granted department/level/class-group(s), not a `403` and not the whole school's rows. A caller with zero applicable permission (no role default, no grant at all) still gets `403` on the list itself, not an empty `200`.
+- The subject catalog list (`GET /subjects`) and staff/user management (`users:manage`, `permissions:delegate`) have no department/level/class-group dimension in the data model, so they remain `SCHOOL_WIDE`-or-role-default only -- there is nothing to filter them by.
+- The API does not validate that the supplied id field matches the selected `scope_type` on grant creation. The frontend must send exactly the matching id and leave the others `null`.
 
 ## Live route permission reference
 
-| Route family | Permission |
-| --- | --- |
-| `POST /identity/schools`, `POST /identity/login`, `POST /identity/refresh` | Public. |
-| `GET /identity/me` | Authenticated user. |
-| `POST /identity/logout` | Authenticated user. |
-| `GET /identity/staff/verify-invite`, `POST /identity/staff/accept-invitation` | Public invitation flow. |
-| `POST /identity/staff/invite` | `users:manage` |
-| `POST /identity/staff/bulk-import` | `users:manage` |
-| `GET /identity/staff/bulk-import/{task_id}` | `users:manage` |
-| `POST /identity/users/{user_id}/permissions` | `users:manage` |
-| `DELETE /identity/users/{user_id}/permissions/{grant_id}` | `users:manage` |
-| `POST /identity/users/{user_id}/deactivate` | `users:manage` |
-| All `/structure/*` routes | `structure:manage` |
-| `GET/POST /students`, `GET/PATCH /students/{student_id}` | `students:register` |
-| `POST /students/bulk-import`, `GET /students/bulk-import/{task_id}` | `students:bulk_import` |
-| `POST /students/{student_id}/status` | `students:status` |
-| `GET/POST /students/{student_id}/enrollments` | `students:enroll` |
-| `GET/PATCH /enrollments/{enrollment_id}` | `students:enroll` |
-| All base `/subjects` and `/subjects/offerings` routes | `subjects:manage` |
-| Class-subject list/create/get/retire | `subjects:manage` |
-| Class-subject teacher assignments | `teachers:assign` |
-| Bulk subject registration | `subjects:register_electives` |
-| Enrollment subject registrations | `subjects:register_electives` |
-| Assessment definition list/create/get/update | `subjects:manage` |
-| Score sheet read and bulk entry | `scores:enter` |
-| Score sheet submit | `scores:submit` |
-| Score sheet approve | `scores:approve` |
-| Score sheet unlock | `scores:unlock` |
-
-All `/structure` routes require `structure:manage`, including read-only list and detail routes.
+| Route family | Permission | Scope-aware |
+| --- | --- | --- |
+| `POST /identity/schools`, `POST /identity/login`, `POST /identity/refresh` | Public. | n/a |
+| `GET /identity/me` | Authenticated user. | n/a |
+| `POST /identity/logout` | Authenticated user. | n/a |
+| `GET /identity/staff/verify-invite`, `POST /identity/staff/accept-invitation` | Public invitation flow. | n/a |
+| `POST /identity/staff/invite`, bulk-import, grant/revoke permissions, deactivate | `users:manage` | No (no scope dimension) |
+| `GET /structure/sessions`, `/terms`, `/levels`, `/departments`, `/arms` (all CRUD) | `structure:manage` | No (no scope dimension) |
+| `GET /structure/class-groups` (list), `POST`, `GET/PATCH/DELETE /{id}` | `structure:manage` | **Yes** -- by each group's own department/level/id; the list is filtered to the caller's scope, not all-or-nothing |
+| `GET/PATCH /students/{student_id}`, `POST /students` | `students:register` | No (no scope dimension) |
+| `POST /students/bulk-import`, `GET /students/bulk-import/{task_id}` | `students:bulk_import` | No |
+| `POST /students/{student_id}/status` | `students:status` | No |
+| `GET /students/{student_id}/enrollments` (list), `POST`, `GET/PATCH /enrollments/{id}` | `students:enroll` | **Yes** -- by the enrollment's class group; list filtered the same way |
+| `GET /subjects`, `POST/PATCH/DELETE /subjects/{id}` (catalog) | `subjects:manage` | No (no scope dimension) |
+| `GET /subjects/offerings` (list), `POST`, `GET/PATCH/DELETE /{id}` | `subjects:manage` | **Yes** -- by the offering's level/department; list filtered the same way |
+| `GET /class-subjects` (list), `POST`, `GET/DELETE /{id}` | `subjects:manage` | **Yes** -- by the class group; list filtered the same way |
+| Class-subject teacher assignments (list/create/deactivate/bulk) | `teachers:assign` | **Yes** -- by the class group |
+| Bulk and enrollment subject registrations (list/create/deactivate/bulk) | `subjects:register_electives` | **Yes** -- by the class group |
+| `GET /assessments/definitions` (list), `POST`, `GET/PATCH /{id}` | `subjects:manage` | **Yes** -- by the class subject's class group; list filtered the same way |
+| Score sheet read and bulk entry | `scores:enter` | **Yes** -- teacher ownership, or scoped delegation |
+| Score sheet submit | `scores:submit` | **Yes** -- teacher ownership, or scoped delegation |
+| Score sheet approve, unlock | `scores:approve` / `scores:unlock` | **Yes** -- scoped delegation (never teacher ownership) |
 
 ## Assessment-specific ownership rules
 
-Assessment authorization is stricter than a permission check alone:
+Assessment authorization layers teacher ownership on top of the permission check:
 
 - `SUPER_ADMIN` and `SCHOOL_ADMIN` bypass.
-- `ACADEMIC_OFFICER` with the required permission proceeds.
-- Score-entry mutation and score-sheet submission require an actively assigned `TEACHER`.
-- Score-sheet read (`GET /assessments/scores`) currently checks only the `scores:enter` route permission and does not enforce teacher assignment in the service layer. This is a known backend gap that must be fixed before production.
-- Other lifecycle actions fall back to scoped permission evaluation using the class group's department, academic level, and class-group id.
-- `scores:approve` and `scores:unlock` are not teacher-ownership permissions. A teacher cannot approve or unlock merely by being assigned.
+- `ACADEMIC_OFFICER` with the role-default permission proceeds unscoped.
+- Score-entry mutation, score-sheet submission, **and score-sheet read** require an actively assigned `TEACHER`, or a scoped/`SCHOOL_WIDE` delegation.
+- `scores:approve` and `scores:unlock` are not teacher-ownership permissions. A teacher cannot approve or unlock merely by being assigned to the class subject -- only role-default `ACADEMIC_OFFICER`, `SCHOOL_WIDE`, or a scoped delegation reaches those.
 
 Frontend implications:
 
-- A teacher may have `scores:enter` in `/me` but still receive `403` when entering scores for a class subject they do not teach.
-- The read route is weaker than the write route today. Do not expose arbitrary class-subject and assessment-definition ids, and do not rely on the frontend alone to prevent cross-class roster reads.
-- Never show every class subject to every teacher.
-- Approval and unlock screens should be hidden unless the user has the relevant code and is known to have school-wide or academic-officer authority.
+- A teacher may have `scores:enter` in `/me` but still receive `403` entering or reading scores for a class subject they do not teach -- this now applies to the read route too, not just bulk-entry.
+- Never show every class subject to every teacher; the backend will reject it, but don't surface ids the UI shouldn't expose in the first place.
+- Approval and unlock screens should be hidden unless the user has the relevant code and either school-wide/academic-officer authority or a scoped delegation covering that class subject's department, level, or class group.
 
 ## Delegation recipes and current suitability
 
 | Scenario | Grant | Suitability |
 | --- | --- | --- |
-| Teacher enters and submits scores for assigned subjects | No extra grant; role defaults plus teacher assignment. | **LIVE** |
+| Teacher enters, reads, and submits scores for assigned subjects | No extra grant; role defaults plus teacher assignment. | **LIVE** |
 | Academic officer approves across the school | Role default `scores:approve`. | **LIVE** |
-| HOD approves Science only | `scores:approve` with `DEPARTMENT` scope. | **PARTIAL** because the route guard is unscoped. |
-| SS1 coordinator approves SS1 only | `scores:approve` with `ACADEMIC_LEVEL` scope. | **PARTIAL** for the same reason. |
+| HOD approves Science only | `scores:approve` with `DEPARTMENT` scope. | **LIVE** |
+| SS1 coordinator approves SS1 only | `scores:approve` with `ACADEMIC_LEVEL` scope. | **LIVE** |
+| HOD manages structure, subjects, teacher assignments, and enrollment for their department | `structure:manage` / `subjects:manage` / `teachers:assign` / `students:enroll` with `DEPARTMENT` scope. | **LIVE**, including list endpoints: the HOD's class-group/offering/class-subject/definition/enrollment lists are filtered to their department automatically. |
 | Form master for SS1 O | Set `ClassGroup.class_teacher_id`. | **LIVE** as an assignment, but no remarks workflow. |
 | Staff manager grants permissions | `users:manage`, not `permissions:delegate`. | **LIVE** |
 
@@ -298,7 +287,7 @@ Deactivating a staff user:
 - Sets `token_valid_after`, invalidating existing sessions.
 - Marks the staff profile `INACTIVE`.
 - Deactivates active teacher assignments.
-- Clears class groups where the user was class teacher.
+- Clears the active (non-retired) class groups where the user was class teacher; historical retired class groups keep their past class teacher on record.
 - Does not delete the user or their historical records.
 
 The frontend should remove the user from active staff lists, clear any cached permissions, and refresh class-group data after deactivation.

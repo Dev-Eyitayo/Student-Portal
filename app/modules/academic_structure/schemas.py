@@ -1,7 +1,13 @@
 from datetime import date, datetime
+from enum import StrEnum
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class LevelCategory(StrEnum):
+    JUNIOR_SECONDARY = "JUNIOR_SECONDARY"
+    SENIOR_SECONDARY = "SENIOR_SECONDARY"
 
 
 class SessionCreateRequest(BaseModel):
@@ -83,14 +89,14 @@ class LevelCreateRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=64)
     code: str = Field(..., min_length=1, max_length=16)
     level_order: int = Field(..., ge=1, le=20)
-    category: str = Field(..., pattern="^(JUNIOR_SECONDARY|SENIOR_SECONDARY)$")
+    category: LevelCategory
 
 
 class LevelUpdateRequest(BaseModel):
     name: str | None = Field(None, min_length=2, max_length=64)
     code: str | None = Field(None, min_length=1, max_length=16)
     level_order: int | None = Field(None, ge=1, le=20)
-    category: str | None = Field(None, pattern="^(JUNIOR_SECONDARY|SENIOR_SECONDARY)$")
+    category: LevelCategory | None = None
 
 
 class LevelResponse(BaseModel):
@@ -101,7 +107,7 @@ class LevelResponse(BaseModel):
     name: str
     code: str
     level_order: int
-    category: str
+    category: LevelCategory
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None

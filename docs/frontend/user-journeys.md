@@ -831,11 +831,8 @@ Rows are active subject registrations only, sorted by last name then first name.
 
 Resource-level rules:
 
-- The route requires `scores:enter`.
-- Score-entry mutation and submission enforce teacher assignment; this read route currently does not.
-- Academic officers need the relevant permission.
-- Class staff and scoped declarations are evaluated against the class group's department, level, and id for lifecycle actions.
-- Known backend gap: a teacher with `scores:enter` can request another class subject's sheet if they know its ids. Do not expose arbitrary ids in the frontend, and treat the backend fix as required before production.
+- The route requires `scores:enter`, now enforced the same way as score entry: an actively assigned `TEACHER`, `ACADEMIC_OFFICER`/`SCHOOL_ADMIN`/`SUPER_ADMIN`, or a `SCHOOL_WIDE`/scoped delegation covering the class subject's class group.
+- An unassigned teacher requesting another class subject's sheet gets `403`, not a silent read. Still don't expose arbitrary class-subject/assessment-definition ids in the UI -- the backend blocks it, but the frontend shouldn't invite the attempt.
 
 ### 4.3 Enter scores
 

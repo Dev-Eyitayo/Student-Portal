@@ -1,8 +1,33 @@
 from datetime import date, datetime
+from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+
+
+class Gender(StrEnum):
+    M = "M"
+    F = "F"
+    MALE = "MALE"
+    FEMALE = "FEMALE"
+
+
+class StudentStatus(StrEnum):
+    ADMITTED = "ADMITTED"
+    ACTIVE = "ACTIVE"
+    SUSPENDED = "SUSPENDED"
+    WITHDRAWN = "WITHDRAWN"
+    TRANSFERRED = "TRANSFERRED"
+    GRADUATED = "GRADUATED"
+
+
+class EnrollmentStatus(StrEnum):
+    ENROLLED = "ENROLLED"
+    PROMOTED = "PROMOTED"
+    REPEATING = "REPEATING"
+    TRANSFERRED = "TRANSFERRED"
+    WITHDRAWN = "WITHDRAWN"
 
 
 class StudentCreateRequest(BaseModel):
@@ -11,7 +36,7 @@ class StudentCreateRequest(BaseModel):
     middle_name: str | None = Field(None, max_length=64)
     last_name: str = Field(..., min_length=1, max_length=64)
     date_of_birth: date
-    gender: str = Field(..., min_length=1, max_length=10)
+    gender: Gender
     guardian_name: str = Field(..., min_length=2, max_length=128)
     guardian_email: EmailStr
     guardian_phone: str = Field(..., min_length=5, max_length=32)
@@ -29,7 +54,7 @@ class StudentUpdateRequest(BaseModel):
     middle_name: str | None = Field(None, max_length=64)
     last_name: str | None = Field(None, min_length=1, max_length=64)
     date_of_birth: date | None = None
-    gender: str | None = Field(None, min_length=1, max_length=10)
+    gender: Gender | None = None
     guardian_name: str | None = Field(None, min_length=2, max_length=128)
     guardian_email: EmailStr | None = None
     guardian_phone: str | None = Field(None, min_length=5, max_length=32)
@@ -37,7 +62,7 @@ class StudentUpdateRequest(BaseModel):
 
 
 class StudentStatusUpdateRequest(BaseModel):
-    status: str = Field(..., min_length=1, max_length=32)
+    status: StudentStatus
     reason: str = Field(..., min_length=5, max_length=500)
 
 
@@ -51,12 +76,12 @@ class StudentResponse(BaseModel):
     middle_name: str | None = None
     last_name: str
     date_of_birth: date
-    gender: str
+    gender: Gender
     guardian_name: str
     guardian_email: EmailStr
     guardian_phone: str
     enrollment_date: date
-    status: str
+    status: StudentStatus
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
@@ -87,7 +112,7 @@ class EnrollmentCreateRequest(BaseModel):
 
 
 class EnrollmentUpdateRequest(BaseModel):
-    enrollment_status: str = Field(..., min_length=1, max_length=32)
+    enrollment_status: EnrollmentStatus
     promoted_to_class_group_id: UUID | None = None
     reason: str | None = Field(None, max_length=500)
 
@@ -100,7 +125,7 @@ class EnrollmentResponse(BaseModel):
     student_id: UUID
     academic_session_id: UUID
     class_group_id: UUID
-    enrollment_status: str
+    enrollment_status: EnrollmentStatus
     promoted_to_class_group_id: UUID | None = None
     class_group: EnrollmentClassGroupSummary | None = None
     academic_session: EnrollmentSessionSummary | None = None
