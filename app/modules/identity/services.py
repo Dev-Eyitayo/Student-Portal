@@ -1,3 +1,4 @@
+import asyncio
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -5,12 +6,13 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
+from app.core.exceptions import ConflictException
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -19,6 +21,8 @@ from app.core.security import (
     is_token_revoked,
     verify_password,
 )
+from app.modules.audit.services import AuditContext, record_audit_log
+from app.modules.common.models import generate_uuid7
 from app.modules.identity.bulk_import import ParsedStaffRow, StaffBulkImportRow
 from app.modules.identity.models import (
     Permission,
@@ -37,6 +41,36 @@ from app.modules.identity.schemas import (
     StaffVerifyInviteResponse,
     TokenResponse,
 )
+
+
+async def _commit_or_conflict(
+    db: AsyncSession,
+    *,
+    message: str,
+    code: str = "CONFLICT",
+) -> None:
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ConflictException(message=message, code=code) from exc
+
+
+async def _scope_audit_to_school(db: AsyncSession, school_id: UUID) -> None:
+    """Sets the RLS tenant session variable for the rest of the current transaction.
+
+    register_school_with_admin and accept_staff_invitation run on a plain
+    get_db() session with no prior tenant context (there is no authenticated
+    user yet), so the engine's "begin" hook applies an empty school_id. The
+    transaction is already open by the time we know the school_id, so it must
+    be set directly rather than through set_tenant_scope (which only takes
+    effect on the next transaction begin).
+    """
+    await db.execute(
+        text("SELECT set_config('app.current_school_id', :school_id, true)"),
+        {"school_id": str(school_id)},
+    )
+
 
 DEFAULT_ASSESSMENT_WEIGHTS = {
     "TEST1": {"name": "Test 1", "max_score": 10, "weight_percentage": 10},
@@ -107,7 +141,7 @@ async def authenticate_user(db: AsyncSession, email: str, password: str) -> User
     result = await db.execute(stmt)
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(password, user.password_hash):
+    if not user or not await asyncio.to_thread(verify_password, password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="The email or password you entered is incorrect. Please check your details and try again.",
@@ -118,6 +152,12 @@ async def authenticate_user(db: AsyncSession, email: str, password: str) -> User
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Your account is currently inactive. Please reach out to your school administrator for assistance.",
+        )
+
+    if user.school is not None and not user.school.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your school's account is currently suspended. Please contact your platform administrator.",
         )
 
     user.last_login_at = datetime.now(UTC)
@@ -210,7 +250,7 @@ async def refresh_user_tokens(db: AsyncSession, refresh_token: str) -> TokenResp
 
 
 async def register_school_with_admin(
-    db: AsyncSession, req: SchoolCreateRequest
+    db: AsyncSession, req: SchoolCreateRequest, actor_ip: str = "0.0.0.0"
 ) -> tuple[School, User]:
     # Check uniqueness of slug and official code
     slug_check = await db.execute(select(School).where(School.slug == req.slug.lower().strip()))
@@ -268,14 +308,31 @@ async def register_school_with_admin(
     admin_user = User(
         school_id=school.id,
         email=req.admin_email.lower().strip(),
-        password_hash=hash_password(req.admin_password),
+        password_hash=await asyncio.to_thread(hash_password, req.admin_password),
         first_name=req.admin_first_name.strip(),
         last_name=req.admin_last_name.strip(),
         role="SCHOOL_ADMIN",
         is_active=True,
     )
     db.add(admin_user)
-    await db.commit()
+    await db.flush()
+    await _scope_audit_to_school(db, school.id)
+    record_audit_log(
+        db,
+        AuditContext(school_id=school.id, actor_id=admin_user.id, actor_ip=actor_ip),
+        action="SCHOOL_REGISTERED",
+        resource_type="School",
+        resource_id=school.id,
+        diff_payload={"after": {"name": school.name, "official_code": school.official_code}},
+    )
+    await _commit_or_conflict(
+        db,
+        message=(
+            "This school could not be registered because one of the details provided "
+            "conflicts with an existing school or account."
+        ),
+        code="SCHOOL_REGISTRATION_CONFLICT",
+    )
     await db.refresh(school)
     await db.refresh(admin_user)
 
@@ -283,7 +340,11 @@ async def register_school_with_admin(
 
 
 async def invite_staff_member(
-    db: AsyncSession, school_id: UUID, granter_id: UUID, req: StaffInviteRequest
+    db: AsyncSession,
+    school_id: UUID,
+    granter_id: UUID,
+    req: StaffInviteRequest,
+    actor_ip: str = "0.0.0.0",
 ) -> StaffInviteResponse:
     # Verify school exists
     school = await db.get(School, school_id)
@@ -318,7 +379,7 @@ async def invite_staff_member(
 
     # Create inactive user waiting for invitation acceptance with a cryptographically random unusable hash
     unusable_random_secret = secrets.token_urlsafe(64)
-    temporary_hash = hash_password(unusable_random_secret)
+    temporary_hash = await asyncio.to_thread(hash_password, unusable_random_secret)
     user = User(
         school_id=school_id,
         email=req.email.lower().strip(),
@@ -340,7 +401,22 @@ async def invite_staff_member(
         specialization=req.specialization.strip() if req.specialization else None,
     )
     db.add(staff_profile)
-    await db.commit()
+    record_audit_log(
+        db,
+        AuditContext(school_id=school_id, actor_id=granter_id, actor_ip=actor_ip),
+        action="STAFF_INVITED",
+        resource_type="User",
+        resource_id=user.id,
+        diff_payload={"after": {"email": user.email, "role": user.role}},
+    )
+    await _commit_or_conflict(
+        db,
+        message=(
+            "This staff invitation could not be sent because the email address or staff ID "
+            "conflicts with an existing record."
+        ),
+        code="STAFF_INVITE_CONFLICT",
+    )
 
     return _build_staff_invitation(user, school_id)
 
@@ -350,6 +426,7 @@ async def provision_staff_batch(
     school_id: UUID,
     granter_id: UUID,
     rows: list[ParsedStaffRow],
+    actor_ip: str = "0.0.0.0",
 ) -> StaffBulkProvisionResult:
     """Validates and provisions a staff roster atomically.
 
@@ -462,7 +539,7 @@ async def provision_staff_batch(
 
     # One random unusable hash is enough for the whole batch: every account
     # remains inactive until the invitee sets a real password.
-    unusable_hash = hash_password(secrets.token_urlsafe(64))
+    unusable_hash = await asyncio.to_thread(hash_password, secrets.token_urlsafe(64))
     created_users: list[tuple[int, User, StaffBulkImportRow]] = []
 
     try:
@@ -493,6 +570,14 @@ async def provision_staff_batch(
                 )
             )
 
+        record_audit_log(
+            db,
+            AuditContext(school_id=school_id, actor_id=granter_id, actor_ip=actor_ip),
+            action="STAFF_BATCH_PROVISIONED",
+            resource_type="StaffBulkImport",
+            resource_id=generate_uuid7(),
+            diff_payload={"created": len(created_users)},
+        )
         await db.commit()
     except IntegrityError:
         await db.rollback()
@@ -577,7 +662,7 @@ async def verify_staff_invitation(
 
 
 async def accept_staff_invitation(
-    db: AsyncSession, req: AcceptInvitationRequest
+    db: AsyncSession, req: AcceptInvitationRequest, actor_ip: str = "0.0.0.0"
 ) -> tuple[User, TokenResponse]:
     try:
         payload = decode_token(req.invitation_token)
@@ -614,12 +699,23 @@ async def accept_staff_invitation(
             detail="This invitation has already been used. Please sign in with your email and password.",
         )
 
-    user.password_hash = hash_password(req.password)
+    user.password_hash = await asyncio.to_thread(hash_password, req.password)
     user.is_active = True
     user.token_valid_after = datetime.now(UTC)
     if user.staff_profile:
         user.staff_profile.employment_status = "ACTIVE"
 
+    await db.flush()
+    if user.school_id is not None:
+        await _scope_audit_to_school(db, user.school_id)
+        record_audit_log(
+            db,
+            AuditContext(school_id=user.school_id, actor_id=user.id, actor_ip=actor_ip),
+            action="STAFF_INVITATION_ACCEPTED",
+            resource_type="User",
+            resource_id=user.id,
+            diff_payload={"after": {"is_active": True}},
+        )
     await db.commit()
     await db.refresh(user)
 
@@ -633,6 +729,7 @@ async def grant_user_permission(
     granter_id: UUID,
     target_user_id: UUID,
     req: PermissionGrantRequest,
+    actor_ip: str = "0.0.0.0",
 ) -> UserPermissionGrant:
     # Verify target user belongs to school
     target_user = await db.get(User, target_user_id)
@@ -663,6 +760,7 @@ async def grant_user_permission(
                 UserPermissionGrant.department_id == req.department_id,
                 UserPermissionGrant.academic_level_id == req.academic_level_id,
                 UserPermissionGrant.class_group_id == req.class_group_id,
+                UserPermissionGrant.deleted_at.is_(None),
             )
         )
     )
@@ -683,19 +781,44 @@ async def grant_user_permission(
         class_group_id=req.class_group_id,
     )
     db.add(grant)
-    await db.commit()
+    await db.flush()
+    record_audit_log(
+        db,
+        AuditContext(school_id=school_id, actor_id=granter_id, actor_ip=actor_ip),
+        action="PERMISSION_GRANTED",
+        resource_type="UserPermissionGrant",
+        resource_id=grant.id,
+        diff_payload={
+            "after": {
+                "user_id": target_user_id,
+                "permission_code": permission.code,
+                "scope_type": req.scope_type,
+            }
+        },
+    )
+    await _commit_or_conflict(
+        db,
+        message="This user already has this specific scoped permission.",
+        code="PERMISSION_GRANT_CONFLICT",
+    )
     await db.refresh(grant)
     return grant
 
 
 async def revoke_user_permission(
-    db: AsyncSession, school_id: UUID, target_user_id: UUID, grant_id: UUID
+    db: AsyncSession,
+    school_id: UUID,
+    target_user_id: UUID,
+    grant_id: UUID,
+    actor_id: UUID,
+    actor_ip: str = "0.0.0.0",
 ) -> None:
     stmt = select(UserPermissionGrant).where(
         and_(
             UserPermissionGrant.id == grant_id,
             UserPermissionGrant.user_id == target_user_id,
             UserPermissionGrant.school_id == school_id,
+            UserPermissionGrant.deleted_at.is_(None),
         )
     )
     result = await db.execute(stmt)
@@ -706,11 +829,26 @@ async def revoke_user_permission(
             detail="The permission grant you are trying to revoke does not exist.",
         )
 
-    await db.delete(grant)
+    grant.deleted_at = datetime.now(UTC)
+    await db.flush()
+    record_audit_log(
+        db,
+        AuditContext(school_id=school_id, actor_id=actor_id, actor_ip=actor_ip),
+        action="PERMISSION_REVOKED",
+        resource_type="UserPermissionGrant",
+        resource_id=grant.id,
+        diff_payload={"before": {"deleted_at": None}, "after": {"deleted_at": grant.deleted_at}},
+    )
     await db.commit()
 
 
-async def deactivate_user(db: AsyncSession, school_id: UUID, target_user_id: UUID) -> User:
+async def deactivate_user(
+    db: AsyncSession,
+    school_id: UUID,
+    target_user_id: UUID,
+    actor_id: UUID,
+    actor_ip: str = "0.0.0.0",
+) -> User:
     stmt = (
         select(User)
         .options(selectinload(User.staff_profile))
@@ -741,21 +879,39 @@ async def deactivate_user(db: AsyncSession, school_id: UUID, target_user_id: UUI
             )
         )
     )
+    deactivated_assignment_ids = []
     for assignment in active_assignments.scalars().all():
         assignment.is_active = False
         assignment.end_date = date.today()
+        deactivated_assignment_ids.append(str(assignment.id))
 
     form_master_groups = await db.execute(
         select(ClassGroup).where(
             and_(
                 ClassGroup.school_id == school_id,
                 ClassGroup.class_teacher_id == user.id,
+                ClassGroup.deleted_at.is_(None),
             )
         )
     )
+    cleared_class_group_ids = []
     for class_group in form_master_groups.scalars().all():
         class_group.class_teacher_id = None
+        cleared_class_group_ids.append(str(class_group.id))
 
+    await db.flush()
+    record_audit_log(
+        db,
+        AuditContext(school_id=school_id, actor_id=actor_id, actor_ip=actor_ip),
+        action="USER_DEACTIVATED",
+        resource_type="User",
+        resource_id=user.id,
+        diff_payload={
+            "after": {"is_active": False},
+            "deactivated_teacher_assignment_ids": deactivated_assignment_ids,
+            "cleared_form_master_class_group_ids": cleared_class_group_ids,
+        },
+    )
     await db.commit()
     await db.refresh(user)
     return user
@@ -779,7 +935,10 @@ async def get_user_effective_permissions(db: AsyncSession, user: User) -> list[s
     user_grants_stmt = (
         select(Permission.code)
         .join(UserPermissionGrant, UserPermissionGrant.permission_id == Permission.id)
-        .where(UserPermissionGrant.user_id == user.id)
+        .where(
+            UserPermissionGrant.user_id == user.id,
+            UserPermissionGrant.deleted_at.is_(None),
+        )
     )
     grant_perms = (await db.execute(user_grants_stmt)).scalars().all()
 

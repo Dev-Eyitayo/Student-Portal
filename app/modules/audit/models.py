@@ -23,7 +23,7 @@ class AuditLog(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
     school_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("schools.id", ondelete="CASCADE"), nullable=True
+        ForeignKey("schools.id", ondelete="RESTRICT"), nullable=True
     )
     actor_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True

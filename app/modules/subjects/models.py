@@ -4,6 +4,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
     from app.modules.students.models import StudentEnrollment
 
 
-class Subject(Base, TenantMixin):
+class Subject(Base, TenantMixin, TimestampMixin):
     __tablename__ = "subjects"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
@@ -35,18 +36,23 @@ class Subject(Base, TenantMixin):
     code: Mapped[str] = mapped_column(String(16), nullable=False)  # e.g., 'MTH', 'CCP'
     is_elective: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_trade_subject: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False
-    )
 
-    __table_args__ = (UniqueConstraint("school_id", "code", name="uq_school_subject_code"),)
+    __table_args__ = (
+        Index(
+            "uq_school_subject_code_active",
+            "school_id",
+            "code",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
 
     offerings: Mapped[list["SubjectOffering"]] = relationship(
-        "SubjectOffering", back_populates="subject", cascade="all, delete-orphan"
+        "SubjectOffering", back_populates="subject", passive_deletes=True
     )
 
 
-class SubjectOffering(Base, TenantMixin):
+class SubjectOffering(Base, TenantMixin, TimestampMixin):
     __tablename__ = "subject_offerings"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
@@ -62,17 +68,24 @@ class SubjectOffering(Base, TenantMixin):
     department_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("departments.id", ondelete="RESTRICT"), nullable=True
     )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False
-    )
 
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_offering_no_dept_active",
+            "subject_id",
+            "academic_session_id",
+            "academic_level_id",
+            unique=True,
+            postgresql_where=text("department_id IS NULL AND deleted_at IS NULL"),
+        ),
+        Index(
+            "uq_offering_with_dept_active",
             "subject_id",
             "academic_session_id",
             "academic_level_id",
             "department_id",
-            name="uq_offering_unique",
+            unique=True,
+            postgresql_where=text("department_id IS NOT NULL AND deleted_at IS NULL"),
         ),
     )
 
@@ -81,11 +94,11 @@ class SubjectOffering(Base, TenantMixin):
     academic_level: Mapped["AcademicLevel"] = relationship("AcademicLevel")
     department: Mapped[Optional["Department"]] = relationship("Department")
     class_subjects: Mapped[list["ClassSubject"]] = relationship(
-        "ClassSubject", back_populates="subject_offering", cascade="all, delete-orphan"
+        "ClassSubject", back_populates="subject_offering", passive_deletes=True
     )
 
 
-class ClassSubject(Base, TenantMixin):
+class ClassSubject(Base, TenantMixin, TimestampMixin):
     __tablename__ = "class_subjects"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
@@ -95,12 +108,15 @@ class ClassSubject(Base, TenantMixin):
     class_group_id: Mapped[UUID] = mapped_column(
         ForeignKey("class_groups.id", ondelete="CASCADE"), nullable=False
     )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False
-    )
 
     __table_args__ = (
-        UniqueConstraint("subject_offering_id", "class_group_id", name="uq_class_subject"),
+        Index(
+            "uq_class_subject_active",
+            "subject_offering_id",
+            "class_group_id",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
 
     subject_offering: Mapped["SubjectOffering"] = relationship(
@@ -108,10 +124,10 @@ class ClassSubject(Base, TenantMixin):
     )
     class_group: Mapped["ClassGroup"] = relationship("ClassGroup")
     teacher_assignments: Mapped[list["TeacherAssignment"]] = relationship(
-        "TeacherAssignment", back_populates="class_subject", cascade="all, delete-orphan"
+        "TeacherAssignment", back_populates="class_subject", passive_deletes=True
     )
     student_registrations: Mapped[list["StudentSubjectRegistration"]] = relationship(
-        "StudentSubjectRegistration", back_populates="class_subject", cascade="all, delete-orphan"
+        "StudentSubjectRegistration", back_populates="class_subject", passive_deletes=True
     )
 
 
@@ -123,7 +139,7 @@ class StudentSubjectRegistration(Base, TenantMixin):
         ForeignKey("student_enrollments.id", ondelete="CASCADE"), nullable=False
     )
     class_subject_id: Mapped[UUID] = mapped_column(
-        ForeignKey("class_subjects.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("class_subjects.id", ondelete="RESTRICT"), nullable=False
     )
     subject_category: Mapped[str] = mapped_column(
         String(32), default="COMPULSORY_CORE", nullable=False
@@ -136,6 +152,11 @@ class StudentSubjectRegistration(Base, TenantMixin):
     __table_args__ = (
         UniqueConstraint(
             "student_enrollment_id", "class_subject_id", name="uq_student_subject_registration"
+        ),
+        CheckConstraint(
+            "subject_category IN ('COMPULSORY_CORE', 'DEPARTMENT_CORE', 'TRADE_ELECTIVE', "
+            "'FREE_ELECTIVE')",
+            name="chk_subject_category",
         ),
         Index("idx_student_subject_reg", "class_subject_id", "is_active"),
         Index("idx_student_subject_enrollment", "student_enrollment_id", "is_active"),
@@ -157,7 +178,7 @@ class TeacherAssignment(Base, TenantMixin, TimestampMixin):
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
     class_subject_id: Mapped[UUID] = mapped_column(
-        ForeignKey("class_subjects.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("class_subjects.id", ondelete="RESTRICT"), nullable=False
     )
     assigned_by_id: Mapped[UUID] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
@@ -169,8 +190,12 @@ class TeacherAssignment(Base, TenantMixin, TimestampMixin):
     end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     __table_args__ = (
-        UniqueConstraint(
-            "class_subject_id", "teacher_id", "is_active", name="uq_active_teacher_class_subject"
+        Index(
+            "uq_active_teacher_class_subject",
+            "class_subject_id",
+            "teacher_id",
+            unique=True,
+            postgresql_where=text("is_active"),
         ),
         Index("idx_teacher_assignments_lookup", "teacher_id", "is_active"),
     )

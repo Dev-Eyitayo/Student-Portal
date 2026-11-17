@@ -1,7 +1,7 @@
 from datetime import UTC, date, datetime
 from uuid import UUID
 
-from sqlalchemy import Select, select, update
+from sqlalchemy import Select, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -67,7 +67,7 @@ async def _unset_current_sessions(
             AcademicSession.deleted_at.is_(None),
             AcademicSession.is_current.is_(True),
         )
-        .values(is_current=False)
+        .values(is_current=False, updated_at=datetime.now(UTC))
     )
     if exclude_id is not None:
         stmt = stmt.where(AcademicSession.id != exclude_id)
@@ -87,7 +87,7 @@ async def _unset_current_terms(
             AcademicTerm.deleted_at.is_(None),
             AcademicTerm.is_current.is_(True),
         )
-        .values(is_current=False)
+        .values(is_current=False, updated_at=datetime.now(UTC))
     )
     if exclude_id is not None:
         stmt = stmt.where(AcademicTerm.id != exclude_id)
@@ -472,12 +472,12 @@ async def _class_group_enrollment_count(
     db: AsyncSession,
     class_group_id: UUID,
 ) -> int:
-    stmt = select(StudentEnrollment.id).where(
+    stmt = select(func.count()).where(
         StudentEnrollment.class_group_id == class_group_id,
         StudentEnrollment.deleted_at.is_(None),
         StudentEnrollment.enrollment_status == "ENROLLED",
     )
-    return len((await db.execute(stmt)).scalars().all())
+    return (await db.execute(stmt)).scalar_one()
 
 
 async def list_sessions(

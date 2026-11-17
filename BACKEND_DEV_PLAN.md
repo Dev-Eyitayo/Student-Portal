@@ -133,16 +133,16 @@ graph TD
 3. Implement student-level elective and trade subject registration.
 
 #### Tasks & Implementation Details:
-- [ ] **Task 3.1: Subject Catalog & Offerings (`models.py`, `services.py`)**
+- [x] **Task 3.1: Subject Catalog & Offerings (`models.py`, `services.py`)**
   - Models: `Subject`, `SubjectOffering`, `ClassSubject`.
   - Support `department_id = NULL` for universal subjects (Maths, English, Civic, and all Junior Secondary subjects).
   - Support `is_trade_subject = TRUE` for national entrepreneurship/trade subjects.
-- [ ] **Task 3.2: Granular & Cascading Teacher Assignment**
+- [x] **Task 3.2: Granular & Cascading Teacher Assignment**
   - Model: `TeacherAssignment` linking `user_id` to `class_subject_id`.
   - `POST /api/v1/class-subjects/{class_subject_id}/teacher-assignments`: Granular arm-level assignment.
   - `POST /api/v1/class-subjects/teacher-assignments/bulk`: Cascading assignment (e.g., assign Mr. Adeola to Chemistry for all SS1 Science arms in one request).
   - Support co-teaching: Unique constraint on `(class_subject_id, teacher_id, is_active)`.
-- [ ] **Task 3.3: Student Subject Registration (`student_subject_registrations`)**
+- [x] **Task 3.3: Student Subject Registration (`student_subject_registrations`)**
   - Model: `StudentSubjectRegistration` with `subject_category`: `COMPULSORY_CORE`, `DEPARTMENT_CORE`, `TRADE_ELECTIVE`, `FREE_ELECTIVE`.
   - Auto-registration hook: Enrolling in a class group automatically registers all compulsory core and department core subjects.
   - `GET` and `POST /api/v1/enrollments/{enrollment_id}/subject-registrations`: Allows Form Master or Academic Officer to register a student's chosen trade subject (e.g., Catering Craft vs. Data Processing).
@@ -164,23 +164,23 @@ graph TD
 3. Enforce the score review lifecycle: `DRAFT` $\to$ `SUBMITTED` $\to$ `APPROVED`.
 
 #### Tasks & Implementation Details:
-- [ ] **Task 4.1: Assessment Schema Configuration**
+- [x] **Task 4.1: Assessment Schema Configuration**
   - Model: `AssessmentDefinition` linked to `class_subject_id` and `academic_term_id`.
   - Fields: `name`, `code` (`TEST1`, `TEST2`, `ASSIGN`, `EXAM`), `max_score`, `weight_percentage`, `sequence_order`.
   - Olivet-only seed: Test 1 (10 marks, 10%), Test 2 (10 marks, 10%), Assignments/Attendance (10 marks, 10%), Terminal Exam (70 marks, 70%). Other schools remain configurable.
   - M1 onboarding now seeds this template; this task extends it to per-class-subject assessment definitions.
-- [ ] **Task 4.2: Score Entry & Validation (`app/modules/assessments/schemas.py`)**
+- [x] **Task 4.2: Score Entry & Validation (`app/modules/assessments/schemas.py`)**
   - Model: `AssessmentScore`.
   - States: `SCORED`, `ABSENT`, `EXEMPT`, `PENDING`.
   - Validation rules:
     - Score must never exceed `max_score`.
     - If `score_status == 'SCORED'`, `raw_score` is mandatory and $\ge 0$.
     - If `score_status` in `('ABSENT', 'EXEMPT', 'PENDING')`, `raw_score` must be `NULL`.
-- [ ] **Task 4.3: Bulk Score Entry Endpoint (`POST /api/v1/assessments/scores/bulk-entry`)**
+- [x] **Task 4.3: Bulk Score Entry Endpoint (`POST /api/v1/assessments/scores/bulk-entry`)**
   - Pydantic v2 validated payload.
   - Authorization: Strict check that authenticated teacher has an active `TeacherAssignment` for the `class_subject_id` (or user has delegated `scores:edit` permission).
   - Atomic batch upsert.
-- [ ] **Task 4.4: Score Review & Approval Workflow**
+- [x] **Task 4.4: Score Review & Approval Workflow**
   - `POST /api/v1/assessments/submit`: Teacher submits scores; validates that zero students are left in `PENDING` status.
   - `POST /api/v1/assessments/approve`: Academic Officer or HOD (with delegated `scores:approve` scope) locks scores against further editing.
   - `POST /api/v1/assessments/unlock`: Authorized administrator unlocks score sheet with mandatory reason logged to `audit_logs`.

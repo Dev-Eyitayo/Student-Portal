@@ -14,6 +14,7 @@ async def paginate(
     page: int,
     page_size: int,
 ) -> tuple[list[Any], PageMeta]:
+    page = max(page, 1)
     count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
     total = (await db.execute(count_stmt)).scalar_one()
     result = await db.execute(stmt.offset((page - 1) * page_size).limit(page_size))
