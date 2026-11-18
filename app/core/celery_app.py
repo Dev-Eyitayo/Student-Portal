@@ -24,6 +24,8 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     broker_connection_retry_on_startup=True,
     task_track_started=True,
+    task_always_eager=settings.CELERY_TASK_ALWAYS_EAGER,
+    task_store_eager_result=settings.CELERY_TASK_ALWAYS_EAGER,
     broker_transport_options={"visibility_timeout": 3600},
     task_routes={
         "app.modules.identity.tasks.process_staff_bulk_import": {"queue": "bulk_imports"},

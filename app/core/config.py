@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     REDIS_URL: str | None = None
     REDIS_BROKER_URL: str | None = None
     CELERY_RESULT_BACKEND: str | None = None
+    CELERY_TASK_ALWAYS_EAGER: bool = False
     REDIS_SSL_CERT_REQS: str = "required"
     REDIS_SOCKET_TIMEOUT_SECONDS: float = 5.0
     REDIS_CONNECT_TIMEOUT_SECONDS: float = 5.0
@@ -83,6 +84,12 @@ class Settings(BaseSettings):
     STORAGE_LOCAL_DIR: str = "var/storage"
     STORAGE_PUBLIC_BASE_URL: str | None = None
     BRANDING_UPLOAD_MAX_BYTES: int = 2 * 1024 * 1024
+
+    # Email Delivery (Provider-Agnostic)
+    MAIL_PROVIDER: str = "console"
+    DEFAULT_FROM_EMAIL: str = "Olivet Baptist High School <records@olivet.edu.ng>"
+    MAIL_API_KEY: str | None = None
+    MAIL_DOMAIN: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
