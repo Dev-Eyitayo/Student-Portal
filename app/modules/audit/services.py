@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 from uuid import UUID
@@ -23,6 +24,8 @@ def json_safe(value: Any) -> Any:
         return [json_safe(item) for item in value]
     if isinstance(value, Enum):
         return value.value
+    if isinstance(value, Decimal):
+        return str(value)
     if isinstance(value, (UUID, date, datetime)):
         return str(value)
     return value

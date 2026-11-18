@@ -42,6 +42,7 @@ class SchoolConfiguration(Base, TimestampMixin):
     grading_scale_schema: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     assessment_weight_schema: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     academic_term_definitions: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    annual_results_schema: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     timezone: Mapped[str] = mapped_column(String(64), default="Africa/Lagos", nullable=False)
     currency: Mapped[str] = mapped_column(String(3), default="NGN", nullable=False)
     report_card_template_id: Mapped[str] = mapped_column(

@@ -20,6 +20,7 @@ PERMISSION_FRIENDLY_NAMES: dict[str, str] = {
     "subjects:register_electives": "register elective or trade subjects",
     "subjects:manage": "manage subjects and subject offerings",
     "teachers:assign": "assign teachers to class subjects",
+    "configuration:manage": "change your school's grading and result settings",
     "reports:publish": "publish academic term results",
     "classes:enter_remarks": "enter form master comments and conduct remarks",
     "structure:manage": "manage academic sessions, terms, and classes",

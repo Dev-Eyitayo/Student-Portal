@@ -42,9 +42,11 @@ graph TD
     M1[Milestone 1: Identity, Auth & School Onboarding] --> M2[Milestone 2: Academic Structure & Student Lifecycle]
     M2 --> M3[Milestone 3: Subjects, Teacher Allocation & Trade Electives]
     M3 --> M4[Milestone 4: Continuous Assessment & Examination Scores]
-    M4 --> M5[Milestone 5: Pure Computation Engine, Annual Cumulative & Broadsheets]
-    M5 --> M6[Milestone 6: Publication Snapshots, Client Payload & Email Delivery]
+    M4 --> M5[Milestone 5: Pure Computation Engine, Annual Cumulative, Broadsheets & Publication]
+    M5 --> M5A[Milestone 5A: Term Attendance & Class Records]
+    M5A --> M6[Milestone 6: Verified Client Payload & Email Delivery]
     M6 --> M7[Milestone 7: Backoffice SQLAdmin, Pilot Seeding & Load Verification]
+    M7 --> M8[Milestone 8: Guided Onboarding, Defaults, Branding & Structure Templates - LIVE]
 ```
 
 ---
@@ -195,41 +197,84 @@ graph TD
 **Target Sprint:** Sprint 5  
 **Lead Focus:** Computation Module (`app/modules/computation/`)
 
+**Status: LIVE**
+
 #### Objectives:
 1. Build the zero-IO pure Python computation engine for subject totals, grading, class averages, and standard competition rankings.
 2. Implement Third Term Annual Cumulative computations and promotion decisions.
-3. Build the Term Publication snapshotting engine.
+3. Build the Term Publication snapshotting engine and result token generation.
+4. Expose school grading and annual-result configuration through the API.
 
 #### Tasks & Implementation Details:
-- [ ] **Task 5.1: Pure Computation Engine (`app/modules/computation/engine.py`)**
+- [x] **Task 5.0: School Result Configuration (`GET`/`PATCH /api/v1/identity/schools/{school_id}/configuration`)**
+  - Stores grading scale, assessment weights, term definitions, annual term weights, and promotion thresholds.
+  - Requires `configuration:manage`; new schools receive Olivet-compatible defaults.
+- [x] **Task 5.1: Pure Computation Engine (`app/modules/computation/engine.py`)**
   - Pure Python functions with **zero database or HTTP imports**.
   - All mark calculations executed using `Decimal` with `ROUND_HALF_UP`.
   - Dynamic obtainable calculation:
     $$\text{Student Percentage} = \frac{\sum \text{Marks Obtained}}{\sum \text{Registered Subject Maximums}} \times 100$$
   - Standard Competition Ranking ("1224" Ranking) with correct tie handling.
   - Handling `ABSENT` (treated as 0.00, marked `ABS`) vs. `EXEMPT` (omitted from denominator, marked `EX`).
-- [ ] **Task 5.2: Third Term Annual Cumulative Computation**
+- [x] **Task 5.2: Third Term Annual Cumulative Computation**
   - On Third Term processing:
     - Retrieves Term 1 total, Term 2 total, Term 3 total per subject.
     - Computes cumulative annual score:
       $$\text{Annual Score} = w_1(\text{Term 1}) + w_2(\text{Term 2}) + w_3(\text{Term 3})$$
     - Computes annual cumulative class position.
     - Evaluates promotion criteria and sets `promotion_decision`: `PROMOTED`, `REPEATING`, `PROMOTED_ON_TRIAL`.
-- [ ] **Task 5.3: Broadsheet API (`GET /api/v1/computation/broadsheet/{class_group_id}`)**
+- [x] **Task 5.3: Broadsheet API (`GET /api/v1/computation/broadsheet/{class_group_id}`)**
   - Returns a high-density, matrix-formatted JSON object of all students, subjects, scores, totals, ranks, and class statistics for form masters and academic review.
-- [ ] **Task 5.4: Term Publication Service (`POST /api/v1/publication/publish-term`)**
-  - Atomic database transaction:
-    - Verifies all class subjects in the term are `APPROVED`.
-    - Generates and inserts records into `subject_results` and `term_report_cards`.
-    - Seals the exact `frozen_config_snapshot` JSON blob (freezing the active grading scale schema).
-    - Sets `academic_terms.is_locked_for_scoring = TRUE`.
-    - Generates 256-bit cryptographically signed `result_access_tokens`.
+- [x] **Task 5.4: Term Calculation Service (`POST /api/v1/computation/calculate-term`)**
+  - Verifies all relevant score sheets are `APPROVED`.
+  - Computes and upserts `subject_results` and `term_report_cards` as `DRAFT`.
+  - Recalculation is idempotent until publication.
+- [x] **Task 5.5: Term Publication Service (`POST /api/v1/publication/publish-term`)**
+   - Atomic database transaction:
+     - Verifies all class subjects in the term are `APPROVED`.
+     - Seals `subject_results` and `term_report_cards` with `frozen_config_snapshot`.
+     - Sets `academic_terms.is_locked_for_scoring = TRUE`.
+     - Generates 256-bit `result_access_tokens`; only SHA-256 hashes are stored.
+     - Returns plaintext tokens once in a `202 Accepted` response.
+     - Blocks later updates/deletes of published records with PostgreSQL triggers.
 
 #### Definition of Done:
-- Pure computation engine covered by 100% property-based unit tests (`Hypothesis`).
-- Verification that published historical results do not change when grading scale settings are modified in subsequent sessions.
+- Pure computation engine covered by property-based unit tests (`Hypothesis`).
+- Published historical values are frozen by both service logic and database triggers.
+- Term attendance counts remain zero placeholders until Milestone 5A.
 
 ---
+
+### Milestone 5A: Term Attendance & Class Records
+**Target Sprint:** Sprint 5A
+**Lead Focus:** Structure, Enrollments, and Computation Modules
+
+**Status: PLANNED**
+
+#### Objectives:
+1. Replace report-card attendance placeholders with real class attendance records and summaries.
+2. Support daily marking, class-wide day marking, backdated corrections, and manual aggregate overrides.
+3. Require attendance completeness before term publication.
+
+#### Tasks & Implementation Details:
+- [ ] **Task 5A.1: Attendance Models**
+  - Add `AttendanceRecord` for daily marks and `AttendanceSummary` for per-student/per-term totals.
+  - `source` is `DAILY` or `MANUAL`; manual summaries preserve the admin override and audit trail.
+- [ ] **Task 5A.2: Daily Attendance Routes**
+  - `POST /api/v1/structure/class-groups/{class_group_id}/attendance`
+  - `POST /api/v1/enrollments/{enrollment_id}/attendance`
+  - `GET /api/v1/enrollments/{enrollment_id}/attendance`
+  - Block future dates; allow backdated entries with an audited reason.
+- [ ] **Task 5A.3: Aggregate Attendance Routes**
+  - `PATCH`/`GET /api/v1/enrollments/{enrollment_id}/attendance-summary`
+  - `PATCH /api/v1/structure/class-groups/{class_group_id}/attendance-summary`
+  - Require `present + absent == opened` before publication.
+- [ ] **Task 5A.4: Report Card Integration**
+  - Freeze attendance counts into `term_report_cards` at publication.
+  - Keep assessment `score_status = ABSENT` separate from daily attendance.
+
+---
+
 
 ### Milestone 6: Publication Snapshots, Client Payload & Email Delivery
 **Target Sprint:** Sprint 6  
@@ -305,6 +350,43 @@ graph TD
 
 ---
 
+### Milestone 8: Guided Onboarding, Defaults, Branding & Structure Templates
+**Target Sprint:** Sprint 8
+**Lead Focus:** Identity, Structure & Storage (`app/modules/identity/`, `app/modules/academic_structure/`, `app/core/storage/`)
+
+**Status: LIVE**
+
+#### Objectives:
+1. Give new schools a guided path to review defaults, save their own profile and configuration, optionally apply an academic structure template, and upload branding.
+2. Keep three default classes distinct: school-editable defaults, optional structure templates, and platform defaults that are never exposed.
+3. Isolate branding assets by tenant using local storage for the pilot (S3/Cloudinary later).
+
+#### Tasks & Implementation Details:
+- [x] **Task 8.1: Public Default-Template Catalog (`GET /api/v1/identity/onboarding/templates`)**
+  - Public; returns school configuration defaults and a structure template preview only — no tenant data.
+  - Includes grading scale, assessment weights, term definitions, annual rules, timezone, currency, report template, and a preview of levels/departments/arms/optional class groups.
+- [x] **Task 8.2: Aggregate Setup Read/Save (`GET`/`PATCH /api/v1/identity/schools/{school_id}/setup`)**
+  - Admin-only. `GET` returns profile, full configuration, branding paths/URLs, structure setup status, and `custom_domain.status = PLANNED` (not implemented).
+  - `PATCH` is a transactional partial save of profile, full configuration (grading scale, assessment weights, term definitions, annual rules, timezone, currency, report template), and branding references. All supplied fields commit together or none do.
+  - **Ordering rule:** assessment weights must be saved before any `ClassSubject` exists, because definitions are cloned at ClassSubject creation. Surface this warning to the frontend.
+- [x] **Task 8.3: Branding Uploads (`POST /api/v1/identity/schools/{school_id}/branding/uploads`)**
+  - Admin-only multipart upload with `asset_type=logo|stamp|principal_signature`.
+  - Reuse the `StorageService` abstraction from Task 6.2; pilot uses `LocalStorageBackend`, S3/Cloudinary are later providers.
+  - Namespace assets by school slug/id and verify the tenant on every read/write. Generated PDFs are never stored server-side.
+- [x] **Task 8.4: Structure Template Apply (`POST /api/v1/structure/templates/apply`)**
+  - Requires `structure:manage`; idempotently creates selected levels, departments, arms, and optionally class groups for a session.
+  - Re-application must not create duplicates; junior levels keep `department_id = NULL`.
+- [ ] **Task 8.5: Custom Domains (PLANNED, post-pilot — no endpoints shipped)**
+  - Document requirements only: DNS verification, verified domains only, `Host` header must not select tenant for authenticated APIs, dynamic CORS, HTTPS/cookies.
+
+#### Definition of Done:
+- Success tests for catalog, setup read/save, branding upload, and idempotent template apply.
+- Cross-tenant denial tests for setup read/save and branding namespace.
+- Validation-failure tests for malformed config, missing/oversized uploads, and unauthenticated access.
+- Branding asset isolation test (school A cannot read school B's assets).
+
+---
+
 ## 4. Frontend & Backend Collaboration Contracts
 
 ### 4.1 Standard Response Envelopes
@@ -342,9 +424,9 @@ When the frontend fetches `GET /api/v1/results/verify/{token}?dob=YYYY-MM-DD`, t
       "name": "Olivet Baptist High School",
       "official_code": "OBHS-OYO",
       "address": "Oyo-Ogbomoso Road, Oyo, Oyo State, Nigeria",
-      "logo_url": "https://assets.domain/branding/obhs-logo.png",
-      "stamp_url": "https://assets.domain/branding/obhs-stamp.png",
-      "principal_signature_url": "https://assets.domain/branding/principal-sig.png"
+      "logo_url": "/storage/olivet-oyo/branding/obhs-logo.png",
+      "stamp_url": "/storage/olivet-oyo/branding/obhs-stamp.png",
+      "principal_signature_url": "/storage/olivet-oyo/branding/principal-sig.png"
     },
     "student": {
       "admission_number": "OBHS/2022/0412",
@@ -386,7 +468,7 @@ When the frontend fetches `GET /api/v1/results/verify/{token}?dob=YYYY-MM-DD`, t
       "class_position": 4,
       "total_students_in_arm": 45,
       "form_master_comment": "An exemplary student with outstanding academic discipline.",
-      "form_master_signature_url": "https://assets.domain/signatures/teacher-adeola.png",
+      "form_master_signature_url": "/storage/olivet-oyo/signatures/teacher-adeola.png",
       "principal_comment": "Excellent academic performance. Promoted to Senior Secondary 2."
     },
     "annual_cumulative_summary": {
@@ -404,6 +486,8 @@ When the frontend fetches `GET /api/v1/results/verify/{token}?dob=YYYY-MM-DD`, t
   }
 }
 ```
+
+Branding URLs above are illustrative. M8 uploads use local pilot storage namespaced by school slug/id; S3/Cloudinary are later providers. Generated PDFs are not stored server-side.
 
 ---
 
@@ -431,4 +515,5 @@ A feature or task is considered **Done** when:
 - [ ] No hardcoded tenant IDs or external domain names in code.
 - [ ] Pydantic request/response schemas documented with OpenAPI descriptions.
 - [ ] Tested with cross-tenant isolation assertion.
+- [ ] For setup/template/branding work: success, cross-tenant denial, validation failure, idempotent template apply, and branding asset isolation tests included.
 - [ ] Reviewed and approved by at least one backend teammate.

@@ -1,9 +1,14 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_current_authenticated_user, get_tenant_db
+from app.core.dependencies import (
+    build_audit_context,
+    get_current_authenticated_user,
+    get_tenant_db,
+    require_school_id,
+)
 from app.core.permissions import require_permission
 from app.modules.academic_structure import services
 from app.modules.academic_structure.schemas import (
@@ -22,11 +27,12 @@ from app.modules.academic_structure.schemas import (
     SessionCreateRequest,
     SessionResponse,
     SessionUpdateRequest,
+    StructureTemplateApplyRequest,
+    StructureTemplateApplyResponse,
     TermCreateRequest,
     TermResponse,
     TermUpdateRequest,
 )
-from app.modules.audit.services import AuditContext
 from app.modules.common.schemas import MessageResponse, Page, SuccessResponse
 from app.modules.identity.models import User
 
@@ -43,24 +49,6 @@ class_groups_router = APIRouter(
 )
 
 
-def _school_id(current_user: User) -> UUID:
-    if current_user.school_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your account is not linked to an active school. Please contact your school administrator.",
-        )
-    return current_user.school_id
-
-
-def _audit_context(request: Request, current_user: User) -> AuditContext:
-    client_ip = request.client.host if request.client else "0.0.0.0"
-    return AuditContext(
-        school_id=_school_id(current_user),
-        actor_id=current_user.id,
-        actor_ip=client_ip,
-    )
-
-
 @router.get("/sessions", response_model=SuccessResponse[Page[SessionResponse]])
 async def list_sessions(
     page: int = Query(1, ge=1),
@@ -71,7 +59,7 @@ async def list_sessions(
 ):
     items, meta = await services.list_sessions(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         page=page,
         page_size=page_size,
         include_retired=include_retired,
@@ -94,9 +82,9 @@ async def create_session(
 ):
     session = await services.create_session(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         req,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[SessionResponse](data=SessionResponse.model_validate(session))
 
@@ -107,7 +95,7 @@ async def get_session(
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
-    session = await services.get_session(db, _school_id(current_user), session_id)
+    session = await services.get_session(db, require_school_id(current_user), session_id)
     return SuccessResponse[SessionResponse](data=SessionResponse.model_validate(session))
 
 
@@ -121,10 +109,10 @@ async def update_session(
 ):
     session = await services.update_session(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         session_id,
         req,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[SessionResponse](data=SessionResponse.model_validate(session))
 
@@ -138,9 +126,9 @@ async def retire_session(
 ):
     await services.retire_session(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         session_id,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[MessageResponse](
         data=MessageResponse(
@@ -166,7 +154,7 @@ async def list_terms(
 ):
     items, meta = await services.list_terms(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         session_id,
         page=page,
         page_size=page_size,
@@ -189,10 +177,10 @@ async def create_term(
 ):
     term = await services.create_term(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         session_id,
         req,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[TermResponse](data=TermResponse.model_validate(term))
 
@@ -203,7 +191,7 @@ async def get_term(
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
-    term = await services.get_term(db, _school_id(current_user), term_id)
+    term = await services.get_term(db, require_school_id(current_user), term_id)
     return SuccessResponse[TermResponse](data=TermResponse.model_validate(term))
 
 
@@ -217,10 +205,10 @@ async def update_term(
 ):
     term = await services.update_term(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         term_id,
         req,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[TermResponse](data=TermResponse.model_validate(term))
 
@@ -234,9 +222,9 @@ async def retire_term(
 ):
     await services.retire_term(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         term_id,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[MessageResponse](
         data=MessageResponse(
@@ -258,7 +246,7 @@ async def list_levels(
 ):
     items, meta = await services.list_levels(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         page=page,
         page_size=page_size,
         include_retired=include_retired,
@@ -279,9 +267,9 @@ async def create_level(
 ):
     level = await services.create_level(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         req,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[LevelResponse](data=LevelResponse.model_validate(level))
 
@@ -292,7 +280,7 @@ async def get_level(
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
-    level = await services.get_level(db, _school_id(current_user), level_id)
+    level = await services.get_level(db, require_school_id(current_user), level_id)
     return SuccessResponse[LevelResponse](data=LevelResponse.model_validate(level))
 
 
@@ -306,10 +294,10 @@ async def update_level(
 ):
     level = await services.update_level(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         level_id,
         req,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[LevelResponse](data=LevelResponse.model_validate(level))
 
@@ -323,9 +311,9 @@ async def retire_level(
 ):
     await services.retire_level(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         level_id,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[MessageResponse](
         data=MessageResponse(
@@ -347,7 +335,7 @@ async def list_departments(
 ):
     items, meta = await services.list_departments(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         page=page,
         page_size=page_size,
         include_retired=include_retired,
@@ -370,9 +358,9 @@ async def create_department(
 ):
     department = await services.create_department(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         req,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[DepartmentResponse](data=DepartmentResponse.model_validate(department))
 
@@ -386,7 +374,7 @@ async def get_department(
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
-    department = await services.get_department(db, _school_id(current_user), department_id)
+    department = await services.get_department(db, require_school_id(current_user), department_id)
     return SuccessResponse[DepartmentResponse](data=DepartmentResponse.model_validate(department))
 
 
@@ -403,10 +391,10 @@ async def update_department(
 ):
     department = await services.update_department(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         department_id,
         req,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[DepartmentResponse](data=DepartmentResponse.model_validate(department))
 
@@ -423,9 +411,9 @@ async def retire_department(
 ):
     await services.retire_department(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         department_id,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[MessageResponse](
         data=MessageResponse(
@@ -447,7 +435,7 @@ async def list_arms(
 ):
     items, meta = await services.list_arms(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         page=page,
         page_size=page_size,
         include_retired=include_retired,
@@ -468,9 +456,9 @@ async def create_arm(
 ):
     arm = await services.create_arm(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         req,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[ArmResponse](data=ArmResponse.model_validate(arm))
 
@@ -481,7 +469,7 @@ async def get_arm(
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
-    arm = await services.get_arm(db, _school_id(current_user), arm_id)
+    arm = await services.get_arm(db, require_school_id(current_user), arm_id)
     return SuccessResponse[ArmResponse](data=ArmResponse.model_validate(arm))
 
 
@@ -495,10 +483,10 @@ async def update_arm(
 ):
     arm = await services.update_arm(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         arm_id,
         req,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[ArmResponse](data=ArmResponse.model_validate(arm))
 
@@ -512,9 +500,9 @@ async def retire_arm(
 ):
     await services.retire_arm(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         arm_id,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[MessageResponse](
         data=MessageResponse(
@@ -542,7 +530,7 @@ async def list_class_groups(
 ):
     items, meta = await services.list_class_groups(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         current_user,
         session_id=session_id,
         level_id=level_id,
@@ -569,10 +557,10 @@ async def create_class_group(
 ):
     class_group = await services.create_class_group(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         req,
         current_user,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[ClassGroupResponse](data=ClassGroupResponse.model_validate(class_group))
 
@@ -587,7 +575,7 @@ async def get_class_group(
     db: AsyncSession = Depends(get_tenant_db),
 ):
     class_group = await services.get_class_group(
-        db, _school_id(current_user), class_group_id, current_user
+        db, require_school_id(current_user), class_group_id, current_user
     )
     return SuccessResponse[ClassGroupResponse](data=ClassGroupResponse.model_validate(class_group))
 
@@ -605,11 +593,11 @@ async def update_class_group(
 ):
     class_group = await services.update_class_group(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         class_group_id,
         req,
         current_user,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[ClassGroupResponse](data=ClassGroupResponse.model_validate(class_group))
 
@@ -626,10 +614,10 @@ async def retire_class_group(
 ):
     await services.retire_class_group(
         db,
-        _school_id(current_user),
+        require_school_id(current_user),
         class_group_id,
         current_user,
-        _audit_context(request, current_user),
+        build_audit_context(request, current_user),
     )
     return SuccessResponse[MessageResponse](
         data=MessageResponse(
@@ -639,3 +627,23 @@ async def retire_class_group(
             )
         )
     )
+
+
+@router.post(
+    "/templates/apply",
+    response_model=SuccessResponse[StructureTemplateApplyResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def apply_structure_template(
+    req: StructureTemplateApplyRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    result = await services.apply_structure_template(
+        db,
+        require_school_id(current_user),
+        req,
+        build_audit_context(request, current_user),
+    )
+    return SuccessResponse[StructureTemplateApplyResponse](data=result)

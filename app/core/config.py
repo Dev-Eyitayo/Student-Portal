@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:8000"]
 
+    # Asset storage
+    STORAGE_PROVIDER: str = "local"
+    STORAGE_LOCAL_DIR: str = "var/storage"
+    STORAGE_PUBLIC_BASE_URL: str | None = None
+    BRANDING_UPLOAD_MAX_BYTES: int = 2 * 1024 * 1024
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @model_validator(mode="after")

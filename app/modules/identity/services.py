@@ -6,13 +6,13 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
-from app.core.exceptions import ConflictException
+from app.core.exceptions import ConflictException, ResourceNotFoundException
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -20,6 +20,18 @@ from app.core.security import (
     hash_password,
     is_token_revoked,
     verify_password,
+)
+from app.core.storage import storage_service
+from app.modules.academic_structure.models import (
+    AcademicLevel,
+    AcademicSession,
+    ClassArm,
+    ClassGroup,
+    Department,
+)
+from app.modules.academic_structure.templates import (
+    STRUCTURE_TEMPLATE_ID,
+    get_structure_template_preview,
 )
 from app.modules.audit.services import AuditContext, record_audit_log
 from app.modules.common.models import generate_uuid7
@@ -34,8 +46,18 @@ from app.modules.identity.models import (
 )
 from app.modules.identity.schemas import (
     AcceptInvitationRequest,
+    BrandingAssetType,
+    OnboardingTemplateResponse,
     PermissionGrantRequest,
+    SchoolBrandingPaths,
+    SchoolBrandingResponse,
+    SchoolConfigurationResponse,
+    SchoolConfigurationUpdateRequest,
     SchoolCreateRequest,
+    SchoolProfileUpdateRequest,
+    SchoolResponse,
+    SchoolSetupResponse,
+    SchoolSetupUpdateRequest,
     StaffInviteRequest,
     StaffInviteResponse,
     StaffVerifyInviteResponse,
@@ -84,15 +106,15 @@ DEFAULT_ASSESSMENT_WEIGHTS = {
 }
 
 DEFAULT_GRADING_SCALE = [
-    {"grade": "A1", "min_score": 75, "max_score": 100, "remark": "Excellent"},
-    {"grade": "B2", "min_score": 70, "max_score": 74.99, "remark": "Very Good"},
-    {"grade": "B3", "min_score": 65, "max_score": 69.99, "remark": "Good"},
-    {"grade": "C4", "min_score": 60, "max_score": 64.99, "remark": "Credit"},
-    {"grade": "C5", "min_score": 55, "max_score": 59.99, "remark": "Credit"},
-    {"grade": "C6", "min_score": 50, "max_score": 54.99, "remark": "Credit"},
-    {"grade": "D7", "min_score": 45, "max_score": 49.99, "remark": "Pass"},
-    {"grade": "E8", "min_score": 40, "max_score": 44.99, "remark": "Pass"},
-    {"grade": "F9", "min_score": 0, "max_score": 39.99, "remark": "Fail"},
+    {"grade": "A1", "min_score": 75, "max_score": 100, "grade_point": 4, "remark": "Excellent"},
+    {"grade": "B2", "min_score": 70, "max_score": 74.99, "grade_point": 3.5, "remark": "Very Good"},
+    {"grade": "B3", "min_score": 65, "max_score": 69.99, "grade_point": 3, "remark": "Good"},
+    {"grade": "C4", "min_score": 60, "max_score": 64.99, "grade_point": 2.5, "remark": "Credit"},
+    {"grade": "C5", "min_score": 55, "max_score": 59.99, "grade_point": 2, "remark": "Credit"},
+    {"grade": "C6", "min_score": 50, "max_score": 54.99, "grade_point": 1.5, "remark": "Credit"},
+    {"grade": "D7", "min_score": 45, "max_score": 49.99, "grade_point": 1, "remark": "Pass"},
+    {"grade": "E8", "min_score": 40, "max_score": 44.99, "grade_point": 0.5, "remark": "Pass"},
+    {"grade": "F9", "min_score": 0, "max_score": 39.99, "grade_point": 0, "remark": "Fail"},
 ]
 
 DEFAULT_TERM_DEFINITIONS = [
@@ -100,6 +122,15 @@ DEFAULT_TERM_DEFINITIONS = [
     {"number": 2, "name": "Second Term"},
     {"number": 3, "name": "Third Term"},
 ]
+
+DEFAULT_ANNUAL_RESULTS_CONFIG = {
+    "version": 1,
+    "term_weights": {"first_term": 1, "second_term": 1, "third_term": 1},
+    "promotion_thresholds": {
+        "promoted_min_percentage": "50.00",
+        "trial_min_percentage": "40.00",
+    },
+}
 
 
 @dataclass
@@ -298,6 +329,7 @@ async def register_school_with_admin(
         grading_scale_schema={"grades": DEFAULT_GRADING_SCALE},
         assessment_weight_schema=DEFAULT_ASSESSMENT_WEIGHTS,
         academic_term_definitions={"terms": DEFAULT_TERM_DEFINITIONS},
+        annual_results_schema=DEFAULT_ANNUAL_RESULTS_CONFIG,
         timezone="Africa/Lagos",
         currency="NGN",
         report_card_template_id="default_v1",
@@ -337,6 +369,295 @@ async def register_school_with_admin(
     await db.refresh(admin_user)
 
     return school, admin_user
+
+
+async def get_school_configuration(db: AsyncSession, school_id: UUID) -> SchoolConfiguration:
+    stmt = select(SchoolConfiguration).where(SchoolConfiguration.school_id == school_id)
+    config = (await db.execute(stmt)).scalar_one_or_none()
+    if not config:
+        raise ResourceNotFoundException("school configuration", school_id)
+    return config
+
+
+CONFIGURATION_FIELDS = (
+    "grading_scale_schema",
+    "assessment_weight_schema",
+    "academic_term_definitions",
+    "annual_results_schema",
+    "timezone",
+    "currency",
+    "report_card_template_id",
+)
+
+
+def _configuration_snapshot(config: SchoolConfiguration) -> dict[str, Any]:
+    return {field: getattr(config, field) for field in CONFIGURATION_FIELDS}
+
+
+def _apply_configuration_updates(
+    config: SchoolConfiguration, req: SchoolConfigurationUpdateRequest
+) -> None:
+    changes = req.model_dump(mode="json", exclude_unset=True)
+    for field in CONFIGURATION_FIELDS:
+        if field in changes and changes[field] is not None:
+            setattr(config, field, changes[field])
+
+
+async def update_school_configuration(
+    db: AsyncSession,
+    school_id: UUID,
+    req: SchoolConfigurationUpdateRequest,
+    current_user: User,
+    audit: AuditContext,
+) -> SchoolConfiguration:
+    config = await get_school_configuration(db, school_id)
+    before = _configuration_snapshot(config)
+    _apply_configuration_updates(config, req)
+    await db.flush()
+    record_audit_log(
+        db,
+        audit,
+        action="SCHOOL_CONFIGURATION_UPDATED",
+        resource_type="SchoolConfiguration",
+        resource_id=config.id,
+        diff_payload={"before": before, "after": _configuration_snapshot(config)},
+    )
+    await _commit_or_conflict(
+        db,
+        message=(
+            "These school settings could not be saved. Please check the values and try again."
+        ),
+        code="SCHOOL_CONFIGURATION_CONFLICT",
+    )
+    await db.refresh(config)
+    return config
+
+
+def get_onboarding_templates() -> list[OnboardingTemplateResponse]:
+    structure_template = get_structure_template_preview(STRUCTURE_TEMPLATE_ID)
+    if structure_template is None:
+        return []
+
+    return [
+        OnboardingTemplateResponse(
+            id="olivet_nigeria_default",
+            name="Olivet Nigeria Default",
+            description=(
+                "Olivet's familiar grading, 10/10/10/70 assessment pattern, three terms, "
+                "and JSS-SS3 structure."
+            ),
+            configuration_defaults={
+                "grading_scale_schema": {"grades": DEFAULT_GRADING_SCALE},
+                "assessment_weight_schema": DEFAULT_ASSESSMENT_WEIGHTS,
+                "academic_term_definitions": {"terms": DEFAULT_TERM_DEFINITIONS},
+                "annual_results_schema": DEFAULT_ANNUAL_RESULTS_CONFIG,
+                "timezone": "Africa/Lagos",
+                "currency": "NGN",
+                "report_card_template_id": "default_v1",
+            },
+            structure_template=structure_template,
+            custom_domain={},
+        )
+    ]
+
+
+async def _get_school_for_setup(db: AsyncSession, school_id: UUID) -> School:
+    school = (await db.execute(select(School).where(School.id == school_id))).scalar_one_or_none()
+    if school is None:
+        raise ResourceNotFoundException("school", school_id)
+    return school
+
+
+async def _structure_setup_status(db: AsyncSession, school_id: UUID) -> dict[str, Any]:
+    async def count(model: Any) -> int:
+        return int(
+            (
+                await db.execute(
+                    select(func.count())
+                    .select_from(model)
+                    .where(model.school_id == school_id, model.deleted_at.is_(None))
+                )
+            ).scalar_one()
+        )
+
+    return {
+        "academic_sessions": await count(AcademicSession),
+        "academic_levels": await count(AcademicLevel),
+        "departments": await count(Department),
+        "class_arms": await count(ClassArm),
+        "class_groups": await count(ClassGroup),
+        "template_apply_available": True,
+    }
+
+
+def _branding_response(school: School) -> SchoolBrandingResponse:
+    return SchoolBrandingResponse(
+        logo_storage_path=school.logo_storage_path,
+        logo_url=storage_service.public_url(school.logo_storage_path),
+        stamp_storage_path=school.stamp_image_url,
+        stamp_url=storage_service.public_url(school.stamp_image_url),
+        principal_signature_storage_path=school.principal_signature_url,
+        principal_signature_url=storage_service.public_url(school.principal_signature_url),
+    )
+
+
+async def get_school_setup(db: AsyncSession, school_id: UUID) -> SchoolSetupResponse:
+    school = await _get_school_for_setup(db, school_id)
+    config = await get_school_configuration(db, school_id)
+    return SchoolSetupResponse(
+        school=SchoolResponse.model_validate(school),
+        configuration=SchoolConfigurationResponse.model_validate(config),
+        branding=_branding_response(school),
+        structure_setup=await _structure_setup_status(db, school_id),
+        custom_domain={},
+    )
+
+
+async def _ensure_profile_field_available(
+    db: AsyncSession,
+    school_id: UUID,
+    field: Any,
+    value: str,
+    friendly_name: str,
+) -> None:
+    existing = (
+        await db.execute(select(School.id).where(field == value, School.id != school_id))
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise ConflictException(
+            f"That {friendly_name} is already in use by another school. Please choose a different one."
+        )
+
+
+async def update_school_setup(
+    db: AsyncSession,
+    school_id: UUID,
+    req: SchoolSetupUpdateRequest,
+    audit: AuditContext,
+) -> SchoolSetupResponse:
+    school = await _get_school_for_setup(db, school_id)
+    config = await get_school_configuration(db, school_id)
+    before: dict[str, Any] = {
+        "school": {
+            field: getattr(school, field)
+            for field in (
+                "name",
+                "slug",
+                "official_code",
+                "state",
+                "city",
+                "address",
+                "country_code",
+                "logo_storage_path",
+                "stamp_image_url",
+                "principal_signature_url",
+            )
+        },
+        "configuration": _configuration_snapshot(config),
+    }
+
+    if req.profile is not None:
+        profile: SchoolProfileUpdateRequest = req.profile
+        if profile.slug is not None:
+            normalized_slug = profile.slug.lower().strip()
+            await _ensure_profile_field_available(
+                db, school_id, School.slug, normalized_slug, "school web address"
+            )
+            school.slug = normalized_slug
+        if profile.official_code is not None:
+            normalized_code = profile.official_code.upper().strip()
+            await _ensure_profile_field_available(
+                db, school_id, School.official_code, normalized_code, "official school code"
+            )
+            school.official_code = normalized_code
+        for field in ("name", "state", "city", "address", "country_code"):
+            value = getattr(profile, field)
+            if value is not None:
+                setattr(
+                    school,
+                    field,
+                    value.strip().upper() if field == "country_code" else value.strip(),
+                )
+
+    if req.branding is not None:
+        branding: SchoolBrandingPaths = req.branding
+        field_map = {
+            "logo_storage_path": "logo_storage_path",
+            "stamp_image_url": "stamp_image_url",
+            "principal_signature_url": "principal_signature_url",
+        }
+        for field, value in branding.model_dump(exclude_unset=True).items():
+            setattr(school, field_map[field], value)
+
+    if req.configuration is not None:
+        _apply_configuration_updates(config, req.configuration)
+
+    await db.flush()
+    record_audit_log(
+        db,
+        audit,
+        action="SCHOOL_SETUP_UPDATED",
+        resource_type="School",
+        resource_id=school.id,
+        diff_payload={
+            "before": before,
+            "after": {
+                "school": {field: getattr(school, field) for field in before["school"]},
+                "configuration": _configuration_snapshot(config),
+            },
+        },
+    )
+    await _commit_or_conflict(
+        db,
+        message="Your onboarding setup could not be saved. Please check the values and try again.",
+        code="SCHOOL_SETUP_CONFLICT",
+    )
+    return await get_school_setup(db, school_id)
+
+
+async def save_school_branding_asset(
+    db: AsyncSession,
+    school_id: UUID,
+    asset_type: BrandingAssetType,
+    content_type: str,
+    content: bytes,
+    audit: AuditContext,
+) -> str:
+    school = await _get_school_for_setup(db, school_id)
+    storage_path = await storage_service.save_school_branding_asset(
+        school_slug=school.slug,
+        asset_type=asset_type.value,
+        content_type=content_type,
+        content=content,
+    )
+    field_map = {
+        BrandingAssetType.LOGO: "logo_storage_path",
+        BrandingAssetType.STAMP: "stamp_image_url",
+        BrandingAssetType.PRINCIPAL_SIGNATURE: "principal_signature_url",
+    }
+    field_name = field_map[asset_type]
+    before = getattr(school, field_name)
+    setattr(school, field_name, storage_path)
+    await db.flush()
+    record_audit_log(
+        db,
+        audit,
+        action="SCHOOL_BRANDING_UPLOADED",
+        resource_type="School",
+        resource_id=school.id,
+        diff_payload={"asset_type": asset_type.value, "before": before, "after": storage_path},
+    )
+    await _commit_or_conflict(
+        db,
+        message="The branding image could not be saved. Please try uploading it again.",
+        code="SCHOOL_BRANDING_CONFLICT",
+    )
+    return storage_path
+
+
+async def get_school_branding(db: AsyncSession, school_id: UUID) -> SchoolBrandingResponse:
+    school = await _get_school_for_setup(db, school_id)
+    return _branding_response(school)
 
 
 async def invite_staff_member(

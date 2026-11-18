@@ -17,14 +17,14 @@ Live today:
 - Bulk import students and staff asynchronously from Excel or CSV.
 - Maintain subjects, subject offerings, class subjects, teacher assignments, and elective/trade registrations.
 - Define assessments, enter scores, submit score sheets, approve them, and unlock them with a reason.
+- Compute term and cumulative annual results, rank students, and produce broadsheets.
+- Publish term results, create immutable snapshots, and issue expiring result links.
 
 Planned next:
 
-- Compute term and cumulative annual results.
-- Rank students and produce broadsheets.
-- Publish term results, create immutable snapshots, and issue expiring result links.
-- Deliver report-card JSON payloads for client-side PDF rendering.
-- Provide audit log access, SQLAdmin operations, and production hardening.
+- Offer a guided onboarding wizard: review public defaults, save school setup, optionally apply a structure template, and upload branding (M8).
+- Deliver report-card JSON payloads for client-side PDF rendering (M6).
+- Provide audit log access, SQLAdmin operations, and production hardening (M7).
 
 ## Architecture at a glance
 
@@ -46,7 +46,7 @@ Key properties:
 - UUIDv7 primary keys for time-ordered indexes and non-enumerable identifiers.
 - Celery and Redis for bulk imports and notifications.
 - No server-side report-card PDF generation or storage.
-- Immutable published academic records in the planned M5/M6 design.
+- Immutable published academic records enforced by M5 snapshots and database triggers.
 
 ## Tenancy and security model
 
@@ -67,7 +67,7 @@ Additional constraints:
 
 - Historical records are soft-deleted with `deleted_at`; academic and staff history is not hard-deleted.
 - Users are deactivated rather than deleted.
-- Sensitive academic records become frozen on publication in the planned design.
+- Sensitive academic records become frozen on publication through M5 snapshots and database triggers.
 - Access tokens are short-lived and revocable by `jti`.
 
 ## Domain model
@@ -220,6 +220,18 @@ Onboarding stores the following school configuration:
 
 The target Olivet blueprint in `ARCHITECTURE.md` includes JSS1-JSS3 and SS1-SS3, Science/Arts/Commercial departments, and arm letters `O, L, I, V, E, T, B, H, S, Y`. These values are seed defaults, not hardcoded business logic.
 
+### Defaults and structure templates (M8 — LIVE)
+
+| Class | Meaning | Frontend use |
+| --- | --- | --- |
+| **School-editable defaults** | Seeded config/profile: grading scale, assessment weights, term definitions, annual rules, timezone, currency, report template. | Pre-fill the setup form; admins may change and save via `PATCH /identity/schools/{school_id}/setup`. |
+| **Optional structure templates** | Preview of levels/departments/arms/optional class groups; applied only on explicit opt-in. | Offer as an optional wizard step; `POST /structure/templates/apply` is idempotent. |
+| **Platform defaults (not exposed)** | Internal TTLs, rate limits, rounding, audit retention. | Never render or offer to edit. |
+
+- **Ordering rule:** save assessment-weight edits before creating any `ClassSubject`, because definitions are cloned at creation time. Put setup editing before structure/subject creation in the wizard.
+- Branding uploads use local pilot storage namespaced by school; no server-side PDF storage.
+- Custom domains are **PLANNED post-pilot**: DNS verification, verified domains only, `Host` must not select tenant for authenticated APIs, dynamic CORS, HTTPS/cookies.
+
 ## API conventions
 
 - All application routes live under `/api/v1`.
@@ -259,6 +271,12 @@ sequenceDiagram
 | Capability | Status | Notes |
 | --- | --- | --- |
 | School onboarding | **LIVE** | Public tenant creation with first school administrator. |
+| School grading and annual-result configuration | **LIVE** | `GET`/`PATCH /identity/schools/{school_id}/configuration`. |
+| Default-template catalog (public) | **LIVE** | M8; public preview of config defaults and structure templates. |
+| School setup aggregate read/save | **LIVE** | M8; admin-only `GET`/`PATCH /identity/schools/{school_id}/setup`. |
+| Branding uploads | **LIVE** | M8; local pilot storage, namespaced by school. |
+| Structure template apply | **LIVE** | M8; idempotent `POST /structure/templates/apply`. |
+| Custom domains | **PLANNED** | Post-pilot only; no endpoints. |
 | Login, refresh, logout | **LIVE** | JWT access token, HTTP-only refresh cookie, Redis revocation. |
 | Current user and effective permissions | **LIVE** | `GET /identity/me`. |
 | Staff invitations | **LIVE** | 72-hour invitation token. |
@@ -275,25 +293,26 @@ sequenceDiagram
 | Assessment definitions | **LIVE** | Auto-seeded per class subject and term. |
 | Score entry | **LIVE** | Bulk-shaped entry endpoint, including one-row saves. |
 | Score sheet submit, approve, unlock | **LIVE** | Completeness and lifecycle enforced. |
-| Result computation and broadsheets | **PLANNED** | Models exist; no routes or engine. |
-| Cumulative annual results and promotion | **PLANNED** | Fields exist on planned models; no service. |
-| Term publication and frozen snapshots | **PLANNED** | Models exist; no routes or publication service. |
-| Result access tokens and magic links | **PLANNED** | Token model exists; no delivery or verification route. |
+| Result computation and broadsheets | **LIVE** | `POST /computation/calculate-term` and `GET /computation/broadsheet/{class_group_id}`. |
+| Cumulative annual results and promotion | **LIVE** | Third-term annual scores, annual position, and promotion decision are persisted. |
+| Term publication and frozen snapshots | **LIVE** | `POST /publication/publish-term`; published rows are frozen by service logic and DB triggers. |
+| Result access tokens | **PARTIAL** | Hashed tokens are generated and returned once; verification and delivery are not live. |
 | Report-card JSON payload | **PLANNED** | Contract described in `BACKEND_DEV_PLAN.md`; not live. |
 | Email/SMS notifications | **PLANNED** | Celery notification queue exists; result notifications are not live. |
+| Term attendance and class attendance summaries | **PLANNED** | M5A; report cards currently store zero attendance placeholders. |
 | Audit log read API | **PLANNED** | Writes are recorded; no read endpoint. |
 | SQLAdmin dashboard | **PLANNED** | Not mounted in `app/main.py`. |
 | Olivet seed script | **PLANNED** | Only runtime role SQL exists today. |
 
-## Planned computation and publication design
+## Computation and publication behavior
 
-The M5/M6 design introduces:
+M5 introduces:
 
-- `SubjectResult`: frozen subject totals, grades, remarks, ranks, class statistics, and annual cumulative fields.
-- `TermReportCard`: frozen term totals, position, attendance, comments, promotion decision, publication status, and a required `frozen_config_snapshot`.
+- `SubjectResult`: subject totals, grades, remarks, ranks, class statistics, annual cumulative fields, status, and `frozen_config_snapshot`.
+- `TermReportCard`: term totals, position, zero attendance placeholders, comments, promotion decision, publication status, and `frozen_config_snapshot`.
 - `ResultAccessToken`: hashed time-limited token with access count, maximum access count, revocation, expiry, and last-access metadata.
 
-Rules the frontend must preserve when these become live:
+Rules the frontend must preserve:
 
 - Published results are immutable. Never recalculate historical scores on read.
 - Report cards are assembled from verified JSON payloads, not live queries against mutable scores.
@@ -303,6 +322,8 @@ Rules the frontend must preserve when these become live:
 - `ABSENT` contributes `0.00` and is displayed as `ABS`.
 - `EXEMPT` omits that assessment and scales the attempted work proportionally.
 - Total obtainable marks depend on each student's active subject registrations.
+- `publish-term` returns plaintext tokens only in the initial response; treat them as one-time secrets.
+- Attendance counts are placeholders until M5A; do not present them as real attendance data.
 
 ## Frontend design implications
 
@@ -314,6 +335,9 @@ Rules the frontend must preserve when these become live:
 - Distinguish subjects, offerings, class subjects, and registrations in every screen and selector.
 - Do not assume every student in a class takes every subject.
 - Do not assume `/identity/me` proves class-level visibility. It returns permission codes only, not which department/level/class-group a scoped grant covers -- the backend enforces that scope on each resource, but the frontend still can't read it back from `/me`.
-- Do not build result publication or PDF export against live routes yet.
+- Build publication against the live `POST /publication/publish-term` route; do not build PDF export against verification routes until M6.
 - Display human-friendly `error.message` text and use `error.code` only for branching.
 - Support empty states for schools before sessions, terms, class groups, subjects, and enrollments exist.
+- M8 endpoints are live; the guided wizard can be rendered in onboarding navigation.
+- Do not derive the school tenant from the `Host` header or a custom domain.
+- Keep assessment-weight editing before class-subject creation in the wizard.

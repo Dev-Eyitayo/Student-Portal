@@ -17,7 +17,8 @@ The backend is the source of truth. When this handoff and the code disagree, ins
 | --- | --- |
 | [platform-overview.md](./platform-overview.md) | Product scope, domain model, tenancy, architecture, API conventions, and live versus planned capabilities. |
 | [personas-and-permissions.md](./personas-and-permissions.md) | User personas, system roles, permission codes, scoped grants, and UI authorization rules. |
-| [user-journeys.md](./user-journeys.md) | End-to-end flows for onboarding, structure setup, students, subjects, assessments, and planned computation/publication. |
+| [user-journeys.md](./user-journeys.md) | End-to-end flows for onboarding, the M8 guided setup wizard, structure setup, students, subjects, assessments, computation, publication, and planned verification.
+ |
 
 ## Status labels
 
@@ -35,11 +36,13 @@ Current milestone status:
 | M2 | Academic structure, students, enrollments, bulk imports | **LIVE** |
 | M3 | Subjects, offerings, class subjects, teacher assignments, elective registration | **LIVE** |
 | M4 | Assessment definitions, score entry, submission, approval, unlock | **LIVE** |
-| M5 | Result computation, broadsheets, cumulative results, promotion | **PLANNED** |
-| M6 | Term publication, report-card payloads, result access tokens, notifications | **PLANNED** |
+| M5 | Result computation, broadsheets, cumulative results, promotion, publication, result tokens | **LIVE** |
+| M5A | Term attendance and class attendance summaries | **PLANNED** |
+| M6 | Verified report-card payloads and notifications | **PARTIAL** |
 | M7 | Admin dashboard, Olivet seed script, security hardening, performance verification | **PLANNED** |
+| M8 | Guided onboarding, defaults, branding uploads, structure templates | **LIVE** |
 
-Milestone `LIVE` means the main workflow exists. Scoped permission enforcement remains **PARTIAL** within M1 only because `/identity/me` does not return grant scopes and there is no grant-list endpoint; actual enforcement -- including list filtering -- is live across structure/students/subjects/assessments. See [personas-and-permissions.md](./personas-and-permissions.md) for exactly which routes are scope-aware.
+Milestone `LIVE` means the main workflow exists. Scoped permission enforcement remains **PARTIAL** within M1 only because `/identity/me` does not return grant scopes and there is no grant-list endpoint; actual enforcement -- including list filtering -- is live across structure/students/subjects/assessments/computation. M6 is **PARTIAL** because token generation and publication are live, while public verification, the report-card JSON payload, and email/SMS delivery are not. M8 is **LIVE**: the public template catalog, admin setup read/save, branding uploads, and optional structure template apply are available. Custom domains are post-pilot **PLANNED**. See [personas-and-permissions.md](./personas-and-permissions.md) for exactly which routes are scope-aware.
 
 ## API quick reference
 
@@ -107,13 +110,19 @@ Paginated endpoints return:
 ## What frontend teams must not assume
 
 - There are no parent or student login accounts. Result access is planned through expiring magic links.
-- There are no live computation, publication, report-card export, audit-log, or SQLAdmin endpoints yet.
-- The backend does not generate or store report-card PDFs. The frontend will render and export PDFs from a verified JSON payload once M5/M6 are live.
+- Computation, broadsheet, publication, and school result-configuration routes are live. Public result verification, report-card export, audit-log read, and SQLAdmin endpoints are not.
+- `publish-term` returns plaintext result tokens once. The backend stores only SHA-256 hashes; tokens cannot be retrieved again later.
+- The backend does not generate or store report-card PDFs. The frontend will render and export PDFs from the planned verified JSON payload in M6.
+- Term attendance is not live yet. Report cards currently carry zero attendance placeholders until M5A.
 - `Form Master` is not a role. It is the teacher assigned to `ClassGroup.class_teacher_id`.
 - An `SS1 Coordinator` is not a role. It is a user granted a permission with `scope_type=ACADEMIC_LEVEL`.
 - There is no teacher-facing "my class subjects" or "my assignments" discovery endpoint yet.
 - MFA flags exist on users, but no MFA enrollment or challenge flow is live.
 - School onboarding is currently a public endpoint. Do not expose it in normal staff navigation without an explicit product decision.
+- M8 guided-setup endpoints are **LIVE**: `/identity/onboarding/templates`, `/schools/{school_id}/setup`, `/schools/{school_id}/branding/uploads`, and `/structure/templates/apply` can be used by the onboarding wizard.
+- The M8 default-template catalog is public, but school-specific setup, branding uploads, and template application are admin-authenticated.
+- Custom-domain endpoints do not exist. Never select a tenant from the `Host` header.
+- Branding uploads (M8) use local pilot storage namespaced by school; generated PDFs are never stored server-side.
 - A scoped grant now filters list endpoints (e.g. `GET /structure/class-groups`) down to the caller's department/level/class-group, not an all-or-nothing `403`/everything. The exceptions are the subject catalog (`GET /subjects`) and staff/user management, which have no scope dimension to filter by. See [personas-and-permissions.md](./personas-and-permissions.md) for the full breakdown.
 - Bulk imports are asynchronous. A `202 Accepted` response is not a completed import.
 

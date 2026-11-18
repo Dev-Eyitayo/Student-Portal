@@ -168,6 +168,40 @@ class ClassGroupUpdateRequest(BaseModel):
     class_teacher_id: UUID | None = None
 
 
+class StructureTemplateApplyRequest(BaseModel):
+    template_id: str = Field(..., min_length=2, max_length=64)
+    academic_session_id: UUID | None = None
+    session_name: str | None = Field(None, min_length=2, max_length=32)
+    session_start_date: date | None = None
+    session_end_date: date | None = None
+    include_class_groups: bool = True
+
+    @model_validator(mode="after")
+    def validate_session_details(self) -> "StructureTemplateApplyRequest":
+        if self.academic_session_id is None:
+            if not self.session_name:
+                raise ValueError("Provide a session name when no existing session is selected.")
+            if self.session_start_date is None or self.session_end_date is None:
+                raise ValueError("Provide session start and end dates when creating a session.")
+            if self.session_end_date <= self.session_start_date:
+                raise ValueError("The session end date must be after its start date.")
+        return self
+
+
+class StructureTemplateApplyResponse(BaseModel):
+    template_id: str
+    academic_session_id: UUID
+    levels_created: int
+    levels_reused: int
+    departments_created: int
+    departments_reused: int
+    arms_created: int
+    arms_reused: int
+    class_groups_created: int
+    class_groups_reused: int
+    message: str
+
+
 class ClassGroupResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

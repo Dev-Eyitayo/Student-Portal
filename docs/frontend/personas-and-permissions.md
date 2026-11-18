@@ -19,7 +19,7 @@ Authorization is a backend responsibility. The frontend uses permissions to shap
 
 - **System role:** `SCHOOL_ADMIN`
 - **Live behavior:** bypasses permission checks within the school.
-- **Typical work:** onboard the school, invite staff, configure structure, manage students and subjects, oversee score approval and publication.
+- **Typical work:** onboard the school, invite staff, configure structure, manage students and subjects, oversee score approval and publication, and complete guided setup including defaults, branding, and optional structure templates.
 - **Frontend caveat:** `SCHOOL_ADMIN` can be assigned as a class teacher. The role bypass does not replace the class-teacher relationship.
 
 ### Academic officer
@@ -110,7 +110,7 @@ Only four system roles exist:
 | `scores:enter` | Assessment | Enter or edit scores | Read score sheet and bulk score entry. |
 | `scores:modify` | Assessment | Modify unsubmitted scores | No route currently checks this code directly. |
 | `scores:submit` | Assessment | Submit scores for review | Submit score sheet. |
-| `scores:approve` | Assessment | Approve scores | Approve score sheet. |
+| `scores:approve` | Assessment | Approve scores | Approve score sheet, calculate term, and read broadsheet with resource scope. |
 | `scores:unlock` | Assessment | Unlock a locked score sheet | Unlock score sheet. |
 | `students:register` | Student | Register students | List, create, get, and update students. |
 | `students:bulk_import` | Student | Bulk import students | Start and poll student bulk import. |
@@ -122,7 +122,8 @@ Only four system roles exist:
 | `teachers:assign` | Structure | Assign teachers to class subjects | Teacher-assignment list, create, deactivate, and bulk assignment. |
 | `users:manage` | Admin | Manage staff accounts | Invite, bulk import staff, poll staff import, grant/revoke permissions, deactivate users. |
 | `permissions:delegate` | Admin | Delegate permissions to staff | No route currently checks this code. Permission grants use `users:manage`. |
-| `reports:publish` | Admin | Publish term results | No live publication route yet. |
+| `configuration:manage` | Admin | Manage grading and annual result rules | School configuration read and update routes. |
+| `reports:publish` | Admin | Publish term results | `POST /publication/publish-term`. |
 | `audit:view` | Admin | View audit logs | No audit read route yet. |
 
 `classes:enter_remarks` appears in friendly error translation but is not a seeded permission and has no route.
@@ -252,6 +253,18 @@ Supported scope types:
 | Score sheet submit | `scores:submit` | **Yes** -- teacher ownership, or scoped delegation |
 | Score sheet approve, unlock | `scores:approve` / `scores:unlock` | **Yes** -- scoped delegation (never teacher ownership) |
 
+### M8 route permissions (LIVE)
+
+| Route | Intended authorization |
+| --- | --- |
+| `GET /identity/onboarding/templates` | Public; no auth. |
+| `GET`, `PATCH /identity/schools/{school_id}/setup` | Admin-only (`SCHOOL_ADMIN` / `configuration:manage`); tenant must match the `school_id` in the path. |
+| `POST /identity/schools/{school_id}/branding/uploads` | Admin-only; tenant namespace must match the school. |
+| `POST /structure/templates/apply` | `structure:manage`. |
+| Custom domains | Not implemented; post-pilot/PLANNED. |
+
+Do not gate navigation on these routes until the backend is verified. Once live, a `school_id` belonging to another tenant must be denied (404/403) on setup and branding routes, and branding asset reads must stay inside the school's namespace.
+
 ## Assessment-specific ownership rules
 
 Assessment authorization layers teacher ownership on top of the permission check:
@@ -276,7 +289,11 @@ Frontend implications:
 | HOD approves Science only | `scores:approve` with `DEPARTMENT` scope. | **LIVE** |
 | SS1 coordinator approves SS1 only | `scores:approve` with `ACADEMIC_LEVEL` scope. | **LIVE** |
 | HOD manages structure, subjects, teacher assignments, and enrollment for their department | `structure:manage` / `subjects:manage` / `teachers:assign` / `students:enroll` with `DEPARTMENT` scope. | **LIVE**, including list endpoints: the HOD's class-group/offering/class-subject/definition/enrollment lists are filtered to their department automatically. |
-| Form master for SS1 O | Set `ClassGroup.class_teacher_id`. | **LIVE** as an assignment, but no remarks workflow. |
+| Form master for SS1 O | Set `ClassGroup.class_teacher_id`. | **LIVE** for broadsheet access; remarks and attendance workflows are planned for M5A. |
+| Academic officer calculates a term or reads a scoped broadsheet | Role default `scores:approve`, or a matching scoped grant. | **LIVE** |
+| Principal publishes a term | Role default/admin grant with `reports:publish`. | **LIVE** |
+| School administrator edits grading and annual rules | `configuration:manage`. | **LIVE** |
+| School administrator completes guided setup (defaults, branding, optional template) | Admin-only setup/branding routes; `structure:manage` to apply a template. | **LIVE** (M8) |
 | Staff manager grants permissions | `users:manage`, not `permissions:delegate`. | **LIVE** |
 
 ## Staff deactivation effects
