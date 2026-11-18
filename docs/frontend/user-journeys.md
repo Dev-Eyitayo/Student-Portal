@@ -8,7 +8,8 @@ All endpoints are relative to `/api/v1`. All success responses use the standard 
 
 ```mermaid
 flowchart LR
-    Onboard[M1 Onboard school and staff] --> Structure[M2 Configure structure]
+    Onboard[M1 Onboard school and staff] --> Wizard[M8 Guided setup: defaults, template, branding - LIVE]
+    Wizard --> Structure[M2 Configure structure]
     Structure --> Students[M2 Register and enroll students]
     Students --> Subjects[M3 Offer subjects and register electives]
     Subjects --> Scores[M4 Enter and approve scores]
@@ -292,6 +293,42 @@ Effects:
 
 Refresh class-group and staff views after success.
 
+## M8: Guided onboarding, defaults & branding
+
+**Status: LIVE.**
+
+The wizard is optional. Defaults can be reviewed from the **public** catalog, but
+every write step requires an authenticated school administrator. School-specific
+setup is never public.
+
+### 8.1 Journey
+
+1. **Review defaults** — call `GET /identity/onboarding/templates` (public) to show seeded configuration defaults and a structure-template preview. No tenant data is involved.
+2. **Edit and save setup** — as `SCHOOL_ADMIN`, call `GET /identity/schools/{school_id}/setup`, then `PATCH .../setup` to save profile, full configuration, and branding references transactionally.
+3. **Optionally apply a structure template** — call `POST /structure/templates/apply` with `structure:manage` to create selected levels, departments, arms, and optionally class groups for a session. Idempotent; safe to retry.
+4. **Upload branding** — call `POST /identity/schools/{school_id}/branding/uploads?asset_type=logo|stamp|principal_signature` with a multipart image file. Assets are stored locally for the pilot, namespaced by school.
+5. **Continue** — either sign in (`POST /identity/login`) or continue to manual setup through the `/structure` routes. The wizard never blocks manual setup.
+
+### 8.2 Endpoints (LIVE)
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/identity/onboarding/templates` | Public | Config defaults + structure template preview. |
+| `GET` | `/identity/schools/{school_id}/setup` | Admin-only | Profile, full config, branding paths/URLs, structure status, `custom_domain.status = PLANNED`. |
+| `PATCH` | `/identity/schools/{school_id}/setup` | Admin-only | Transactional partial save of profile, full config, branding references. |
+| `POST` | `/identity/schools/{school_id}/branding/uploads` | Admin-only | Multipart logo/stamp/principal-signature upload. |
+| `POST` | `/structure/templates/apply` | `structure:manage` | Idempotent template application for a session. |
+
+Full configuration means grading scale, assessment weights, term definitions, annual rules, timezone, currency, and report template.
+
+### 8.3 Rules the UI must enforce
+
+- Three default classes: **school-editable defaults** (seeded config/profile), **optional structure templates** (explicit opt-in only), and **platform defaults** (never exposed or editable).
+- **Save assessment-weight edits before creating any `ClassSubject`**: definitions are cloned at creation time, so later edits do not update existing classes. Put setup editing before structure/subject creation and show this warning.
+- Branding assets are tenant-isolated (namespaced by school slug/id) and use local pilot storage; S3/Cloudinary come later. Generated PDFs are never stored server-side.
+- Custom domains are **PLANNED post-pilot** — no endpoints; require DNS verification, verified domains only, no tenant selection from `Host` on authenticated APIs, dynamic CORS, and HTTPS/cookies.
+- A `school_id` that differs from the authenticated tenant must be treated as not found (no cross-tenant reads/writes/uploads).
+
 ## M2: Academic structure, students, and enrollment
 
 **Status: LIVE**
@@ -364,7 +401,7 @@ Rules:
 - Only one term is current per school. Marking a new term current unsets the previous one.
 - A locked term cannot have its details changed or be retired.
 - A current term cannot be retired.
-- `is_locked_for_scoring` currently protects term configuration. It does not yet block score entry; the planned M6 publication workflow will set it.
+- `is_locked_for_scoring` currently protects term configuration. The live M5 publication workflow sets it, but score entry routes do not yet read it.
 
 Olivet's configuration stores default term definitions named First Term, Second Term, and Third Term. The academic term rows themselves are created through this endpoint.
 
@@ -955,32 +992,47 @@ Score sheet state response includes submitted, approved, and unlocked metadata.
 - Do not show approve or unlock actions to plain teachers.
 - Do not use `scores:modify` as a live gate. No route checks it directly today.
 
-## M5: Result computation and broadsheets
+## M5: Result computation, broadsheets, and publication
 
-**Status: PLANNED**
+**Status: LIVE**
 
-No computation routes exist yet. `app/modules/computation/models.py` defines persistence only. Do not build against these routes until the backend milestone is implemented.
-
-### 5.1 Planned calculation flow
+### 5.1 Calculation flow
 
 1. Academic officer calculates a term.
 2. Backend verifies all relevant score sheets are approved.
 3. Pure engine computes subject totals, grades, remarks, subject positions, class statistics, totals, percentages, and class positions.
-4. Results are persisted as `subject_results` and `term_report_cards`.
+4. Results are persisted as `subject_results` and `term_report_cards` with status `DRAFT`.
 5. Third-term processing additionally computes annual cumulative scores, annual positions, and a promotion decision.
+6. Calculation can be repeated until publication; it is idempotent for the same term.
 
-### 5.2 Planned endpoints
+### 5.2 Endpoints
 
-| Method | Path | Planned permission |
+| Method | Path | Permission |
 | --- | --- | --- |
-| `POST` | `/computation/calculate-term` | Academic officer or school admin |
-| `GET` | `/computation/broadsheet/{class_group_id}` | Academic officer, school admin, or form master |
+| `POST` | `/computation/calculate-term` | `scores:approve`, with resource scope enforced |
+| `GET` | `/computation/broadsheet/{class_group_id}` | `scores:approve` or assigned form master |
+| `POST` | `/publication/publish-term` | `reports:publish` |
+| `GET`, `PATCH` | `/identity/schools/{school_id}/configuration` | `configuration:manage` |
 
-The exact request body for `calculate-term` is not yet implemented. Do not hardcode a request contract until the backend route is added.
+`calculate-term` returns:
 
-The broadsheet is intended to return a high-density matrix of students, subjects, scores, totals, ranks, and class statistics.
+```json
+{
+  "success": true,
+  "data": {
+    "academic_term_id": "8f2f4a9f-2c2a-7f4a-8e0e-2a5b2a4b7c11",
+    "class_group_id": null,
+    "students_calculated": 45,
+    "subject_results_upserted": 405
+  }
+}
+```
 
-### 5.3 Computation rules to preserve
+The request body is `{"academic_term_id": "...", "class_group_id": null}`. Omitting `class_group_id` calculates all class groups in the term.
+
+The broadsheet returns a high-density matrix of students, subjects, component scores, totals, ranks, and class statistics.
+
+### 5.3 Computation rules
 
 - Use `Decimal` with `ROUND_HALF_UP`.
 - Scaled score = `raw_score × (weight_percentage / max_score)`.
@@ -989,60 +1041,63 @@ The broadsheet is intended to return a high-density matrix of students, subjects
 - `PENDING` blocks submission, approval, and publication.
 - Student percentage uses marks obtained divided by that student's registered subject maximums.
 - Ranking uses standard competition ranking (`1, 2, 2, 4`).
+- Annual weights and promotion thresholds come from `annual_results_schema`.
 - Published historical values never recalculate from current configuration.
 
-### 5.4 Planned models
+### 5.4 Publication flow
 
-`SubjectResult` includes:
+1. Backend verifies every score sheet in the term is `APPROVED`.
+2. Backend seals `frozen_config_snapshot` on `subject_results` and `term_report_cards`.
+3. Backend sets `academic_terms.is_locked_for_scoring = TRUE`.
+4. Backend generates 256-bit result tokens, stores only SHA-256 hashes, and returns plaintext tokens once in a `202 Accepted` response.
+5. PostgreSQL triggers block future updates or deletes of published result rows.
+6. Email/SMS delivery remains in M6; do not assume parents have received a link immediately.
 
-- Term, class subject, and enrollment ids.
-- Total score, grade, grade point, remark.
-- Subject position.
-- Class highest, lowest, and average.
-- First, second, and third term scores.
-- Cumulative annual score and grade.
-- Status: `DRAFT`, `SUBMITTED`, `APPROVED`, or `PUBLISHED`.
-- Approver and approval timestamp.
+`publish-term` accepts `{"academic_term_id": "..."}`. Treat every returned token as a one-time secret.
 
-`TermReportCard` includes:
+### 5.5 Persisted result fields
 
-- Term and enrollment ids.
-- Total obtainable and obtained marks.
-- Overall percentage.
-- Class position and total students in arm.
-- Times school opened, present, and absent.
-- Teacher and principal comments.
-- Annual cumulative fields and promotion decision.
-- Publication status and timestamp.
-- Required `frozen_config_snapshot`.
-- `promotion_decision`: `PROMOTED`, `REPEATING`, `PROMOTED_ON_TRIAL`, or `WITHDRAWN`.
+`SubjectResult` includes term, class subject, enrollment, total score, grade, grade point, remark, subject position, class statistics, annual cumulative fields, status, approver metadata, and `frozen_config_snapshot`.
 
-## M6: Publication, result links, and report-card payload
+`TermReportCard` includes term and enrollment ids, totals, percentage, class position, total students in arm, zero attendance placeholders, comments, annual cumulative fields, promotion decision, publication status/timestamp, and `frozen_config_snapshot`.
+
+`promotion_decision` values are `PROMOTED`, `PROMOTED_ON_TRIAL`, and `REPEATING`. `WITHDRAWN` may appear later through student lifecycle handling.
+
+## M5A: Term attendance and class records
 
 **Status: PLANNED**
 
-No publication or verification routes exist yet. `app/modules/distribution/models.py` defines `ResultAccessToken` only.
+M5A will replace the zero attendance placeholders with real data. Planned routes:
 
-### 6.1 Planned publication
-
-| Method | Path | Planned permission |
+| Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/publication/publish-term` | School administrator or principal, with `reports:publish` |
-| `GET` | `/results/verify/{token}` | Public, with token plus date of birth or admission PIN |
-| `GET` | `/results/verify-qr` | Public |
+| `POST` | `/structure/class-groups/{class_group_id}/attendance` | Mark attendance for a whole class on a date |
+| `POST` | `/enrollments/{enrollment_id}/attendance` | Mark or correct one student's attendance |
+| `GET` | `/enrollments/{enrollment_id}/attendance` | List daily attendance records |
+| `PATCH`, `GET` | `/enrollments/{enrollment_id}/attendance-summary` | Manually override or read one summary |
+| `PATCH` | `/structure/class-groups/{class_group_id}/attendance-summary` | Bulk class summary update |
 
-Planned publication transaction:
+Design rules:
 
-- Verify every class subject result in the term is approved.
-- Insert or seal `subject_results`.
-- Insert or seal `term_report_cards`.
-- Store the exact grading-scale/configuration snapshot in `frozen_config_snapshot`.
-- Mark the term `is_locked_for_scoring=true`.
-- Generate 256-bit signed result access tokens.
-- Queue notification jobs.
-- Return `202 Accepted` after publication is sealed and notifications are queued.
+- Daily records and manual aggregate overrides are both supported; summaries carry `source = DAILY` or `MANUAL`.
+- Future dates are blocked; backdated entries require an audited reason.
+- Publication will require `present + absent == opened`.
+- Assessment `score_status = ABSENT` stays separate from daily attendance.
+- Until M5A is live, do not present report-card attendance as real data.
 
-The `publish-term` request body is not implemented yet. Do not invent it in the frontend.
+## M6: Verified report-card payload and notifications
+
+**Status: PARTIAL**
+
+Publication and token generation are live from M5. Public verification, the report-card JSON payload, branding storage, and email/SMS delivery remain planned.
+
+### 6.1 Endpoints
+
+| Method | Path | Status |
+| --- | --- | --- |
+| `POST` | `/publication/publish-term` | **LIVE** |
+| `GET` | `/results/verify/{token}` | **PLANNED**; public, with token plus date of birth or admission PIN |
+| `GET` | `/results/verify-qr` | **PLANNED**; public |
 
 ### 6.2 Result access token behavior
 
@@ -1067,9 +1122,9 @@ The `publish-term` request body is not implemented yet. Do not invent it in the 
       "name": "Olivet Baptist High School",
       "official_code": "OBHS-OYO",
       "address": "Oyo-Ogbomoso Road, Oyo, Oyo State, Nigeria",
-      "logo_url": "https://assets.domain/branding/obhs-logo.png",
-      "stamp_url": "https://assets.domain/branding/obhs-stamp.png",
-      "principal_signature_url": "https://assets.domain/branding/principal-sig.png"
+      "logo_url": "/storage/olivet-oyo/branding/obhs-logo.png",
+      "stamp_url": "/storage/olivet-oyo/branding/obhs-stamp.png",
+      "principal_signature_url": "/storage/olivet-oyo/branding/principal-sig.png"
     },
     "student": {
       "admission_number": "OBHS/2022/0412",
@@ -1111,7 +1166,7 @@ The `publish-term` request body is not implemented yet. Do not invent it in the 
       "class_position": 4,
       "total_students_in_arm": 45,
       "form_master_comment": "An exemplary student with outstanding academic discipline.",
-      "form_master_signature_url": "https://assets.domain/signatures/teacher-adeola.png",
+      "form_master_signature_url": "/storage/olivet-oyo/signatures/teacher-adeola.png",
       "principal_comment": "Excellent academic performance. Promoted to Senior Secondary 2."
     },
     "annual_cumulative_summary": {
@@ -1136,7 +1191,8 @@ Notes:
 - Subject fields are frozen at publication.
 - The frontend renders and exports the report card PDF locally.
 - The QR payload is for physical print verification; the frontend should not treat it as a secret.
-- All assets are URLs served by the planned storage service.
+- All assets are paths/URLs served by the planned storage service; M8 uploads use local pilot storage namespaced by school, with S3/Cloudinary later.
+- Generated PDFs are not stored server-side; the frontend renders and exports them locally.
 
 ### 6.4 Planned parent journey
 
@@ -1199,4 +1255,7 @@ Recommended polling:
 - Refresh `/identity/me` after permission changes or staff deactivation.
 - Show archived students only when the user asks for history.
 - Hide terminal transition options after a student or enrollment reaches a terminal state.
-- Do not show result publication or PDF export in production navigation until M5/M6 are live.
+- Result publication is live. Do not show PDF export or public verification in production navigation until M6 is live.
+- Treat M8 guided-setup routes as absent until verified; do not render the wizard in production navigation yet.
+- Do not derive tenant identity from `Host` or a custom domain.
+- When M8 is live, keep assessment-weight editing before class-subject creation in the wizard.

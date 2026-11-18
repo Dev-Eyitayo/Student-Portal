@@ -99,6 +99,12 @@ SYSTEM_PERMISSIONS = [
         "description": "Grant scoped role delegations to teachers and coordinators.",
     },
     {
+        "code": "configuration:manage",
+        "name": "Manage School Configuration",
+        "category": "ADMIN",
+        "description": "Update grading scales and annual result rules for the school.",
+    },
+    {
         "code": "reports:publish",
         "name": "Publish Report Cards",
         "category": "ADMIN",

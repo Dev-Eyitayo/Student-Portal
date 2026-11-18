@@ -31,9 +31,12 @@ from app.modules.academic_structure.schemas import (
     LevelUpdateRequest,
     SessionCreateRequest,
     SessionUpdateRequest,
+    StructureTemplateApplyRequest,
+    StructureTemplateApplyResponse,
     TermCreateRequest,
     TermUpdateRequest,
 )
+from app.modules.academic_structure.templates import get_structure_template_preview
 from app.modules.audit.services import AuditContext, record_audit_log
 from app.modules.common.pagination import paginate
 from app.modules.common.schemas import PageMeta
@@ -715,14 +718,32 @@ async def update_term(
     audit: AuditContext,
 ) -> AcademicTerm:
     term = await _get_term(db, school_id, term_id)
+    changes = req.model_dump(exclude_unset=True)
     if term.is_locked_for_scoring:
-        raise ValidationException(
-            "This term is locked for scoring, so its details cannot be changed. Please unlock "
-            "it before making changes."
+        if changes != {"is_locked_for_scoring": False}:
+            raise ValidationException(
+                "This term is locked for scoring, so its details cannot be changed. Submit only "
+                "`is_locked_for_scoring: false` by itself to unlock it before making other changes."
+            )
+        term.is_locked_for_scoring = False
+        await db.flush()
+        record_audit_log(
+            db,
+            audit,
+            action="ACADEMIC_TERM_UPDATED",
+            resource_type="AcademicTerm",
+            resource_id=term.id,
+            diff_payload={"changes": changes},
         )
+        await _commit_or_conflict(
+            db,
+            message="This term could not be saved because its details conflict with another term.",
+            code="TERM_CONFLICT",
+        )
+        await db.refresh(term)
+        return term
 
     session = await _get_session(db, school_id, term.academic_session_id, include_retired=True)
-    changes = req.model_dump(exclude_unset=True)
 
     new_start = req.start_date if req.start_date is not None else term.start_date
     new_end = req.end_date if req.end_date is not None else term.end_date
@@ -1387,3 +1408,206 @@ async def retire_class_group(
     )
     await db.refresh(class_group)
     return class_group
+
+
+async def apply_structure_template(
+    db: AsyncSession,
+    school_id: UUID,
+    req: StructureTemplateApplyRequest,
+    audit: AuditContext,
+) -> StructureTemplateApplyResponse:
+    preview = get_structure_template_preview(req.template_id)
+    if preview is None:
+        raise ValidationException(
+            "We couldn't find that structure template. Please refresh the setup page and choose one of the available templates."
+        )
+
+    session: AcademicSession | None = None
+    if req.academic_session_id is not None:
+        session = (
+            await db.execute(
+                select(AcademicSession).where(
+                    AcademicSession.id == req.academic_session_id,
+                    AcademicSession.school_id == school_id,
+                    AcademicSession.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if session is None:
+            raise ResourceNotFoundException("academic session", req.academic_session_id)
+    else:
+        assert req.session_name is not None
+        assert req.session_start_date is not None
+        assert req.session_end_date is not None
+        await _ensure_session_name_available(db, school_id, req.session_name)
+        session = AcademicSession(
+            school_id=school_id,
+            name=req.session_name.strip(),
+            start_date=req.session_start_date,
+            end_date=req.session_end_date,
+            is_current=True,
+        )
+        await _unset_current_sessions(db, school_id)
+        db.add(session)
+        await db.flush()
+
+    level_rows = (
+        (
+            await db.execute(
+                select(AcademicLevel).where(
+                    AcademicLevel.school_id == school_id,
+                    AcademicLevel.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    levels_by_code = {level.code: level for level in level_rows}
+    levels_created = 0
+    for item in preview["levels"]:
+        if item["code"] not in levels_by_code:
+            level = AcademicLevel(
+                school_id=school_id,
+                name=item["name"],
+                code=item["code"],
+                level_order=item["level_order"],
+                category=item["category"],
+            )
+            db.add(level)
+            levels_by_code[item["code"]] = level
+            levels_created += 1
+
+    department_rows = (
+        (
+            await db.execute(
+                select(Department).where(
+                    Department.school_id == school_id,
+                    Department.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    departments_by_code = {department.code: department for department in department_rows}
+    departments_created = 0
+    for item in preview["departments"]:
+        if item["code"] not in departments_by_code:
+            department = Department(
+                school_id=school_id,
+                name=item["name"],
+                code=item["code"],
+            )
+            db.add(department)
+            departments_by_code[item["code"]] = department
+            departments_created += 1
+
+    arm_rows = (
+        (
+            await db.execute(
+                select(ClassArm).where(
+                    ClassArm.school_id == school_id,
+                    ClassArm.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    arms_by_name = {arm.name: arm for arm in arm_rows}
+    arms_created = 0
+    for arm_name in preview["arms"]:
+        if arm_name not in arms_by_name:
+            arm = ClassArm(school_id=school_id, name=arm_name)
+            db.add(arm)
+            arms_by_name[arm_name] = arm
+            arms_created += 1
+
+    # New levels/departments/arms are only assigned a real id once flushed; the
+    # class-group loop below needs those ids to build FK values and the dedup key.
+    await db.flush()
+
+    class_groups_created = 0
+    class_groups_reused = 0
+    if req.include_class_groups:
+        existing_groups = (
+            (
+                await db.execute(
+                    select(ClassGroup).where(
+                        ClassGroup.school_id == school_id,
+                        ClassGroup.academic_session_id == session.id,
+                        ClassGroup.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        group_keys = {
+            (group.academic_level_id, group.department_id, group.class_arm_id)
+            for group in existing_groups
+        }
+        for item in preview["class_groups"]:
+            level = levels_by_code[item["level_code"]]
+            department = (
+                departments_by_code[item["department_code"]]
+                if item["department_code"] is not None
+                else None
+            )
+            arm = arms_by_name[item["arm_name"]]
+            key = (level.id, department.id if department else None, arm.id)
+            if key in group_keys:
+                class_groups_reused += 1
+                continue
+            department_name = f" {department.name}" if department is not None else ""
+            db.add(
+                ClassGroup(
+                    school_id=school_id,
+                    academic_session_id=session.id,
+                    academic_level_id=level.id,
+                    department_id=department.id if department is not None else None,
+                    class_arm_id=arm.id,
+                    display_name=f"{level.name}{department_name} {arm.name}".strip(),
+                )
+            )
+            group_keys.add(key)
+            class_groups_created += 1
+
+    await db.flush()
+    record_audit_log(
+        db,
+        audit,
+        action="STRUCTURE_TEMPLATE_APPLIED",
+        resource_type="AcademicSession",
+        resource_id=session.id,
+        diff_payload={
+            "template_id": req.template_id,
+            "levels_created": levels_created,
+            "departments_created": departments_created,
+            "arms_created": arms_created,
+            "class_groups_created": class_groups_created,
+        },
+    )
+    await _commit_or_conflict(
+        db,
+        message=(
+            "The structure template could not be applied. Please review your existing classes "
+            "and try again."
+        ),
+        code="STRUCTURE_TEMPLATE_CONFLICT",
+    )
+
+    return StructureTemplateApplyResponse(
+        template_id=req.template_id,
+        academic_session_id=session.id,
+        levels_created=levels_created,
+        levels_reused=len(preview["levels"]) - levels_created,
+        departments_created=departments_created,
+        departments_reused=len(preview["departments"]) - departments_created,
+        arms_created=arms_created,
+        arms_reused=len(preview["arms"]) - arms_created,
+        class_groups_created=class_groups_created,
+        class_groups_reused=class_groups_reused,
+        message=("The structure template has been applied. Existing records were kept unchanged."),
+    )

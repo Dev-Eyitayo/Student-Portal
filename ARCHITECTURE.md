@@ -1,8 +1,9 @@
 # Software Architecture Plan: Multi-Tenant Academic Records Management Platform
 **Target Pilot:** Olivet Baptist High School, Oyo, Nigeria  
 **Platform Scope:** Multi-School Academic SaaS (Junior & Senior Secondary Schools)  
-**Document Version:** 2.0.0-FASTAPI-SPEC  
+**Document Version:** 2.1.0-FASTAPI-SPEC
 **Status:** Approved for Implementation Architecture  
+**M8 Status:** LIVE (Guided Onboarding, Defaults, Branding & Structure Templates; custom domains remain post-pilot)
 **Architect:** Senior Software Architect (SaaS, Security & Academic Systems)  
 **Primary Tech Stack:** FastAPI, Pydantic v2, SQLAlchemy 2.0 (Async), Alembic, PostgreSQL 16 (RLS), Celery, Redis
 
@@ -36,6 +37,7 @@
    - 6.1 API Conventions, OpenAPI 3.1 Standards & Response Envelopes
    - 6.2 Endpoint Catalog by Domain
    - 6.3 End-to-End JSON Request/Response Payloads & Pydantic v2 Schemas
+   - 6.4 Guided Onboarding, Defaults & Structure Templates (M8 — LIVE)
 7. [Result Computation & Processing Engine](#7-result-computation--processing-engine)
    - 7.1 Assessment Aggregation, Missing Scores & Exceptions
    - 7.2 Grading Scales, Grade Points & Performance Remarks
@@ -145,6 +147,13 @@ graph TD
 
     MVP --> PostMVP
 ```
+
+> **Milestone numbering note:** the `M1`–`M11` labels above are MVP *capability
+> tags* used for scope planning; they are distinct from the delivery milestone
+> numbers in §14 and `BACKEND_DEV_PLAN.md`. The delivery sequence currently ends
+> at M8. **M8 (Guided Onboarding, Defaults, Branding & Structure Templates) is
+> LIVE** and specified in §6.4. `P7` (school custom subdomains) remains
+> post-pilot and PLANNED.
 
 ### 2.4 Fundamental Architectural Assumptions
 1. **Academic Session Model:** An Academic Session corresponds to an academic year (e.g., `2024/2025`) and is divided into distinct sequential terms (typically 3 terms: `First Term`, `Second Term`, `Third Term`).
@@ -407,6 +416,7 @@ CREATE TABLE school_configurations (
     grading_scale_schema JSONB NOT NULL,
     assessment_weight_schema JSONB NOT NULL,
     academic_term_definitions JSONB NOT NULL,
+    annual_results_schema JSONB NOT NULL,
     timezone VARCHAR(64) NOT NULL DEFAULT 'Africa/Lagos',
     currency CHAR(3) NOT NULL DEFAULT 'NGN',
     report_card_template_id VARCHAR(64) NOT NULL DEFAULT 'default_olivet_v1',
@@ -825,6 +835,7 @@ CREATE TABLE subject_results (
     status VARCHAR(32) NOT NULL DEFAULT 'DRAFT', -- 'DRAFT', 'SUBMITTED', 'APPROVED', 'PUBLISHED'
     approved_by_id UUID REFERENCES users(id) ON DELETE SET NULL,
     approved_at TIMESTAMPTZ NULL,
+    frozen_config_snapshot JSONB NOT NULL, -- Freezes grading scale and calculation formulas
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT uq_term_student_class_subject UNIQUE (academic_term_id, student_enrollment_id, class_subject_id)
@@ -860,6 +871,9 @@ CREATE TABLE term_report_cards (
     CONSTRAINT uq_term_student_report_card UNIQUE (academic_term_id, student_enrollment_id)
 );
 CREATE INDEX idx_report_cards_lookup ON term_report_cards(school_id, academic_term_id, publication_status);
+
+-- PostgreSQL triggers block UPDATE and DELETE on any row whose status is
+-- subject_results.status = 'PUBLISHED' or term_report_cards.publication_status = 'PUBLISHED'.
 
 CREATE TABLE result_access_tokens (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1113,11 +1127,15 @@ Every success response must use `SuccessResponse[T]` from `app/modules/common/sc
 
 ### 6.2 Endpoint Catalog by Domain
 
-This catalog is authoritative. `BACKEND_DEV_PLAN.md`, module routers, tests, and frontend clients must match these paths exactly.
+This catalog is authoritative. `BACKEND_DEV_PLAN.md`, module routers, tests, and frontend clients must match these paths exactly. Rows marked **(LIVE — M8)** are implemented contracts; custom-domain rows remain explicitly post-pilot.
 
 | Domain | Method | Canonical Path | Description | Permitted Roles |
 |---|---|---|---|---|
 | **Identity** | `POST` | `/api/v1/identity/schools` | Onboard a school tenant and initial administrator | `SUPER_ADMIN` |
+| **Identity** | `GET`, `PATCH` | `/api/v1/identity/schools/{school_id}/configuration` | Read or update grading and annual result rules | `SCHOOL_ADMIN` (with `configuration:manage`) |
+| **Identity** | `GET` | `/api/v1/identity/onboarding/templates` | **(LIVE — M8)** Public default-template catalog: configuration defaults and structure template preview | `ANONYMOUS` |
+| **Identity** | `GET`, `PATCH` | `/api/v1/identity/schools/{school_id}/setup` | **(LIVE — M8)** Read or transactionally save the aggregate setup payload (profile, full configuration, branding references, structure status, custom-domain status) | `SCHOOL_ADMIN` (admin-only) |
+| **Identity** | `POST` | `/api/v1/identity/schools/{school_id}/branding/uploads` | **(LIVE — M8)** Multipart upload of logo, stamp, and principal signature; local storage for pilot | `SCHOOL_ADMIN` (admin-only) |
 | **Identity** | `POST` | `/api/v1/identity/login` | Authenticate and issue tokens | `ANONYMOUS` |
 | **Identity** | `POST` | `/api/v1/identity/refresh` | Rotate refresh token | `ANONYMOUS` |
 | **Identity** | `POST` | `/api/v1/identity/logout` | Revoke access and refresh tokens | `AUTHENTICATED` |
@@ -1142,6 +1160,7 @@ This catalog is authoritative. `BACKEND_DEV_PLAN.md`, module routers, tests, and
 | **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/arms/{arm_id}` | Read, update, or retire a class arm | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Structure** | `GET`, `POST` | `/api/v1/structure/class-groups` | List or instantiate class cohorts | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/class-groups/{class_group_id}` | Read, update, or retire a class group | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Structure** | `POST` | `/api/v1/structure/templates/apply` | **(LIVE — M8)** Idempotently create selected levels, departments, arms, and optional class groups for a session from a template | `structure:manage` |
 | **Students** | `GET`, `POST` | `/api/v1/students` | List or register students | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Students** | `GET`, `PATCH` | `/api/v1/students/{student_id}` | Read or update a student | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Students** | `POST` | `/api/v1/students/{student_id}/status` | Transition student lifecycle status with an audit note | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
@@ -1315,6 +1334,94 @@ class BulkScoreEntryRequest(BaseModel):
 
 > **Client-Side PDF Generation:** The frontend client (web or mobile) receives this complete structured JSON payload and renders the report card directly in the browser or app (e.g. using CSS `@media print`, `@react-pdf/renderer`, or client-side PDF export). This eliminates server-side PDF compiling bottlenecks and removes the need for object storage (S3) for rendered reports.
 
+> **Branding assets (M8):** the verified payload also embeds the school's logo,
+> stamp, and principal-signature paths/URLs returned by `GET .../setup` (§6.4.3).
+> These are local paths during the pilot; generated PDFs are never stored
+> server-side.
+
+### 6.4 Guided Onboarding, Defaults & Structure Templates (M8 — LIVE)
+
+**Status: LIVE.** M8 adds an optional guided setup
+path: a new school reviews suggested defaults, saves its own profile and academic
+configuration, optionally materialises a predefined academic structure, and
+uploads branding assets before continuing into normal staff workflows.
+
+#### 6.4.1 Three classes of defaults
+
+| Class | Definition | Exposed where | Editable by |
+| --- | --- | --- | --- |
+| **School-editable defaults** | Values seeded into `school_configurations` and the school profile at onboarding: grading scale, assessment weights, term definitions, annual rules, timezone, currency, report template id, and profile fields. | `GET /api/v1/identity/onboarding/templates` (preview) and `GET .../setup` (current values). | School admin via `PATCH .../setup`. |
+| **Optional structure templates** | Named previews of levels, departments, arms, and optional class groups (for example the Olivet blueprint in §11). Applied only on explicit opt-in. | Catalog preview; applied via `POST /api/v1/structure/templates/apply`. | School admin with `structure:manage`. |
+| **Platform defaults (not exposed)** | Internal constants such as token TTLs, rate limits, rounding mode, audit retention, and seed ordering. | Never returned by the catalog or setup payloads. | Platform only; not tenant-configurable. |
+
+> **Critical rule:** assessment weight edits must be saved **before** any
+> `ClassSubject` is created. Creating a `ClassSubject` clones the active
+> `school_configurations.assessment_weight_schema` into concrete
+> `assessment_definitions` rows (§16 Decision 6). Later weight changes do not
+> rewrite existing definitions, so the guided wizard places the setup edit step
+> before structure/subject creation and warns the user accordingly.
+
+#### 6.4.2 Setup contracts
+
+- `GET /api/v1/identity/onboarding/templates` — public. Returns default
+  configuration values and a structure-template preview; requires no auth and
+  reveals no tenant data.
+- `GET /api/v1/identity/schools/{school_id}/setup` — admin-only. Returns one
+  aggregate payload: school profile, full `school_configurations`, branding asset
+  paths/URLs, structure setup status, and custom-domain status (`PLANNED`, not
+  implemented).
+- `PATCH /api/v1/identity/schools/{school_id}/setup` — admin-only, transactional
+  partial save for profile, the full configuration block (grading scale,
+  assessment weights, term definitions, annual rules, timezone, currency, report
+  template), and branding references. All supplied fields commit together or
+  none do.
+- `POST /api/v1/structure/templates/apply` — `structure:manage`. Idempotently
+  creates the selected levels, departments, arms, and optionally class groups for
+  a session. Re-applying the same template must not create duplicates; use the
+  active-row partial unique indexes (§4.3.2) to detect existing records. Junior
+  levels keep `department_id = NULL`.
+
+#### 6.4.3 Branding storage
+
+- `POST /api/v1/identity/schools/{school_id}/branding/uploads?asset_type=logo|stamp|principal_signature`
+  accepts a multipart image file and stores it behind the `StorageService`
+  abstraction (§16 Decision 5).
+- For the pilot the `LocalStorageBackend` is used; `S3`/`Cloudinary` remain future
+  providers. Assets are namespaced strictly by `{school_slug}/branding/` (or
+  school id), and every read/write must verify the authenticated tenant matches
+  the namespace (§9.4).
+- The setup GET returns the stored paths/URLs; the verified report payload
+  (§6.3.2 / §8.3) embeds those URLs for client-side rendering.
+- Generated report-card PDFs are **not** stored server-side; parents render and
+  export locally from the verified JSON payload.
+
+#### 6.4.4 Custom domains — PLANNED, post-pilot only
+
+No custom-domain endpoints are implemented and none should be exposed in the
+pilot. Post-pilot support requires:
+
+- domain ownership **DNS verification**, and only **verified domains** may be
+  accepted;
+- the `Host` header must **never** select the tenant for authenticated APIs —
+  tenant context always comes from the authenticated JWT and `get_tenant_db`;
+- dynamic CORS derived from the verified-domain allow-list (not a wildcard);
+- HTTPS only, with secure, HTTP-only, SameSite cookies for refresh tokens.
+
+#### 6.4.5 M8 test / DoD requirements
+
+Every M8 endpoint must include tests for:
+
+- success (public catalog; authenticated admin setup read/save; branding upload;
+  template apply);
+- cross-tenant denial (school A cannot read, patch, or upload into school B's
+  setup or branding namespace);
+- validation failures (invalid grading/weight schemas, missing or oversized
+  uploads, unauthenticated setup/template calls);
+- idempotent template apply (re-applying creates no duplicate levels,
+  departments, arms, or class groups);
+- branding asset isolation (namespaced paths; no cross-tenant read of another
+  school's assets).
+
 ---
 
 ## 7. Result Computation & Processing Engine
@@ -1386,25 +1493,19 @@ sequenceDiagram
     actor Principal as School Administrator (Principal)
     participant PubRouter as FastAPI PublicationRouter
     participant PubService as PublicationService
-    participant CompEngine as ComputationEngine
     participant DB as PostgreSQL Database
-    participant Celery as Celery Workers (Queue)
 
     Principal->>PubRouter: POST /api/v1/publication/publish-term
     PubRouter->>PubService: execute_term_publication(term_id)
-    PubService->>CompEngine: Verify all subjects APPROVED
-    CompEngine-->>PubService: Verification OK
-    PubService->>CompEngine: Generate Class Positions & Aggregates
-    CompEngine-->>PubService: Aggregates calculated
-    PubService->>DB: BEGIN TRANSACTION (AsyncSession)
-    PubService->>DB: INSERT INTO term_report_cards (with frozen_config_snapshot)
+    PubService->>DB: Verify all score sheets APPROVED
+    PubService->>DB: Seal frozen_config_snapshot on results and report cards
     PubService->>DB: UPDATE subject_results SET status = 'PUBLISHED'
     PubService->>DB: UPDATE academic_terms SET is_locked_for_scoring = TRUE
+    PubService->>DB: INSERT hashed result_access_tokens
     PubService->>DB: INSERT INTO audit_logs (Term Published)
     PubService->>DB: COMMIT TRANSACTION
-    PubService->>Celery: Dispatch SendNotifications (Email/SMS)
     PubService-->>PubRouter: Publication Complete
-    PubRouter-->>Principal: 202 Accepted (Publication sealed, notifications queued)
+    PubRouter-->>Principal: 202 Accepted (plaintext tokens returned once)
 ```
 
 #### Post-Publication Correction Protocol
@@ -1417,6 +1518,13 @@ If an arithmetic error or grading omission is discovered *after* publication:
    - Increments report card version: `version = version + 1`.
    - Records full `before` and `after` diffs in `audit_logs`.
    - Revokes previous tokens and generates a revised report card snapshot with an explicit header stamp: *"AMENDED REPORT - ISSUED [TIMESTAMP]"*.
+
+### 7.5 M5 Implementation Status & M5A Boundary
+- M5 is live: `calculate-term`, `broadsheet`, `publish-term`, configuration read/update, frozen snapshots, database immutability triggers, and one-time SHA-256-hashed token issuance are implemented.
+- M5 publication requires every score sheet to be `APPROVED`; it freezes the active grading, assessment, term, and annual-rule configuration into both `subject_results` and `term_report_cards`.
+- Public token verification, report-card JSON payload assembly, branding storage, and email/SMS delivery remain in M6.
+- Term attendance is Milestone 5A. Until 5A is implemented, `times_school_opened`, `times_present`, and `times_absent` remain `0` placeholders and do not block publication.
+- Assessment-level `score_status = ABSENT` is unrelated to daily attendance and remains part of score computation.
 
 ---
 
@@ -1576,7 +1684,7 @@ class TimestampMixin:
 
 ### 9.4 Tenant Context Propagation across Async Tasks & Static Assets
 - **Celery Tasks:** Every Celery task signature accepting tenant work must declare `school_id: str` as its first parameter. The task worker automatically sets the PostgreSQL session variable `app.current_school_id` upon connection checkout.
-- **Tenant Asset Isolation:** School-specific assets (e.g. logos) are stored locally or in managed storage namespaced strictly by `{school_slug}/branding/{asset_name}`. Static PDF files are not stored on disk or cloud buckets; results are served on-demand as structured JSON payloads for client-side rendering.
+- **Tenant Asset Isolation:** School branding assets (logos, stamps, signatures) are namespaced strictly by `{school_slug}/branding/{asset_name}`, and every read/write must verify the authenticated tenant matches that namespace. M8 uses the local storage backend for the pilot; S3/Cloudinary are later providers. Static PDF files are not stored on disk or cloud buckets; results are served on-demand as structured JSON payloads for client-side rendering.
 
 ---
 
@@ -1959,6 +2067,8 @@ gantt
     Client Report Card Payload & QR Verification :p4_1, after p3_3, 10d
     Magic Link Distribution & Token Auth         :p4_2, after p4_1, 8d
     SQLAdmin Setup & Pilot Simulation at Olivet  :p4_3, after p4_2, 14d
+    section Phase 5: Guided Onboarding (PLANNED)
+    Guided Onboarding, Defaults & Branding       :p5_1, after p4_3, 10d
 ```
 
 ### Detailed Phase Deliverables & Acceptance Criteria
@@ -1978,6 +2088,10 @@ gantt
 #### Phase 4: Result Publication, Client-Side PDF & Pilot Delivery
 - **Deliverables:** Publication snapshotting engine, Structured report JSON payload with QR verification, Magic link verification API, email notification worker, SQLAdmin dashboard.
 - **Acceptance Criteria:** Publish 1,500 individual student report records in seconds without storage bottlenecks; verify frontend client can assemble and export print-ready PDFs locally from the verified payload without server-side rendering delay.
+
+#### Phase 5: Guided Onboarding, Defaults, Branding & Structure Templates (M8 — LIVE)
+- **Deliverables:** Public default-template catalog, aggregate admin setup read/save, tenant-isolated local branding uploads, and idempotent structure template apply.
+- **Acceptance Criteria:** A new school can review defaults, save its configuration, optionally apply a structure template twice without duplicates, and upload branding that only its own tenant can read. Custom domains remain out of scope.
 
 ---
 
@@ -2034,7 +2148,13 @@ All core architectural questions have been formally reviewed and confirmed:
 7. **Scoped Delegation Enforcement, Resolved Platform-Wide: [RESOLVED & APPROVED]**
    - *Problem found:* `DEPARTMENT`/`ACADEMIC_LEVEL`/`CLASS_GROUP`-scoped grants could never pass a router-level `require_permission(code)` dependency, because that dependency has no way to see the target resource's scope before the request body is parsed or a parent record is looked up — it would reject any non-`SCHOOL_WIDE` grant outright, regardless of what §10.2's scope-matching logic would otherwise allow.
    - *Fix:* for every resource with a real department/level/class-group dimension — class groups, subject offerings, class subjects, teacher assignments, student subject registrations, enrollments, assessment definitions, and score sheets — the router-level dependency was removed from the single-resource (create/get/update/retire) routes and replaced with a `require_scoped_permission` call inside the service function, once the resource (and therefore its scope) is resolved. See §10.2 for the mechanism.
-   - *List endpoints, resolved in the same pass:* `GET /structure/class-groups`, `GET /subjects/offerings`, `GET /class-subjects`, `GET /assessments/definitions`, and `GET /students/{id}/enrollments` now call `get_permission_scope` + `build_scope_filter` (§10.2) to add a `WHERE department_id IN (...) OR academic_level_id IN (...) OR class_group_id IN (...)` clause for callers who hold only scoped grants, rather than requiring unscoped access or rejecting outright. A caller with no applicable grant at all (not even a scoped one) still gets `403` on the list itself. The subject catalog list (`GET /subjects`) and staff/user management (`users:manage`, `permissions:delegate`) have no department/level/class-group dimension in the data model and remain unscoped-only — there is nothing to filter them by.
+    - *List endpoints, resolved in the same pass:* `GET /structure/class-groups`, `GET /subjects/offerings`, `GET /class-subjects`, `GET /assessments/definitions`, and `GET /students/{id}/enrollments` now call `get_permission_scope` + `build_scope_filter` (§10.2) to add a `WHERE department_id IN (...) OR academic_level_id IN (...) OR class_group_id IN (...)` clause for callers who hold only scoped grants, rather than requiring unscoped access or rejecting outright. A caller with no applicable grant at all (not even a scoped one) still gets `403` on the list itself. The subject catalog list (`GET /subjects`) and staff/user management (`users:manage`, `permissions:delegate`) have no department/level/class-group dimension in the data model and remain unscoped-only — there is nothing to filter them by.
+
+8. **Guided Onboarding Decisions (M8): [RESOLVED & APPROVED]**
+   - *Structure templates are optional:* applied at onboarding only on explicit opt-in via `POST /api/v1/structure/templates/apply`, which is idempotent. Defaults are never forced on a school.
+   - *Custom domains are post-pilot/PLANNED:* documented in §6.4.4 only; no custom-domain endpoints ship for the pilot.
+   - *Branding uploads are included in M8:* local storage for the pilot, with S3/Cloudinary as later providers behind the existing `StorageService` abstraction. Assets are tenant-namespaced and PDFs are not stored server-side.
+   - *Catalog vs. setup access:* the default-template catalog is public; school-specific setup read/save, branding uploads, and template application are admin-authenticated.
 
 ---
 *End of Architectural Specification. Document maintained under strict version control.*

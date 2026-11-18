@@ -1056,3 +1056,136 @@ async def test_department_scoped_delegate_can_manage_structure_subjects_and_enro
             "/api/v1/structure/class-groups", headers=bystander_headers
         )
         assert bystander_list.status_code == 403, bystander_list.text
+
+
+@pytest.mark.asyncio
+async def test_calculate_term_broadsheet_and_publish_term_lifecycle():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        suffix = uuid.uuid4().hex[:6]
+        school_id, admin_token = await _create_school_and_admin(client, suffix)
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+        structure = await _setup_structure(client, admin_headers, suffix)
+        term_id = structure["term"]["id"]
+        class_group_id = structure["class_group"]["id"]
+
+        subject = await _post(
+            client,
+            "/api/v1/subjects",
+            {"name": "General Mathematics", "code": f"MTH{suffix}"},
+            admin_headers,
+        )
+        offering = await _post(
+            client,
+            "/api/v1/subjects/offerings",
+            {
+                "subject_id": subject["id"],
+                "academic_session_id": structure["session"]["id"],
+                "academic_level_id": structure["level"]["id"],
+            },
+            admin_headers,
+        )
+        class_subject = await _post(
+            client,
+            "/api/v1/class-subjects",
+            {"subject_offering_id": offering["id"], "class_group_id": class_group_id},
+            admin_headers,
+        )
+        enrollment = await _enroll_student(client, admin_headers, suffix, class_group_id)
+
+        definitions = (
+            await client.get(
+                "/api/v1/assessments/definitions",
+                params={"academic_term_id": term_id, "class_subject_id": class_subject["id"]},
+                headers=admin_headers,
+            )
+        ).json()["data"]["items"]
+        for definition in definitions:
+            score_resp = await client.post(
+                "/api/v1/assessments/scores/bulk-entry",
+                json={
+                    "class_subject_id": class_subject["id"],
+                    "assessment_definition_id": definition["id"],
+                    "scores": [
+                        {
+                            "student_enrollment_id": enrollment["id"],
+                            "score_status": "SCORED",
+                            "raw_score": min(5, float(definition["max_score"])),
+                        }
+                    ],
+                },
+                headers=admin_headers,
+            )
+            assert score_resp.status_code == 200, score_resp.text
+
+        submit_resp = await client.post(
+            "/api/v1/assessments/submit",
+            json={"academic_term_id": term_id, "class_subject_id": class_subject["id"]},
+            headers=admin_headers,
+        )
+        assert submit_resp.status_code == 200, submit_resp.text
+        approve_resp = await client.post(
+            "/api/v1/assessments/approve",
+            json={"academic_term_id": term_id, "class_subject_id": class_subject["id"]},
+            headers=admin_headers,
+        )
+        assert approve_resp.status_code == 200, approve_resp.text
+
+        # Regression for the UUID-shadowing bug: this used to 500 on every call.
+        calc_resp = await client.post(
+            "/api/v1/computation/calculate-term",
+            json={"academic_term_id": term_id, "class_group_id": class_group_id},
+            headers=admin_headers,
+        )
+        assert calc_resp.status_code == 200, calc_resp.text
+        calc_data = calc_resp.json()["data"]
+        assert calc_data["students_calculated"] == 1
+        assert calc_data["subject_results_upserted"] == 1
+
+        broadsheet_resp = await client.get(
+            f"/api/v1/computation/broadsheet/{class_group_id}",
+            params={"academic_term_id": term_id},
+            headers=admin_headers,
+        )
+        assert broadsheet_resp.status_code == 200, broadsheet_resp.text
+        broadsheet_data = broadsheet_resp.json()["data"]
+        assert broadsheet_data["total_students"] == 1
+        # First term is not an annual term, so no cumulative data is attached yet.
+        assert broadsheet_data["students"][0]["annual_score"] is None
+        assert broadsheet_data["students"][0]["promotion_decision"] is None
+
+        publish_resp = await client.post(
+            "/api/v1/publication/publish-term",
+            json={"academic_term_id": term_id},
+            headers=admin_headers,
+        )
+        assert publish_resp.status_code == 202, publish_resp.text
+        publish_data = publish_resp.json()["data"]
+        assert publish_data["report_cards_published"] == 1
+        assert len(publish_data["result_links"]) == 1
+
+        # Regression for the permanent-lock bug: any other change while locked is
+        # still rejected, but an unlock-only request must succeed.
+        blocked_edit = await client.patch(
+            f"/api/v1/structure/terms/{term_id}",
+            json={"name": "First Term Renamed"},
+            headers=admin_headers,
+        )
+        assert blocked_edit.status_code == 422, blocked_edit.text
+
+        unlock_term_resp = await client.patch(
+            f"/api/v1/structure/terms/{term_id}",
+            json={"is_locked_for_scoring": False},
+            headers=admin_headers,
+        )
+        assert unlock_term_resp.status_code == 200, unlock_term_resp.text
+        assert unlock_term_resp.json()["data"]["is_locked_for_scoring"] is False
+
+        # Published results stay frozen even once the term itself is unlocked.
+        recalc_after_unlock = await client.post(
+            "/api/v1/computation/calculate-term",
+            json={"academic_term_id": term_id, "class_group_id": class_group_id},
+            headers=admin_headers,
+        )
+        assert recalc_after_unlock.status_code == 409, recalc_after_unlock.text

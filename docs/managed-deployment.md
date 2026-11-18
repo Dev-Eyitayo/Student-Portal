@@ -169,6 +169,17 @@ REDIS_URL=<Upstash rediss URL>
   admin database credentials to the web or worker processes.
 - Rotate database and Redis credentials after any suspected exposure.
 
+Branding uploads (M8, **LIVE**) use `STORAGE_PROVIDER=local` for
+the pilot. If the API runs in more than one instance or container, the local
+upload directory must be a shared, persistent volume; otherwise wait for the
+S3/Cloudinary providers. Assets are namespaced by school slug/id, so a school
+must never be able to read another school's files.
+
+Custom domains are **PLANNED post-pilot** and are not supported in the pilot.
+Until then, keep `CORS_ORIGINS` explicit (`APP_URL`), do not add wildcard origins
+or `Host`-header tenant selection for authenticated APIs, and terminate HTTPS at
+the proxy so refresh cookies stay secure.
+
 ---
 
 ## 4. Deployment checklist
@@ -185,6 +196,8 @@ REDIS_URL=<Upstash rediss URL>
 9. Test logout followed by refresh: both access and refresh tokens must be
    rejected.
 10. Configure Neon backups/branching and Upstash persistence/eviction alerts.
+11. Confirm `STORAGE_PROVIDER=local` points to a persistent shared directory and that school A cannot read school B's branding assets.
+12. Keep custom domains disabled; verify there is no `Host`-header tenant routing and no wildcard CORS.
 
 ---
 
@@ -211,3 +224,5 @@ is the immutable bootstrap superuser and would bypass RLS.
 | SSL connection closed / stale connection | Neon compute suspend or idle connection reuse | Keep `pool_pre_ping=True` and `pool_recycle=300`; use SQLAlchemy ≥ 2.0.33 |
 | `SSL: CERTIFICATE_VERIFY_FAILED` (Redis) | Missing TLS parameters | Use `rediss://...?ssl_cert_reqs=required` |
 | Token revocation works on one instance only | Redis down or not shared | Check `REDIS_URL` and Upstash connectivity; the in-memory fallback is per-process |
+| Branding asset returns 404 for another school | Expected tenant isolation, or wrong `{school_slug}/branding/` namespace | Verify the authenticated tenant matches the asset namespace; do not share paths across schools |
+| CORS errors after adding a custom domain | Domain not verified; dynamic CORS is post-pilot | Keep explicit `CORS_ORIGINS`; custom domains are PLANNED, not supported in the pilot |

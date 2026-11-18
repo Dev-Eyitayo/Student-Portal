@@ -112,8 +112,8 @@ Never write business logic or database writes inside FastAPI route handlers. Rou
 ### 5.2 API Route & Response Contract
 `ARCHITECTURE.md` §6.2 is the single canonical endpoint catalog. All new routes must:
 - Use `/api/v1/<domain>/<plural-resource>[/<id>][/<subresource>]` with an approved domain (`identity`, `structure`, `students`, `enrollments`, `subjects`, `class-subjects`, `assessments`, `computation`, `publication`, `results`, `audit`).
-- Use plural, kebab-case resource names and named identifiers such as `{student_id}`.
-- Reserve verbs for workflow or bulk actions (`submit`, `approve`, `unlock`, `publish-term`, `bulk-import`, `bulk-entry`, `bulk`).
+- Use plural, kebab-case resource names and named identifiers such as `{student_id}`. Exception: a singleton subresource that exists exactly once per tenant or caller (`identity/me`, `schools/{school_id}/configuration`, `schools/{school_id}/setup`, `computation/broadsheet/{class_group_id}`) stays singular rather than being pluralized into a fake collection.
+- Reserve verbs for workflow or bulk actions (`submit`, `approve`, `unlock`, `apply`, `publish-term`, `calculate-term`, `bulk-import`, `bulk-entry`, `bulk`).
 - Never add legacy flat aliases.
 - Return every success as `{"success": true, "data": ...}`.
 - Return every failure as `{"error": {"code", "message", "details", "path"}}` with a human-friendly `message`.

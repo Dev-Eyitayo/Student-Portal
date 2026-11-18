@@ -22,14 +22,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.core.dependencies import (
+    build_audit_context,
     get_current_authenticated_user,
     get_db,
     get_tenant_db,
     oauth2_scheme,
+    require_school_id,
 )
 from app.core.permissions import require_permission
 from app.core.redis import get_redis
 from app.core.security import decode_access_token, revoke_access_token
+from app.core.storage import storage_service
+from app.modules.audit.services import AuditContext
 from app.modules.common.models import generate_uuid7
 from app.modules.common.schemas import MessageResponse, SuccessResponse
 from app.modules.identity import services
@@ -37,14 +41,21 @@ from app.modules.identity.bulk_import import MAX_STAFF_IMPORT_BYTES
 from app.modules.identity.models import User
 from app.modules.identity.schemas import (
     AcceptInvitationRequest,
+    BrandingAssetType,
+    BrandingUploadResponse,
     DeactivateUserResponse,
     LoginRequest,
     LogoutRequest,
     MeResponse,
+    OnboardingTemplateResponse,
     PermissionGrantRequest,
     RefreshTokenRequest,
+    SchoolConfigurationResponse,
+    SchoolConfigurationUpdateRequest,
     SchoolCreateRequest,
     SchoolResponse,
+    SchoolSetupResponse,
+    SchoolSetupUpdateRequest,
     StaffBulkImportAcceptedResponse,
     StaffBulkImportStatusResponse,
     StaffInviteRequest,
@@ -106,6 +117,143 @@ async def register_school(
     """
     school, _ = await services.register_school_with_admin(db, req, _client_ip(request))
     return SuccessResponse[SchoolResponse](data=SchoolResponse.model_validate(school))
+
+
+@router.get(
+    "/onboarding/templates",
+    response_model=SuccessResponse[list[OnboardingTemplateResponse]],
+)
+async def get_onboarding_templates():
+    return SuccessResponse[list[OnboardingTemplateResponse]](
+        data=services.get_onboarding_templates()
+    )
+
+
+@router.get(
+    "/schools/{school_id}/setup",
+    response_model=SuccessResponse[SchoolSetupResponse],
+    dependencies=[Depends(require_permission("configuration:manage"))],
+)
+async def get_school_setup(
+    school_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    if school_id != require_school_id(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="We couldn't find this school's setup details. Please check that you're signed in to the right school.",
+        )
+    return SuccessResponse[SchoolSetupResponse](data=await services.get_school_setup(db, school_id))
+
+
+@router.patch(
+    "/schools/{school_id}/setup",
+    response_model=SuccessResponse[SchoolSetupResponse],
+    dependencies=[Depends(require_permission("configuration:manage"))],
+)
+async def update_school_setup(
+    school_id: UUID,
+    req: SchoolSetupUpdateRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    if school_id != require_school_id(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="We couldn't find this school's setup details. Please check that you're signed in to the right school.",
+        )
+    result = await services.update_school_setup(
+        db, school_id, req, build_audit_context(request, current_user)
+    )
+    return SuccessResponse[SchoolSetupResponse](data=result)
+
+
+@router.post(
+    "/schools/{school_id}/branding/uploads",
+    response_model=SuccessResponse[BrandingUploadResponse],
+    dependencies=[Depends(require_permission("configuration:manage"))],
+)
+async def upload_school_branding_asset(
+    school_id: UUID,
+    asset_type: BrandingAssetType,
+    request: Request,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    if school_id != require_school_id(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="We couldn't find this school's branding settings. Please check that you're signed in to the right school.",
+        )
+    content = await file.read()
+    storage_path = await services.save_school_branding_asset(
+        db,
+        school_id,
+        asset_type,
+        file.content_type or "",
+        content,
+        build_audit_context(request, current_user),
+    )
+    return SuccessResponse[BrandingUploadResponse](
+        data=BrandingUploadResponse(
+            asset_type=asset_type,
+            storage_path=storage_path,
+            url=storage_service.public_url(storage_path) or storage_path,
+        )
+    )
+
+
+@router.get(
+    "/schools/{school_id}/configuration",
+    response_model=SuccessResponse[SchoolConfigurationResponse],
+    dependencies=[Depends(require_permission("configuration:manage"))],
+)
+async def get_configuration(
+    school_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    if school_id != require_school_id(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="We couldn't find this school configuration. Please check that you're signed in to the right school.",
+        )
+    config = await services.get_school_configuration(db, school_id)
+    return SuccessResponse[SchoolConfigurationResponse](
+        data=SchoolConfigurationResponse.model_validate(config)
+    )
+
+
+@router.patch(
+    "/schools/{school_id}/configuration",
+    response_model=SuccessResponse[SchoolConfigurationResponse],
+    dependencies=[Depends(require_permission("configuration:manage"))],
+)
+async def update_configuration(
+    school_id: UUID,
+    req: SchoolConfigurationUpdateRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    resolved_school_id = require_school_id(current_user)
+    if school_id != resolved_school_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="We couldn't find this school configuration. Please check that you're signed in to the right school.",
+        )
+    audit = AuditContext(
+        school_id=resolved_school_id,
+        actor_id=current_user.id,
+        actor_ip=_client_ip(request),
+    )
+    config = await services.update_school_configuration(db, school_id, req, current_user, audit)
+    return SuccessResponse[SchoolConfigurationResponse](
+        data=SchoolConfigurationResponse.model_validate(config)
+    )
 
 
 @router.post("/login", response_model=SuccessResponse[TokenResponse])

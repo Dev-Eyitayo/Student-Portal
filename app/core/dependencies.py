@@ -2,7 +2,7 @@ from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,7 @@ from app.core.database import (
     set_tenant_scope,
 )
 from app.core.security import decode_access_token, is_token_revoked
+from app.modules.audit.services import AuditContext
 from app.modules.identity.models import User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/identity/login")
@@ -99,3 +100,22 @@ async def get_tenant_db(
             yield session
     finally:
         reset_tenant_scope(tokens)
+
+
+def require_school_id(current_user: User) -> UUID:
+    """Raises 403 if the user has no school_id (e.g. a SUPER_ADMIN acting outside tenant scope)."""
+    if current_user.school_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account is not linked to an active school. Please contact your school administrator.",
+        )
+    return current_user.school_id
+
+
+def build_audit_context(request: Request, current_user: User) -> AuditContext:
+    client_ip = request.client.host if request.client else "0.0.0.0"
+    return AuditContext(
+        school_id=require_school_id(current_user),
+        actor_id=current_user.id,
+        actor_ip=client_ip,
+    )
