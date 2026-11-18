@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import Select, func, select
@@ -65,6 +66,27 @@ async def _commit_or_conflict(
         raise ConflictException(message=message, code=code) from exc
 
 
+def _build_assessment_definition(
+    school_id: UUID,
+    term_id: UUID,
+    class_subject_id: UUID,
+    code: str,
+    spec: dict[str, Any],
+    order: int,
+) -> AssessmentDefinition:
+    return AssessmentDefinition(
+        school_id=school_id,
+        academic_term_id=term_id,
+        class_subject_id=class_subject_id,
+        name=spec["name"],
+        code=code,
+        assessment_type=ASSESSMENT_TYPE_BY_CODE.get(code, "CONTINUOUS_ASSESSMENT"),
+        max_score=Decimal(str(spec["max_score"])),
+        weight_percentage=Decimal(str(spec["weight_percentage"])),
+        sequence_order=order,
+    )
+
+
 async def seed_assessment_definitions_for_class_subject(
     db: AsyncSession,
     school_id: UUID,
@@ -100,16 +122,71 @@ async def seed_assessment_definitions_for_class_subject(
             )
             if (await db.execute(existing_stmt)).scalar_one_or_none():
                 continue
-            definition = AssessmentDefinition(
-                school_id=school_id,
-                academic_term_id=term.id,
-                class_subject_id=class_subject.id,
-                name=spec["name"],
-                code=code,
-                assessment_type=ASSESSMENT_TYPE_BY_CODE.get(code, "CONTINUOUS_ASSESSMENT"),
-                max_score=Decimal(str(spec["max_score"])),
-                weight_percentage=Decimal(str(spec["weight_percentage"])),
-                sequence_order=order,
+            definition = _build_assessment_definition(
+                school_id, term.id, class_subject.id, code, spec, order
+            )
+            db.add(definition)
+            created.append(definition)
+
+    if created:
+        await db.flush()
+    return created
+
+
+async def seed_assessment_definitions_for_term(
+    db: AsyncSession,
+    school_id: UUID,
+    term: AcademicTerm,
+) -> list[AssessmentDefinition]:
+    """Seeds default AssessmentDefinition rows for all active ClassSubjects in a
+    session when a new term is created (e.g., after applying a structure template).
+    """
+    config_stmt = select(SchoolConfiguration).where(SchoolConfiguration.school_id == school_id)
+    config = (await db.execute(config_stmt)).scalar_one_or_none()
+    if not config:
+        return []
+
+    class_subject_ids = (
+        (
+            await db.execute(
+                select(ClassSubject.id)
+                .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+                .where(
+                    ClassSubject.school_id == school_id,
+                    SubjectOffering.academic_session_id == term.academic_session_id,
+                    ClassSubject.deleted_at.is_(None),
+                    SubjectOffering.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not class_subject_ids:
+        return []
+
+    existing_pairs = set(
+        (
+            await db.execute(
+                select(
+                    AssessmentDefinition.class_subject_id,
+                    AssessmentDefinition.code,
+                ).where(
+                    AssessmentDefinition.school_id == school_id,
+                    AssessmentDefinition.academic_term_id == term.id,
+                    AssessmentDefinition.class_subject_id.in_(class_subject_ids),
+                )
+            )
+        ).all()
+    )
+
+    created: list[AssessmentDefinition] = []
+    for class_subject_id in class_subject_ids:
+        for order, (code, spec) in enumerate(config.assessment_weight_schema.items(), start=1):
+            if (class_subject_id, code) in existing_pairs:
+                continue
+            definition = _build_assessment_definition(
+                school_id, term.id, class_subject_id, code, spec, order
             )
             db.add(definition)
             created.append(definition)

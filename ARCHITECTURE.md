@@ -1,9 +1,10 @@
 # Software Architecture Plan: Multi-Tenant Academic Records Management Platform
 **Target Pilot:** Olivet Baptist High School, Oyo, Nigeria  
-**Platform Scope:** Multi-School Academic SaaS (Junior & Senior Secondary Schools)  
+**Platform Scope:** Multi-School Academic SaaS (Primary, Junior & Senior Secondary Schools)
 **Document Version:** 2.1.0-FASTAPI-SPEC
-**Status:** Approved for Implementation Architecture  
+**Status:** Approved for Implementation Architecture
 **M8 Status:** LIVE (Guided Onboarding, Defaults, Branding & Structure Templates; custom domains remain post-pilot)
+**M9 Status:** LIVE (Nigerian Primary Basic 1–6 Support; school type, templates, defaults, and report variant)
 **Architect:** Senior Software Architect (SaaS, Security & Academic Systems)  
 **Primary Tech Stack:** FastAPI, Pydantic v2, SQLAlchemy 2.0 (Async), Alembic, PostgreSQL 16 (RLS), Celery, Redis
 
@@ -76,12 +77,18 @@
 14. [Implementation Roadmap & Milestones](#14-implementation-roadmap--milestones)
 15. [Architectural Challenges, Trade-offs & Deep-Dive Critique](#15-architectural-challenges-trade-offs--deep-dive-critique)
 16. [Open Architectural Questions (Product Owner Sign-Off Required)](#16-open-architectural-questions-product-owner-sign-off-required)
+17. [M9: Nigerian Primary Basic 1-6 Support (LIVE)](#17-m9-nigerian-primary-basic-1-6-support-live)
+    - 17.1 Scope decisions
+    - 17.2 Data model & migration
+    - 17.3 Endpoint additions
+    - 17.4 Tasks
+    - 17.5 Definition of Done
 
 ---
 
 ## 1. Executive Summary & Architectural Tenets
 
-This document specifies the technical architecture for a high-performance, multi-tenant academic records management platform designed for secondary institutions in Nigeria and internationally. The pilot deployment is **Olivet Baptist High School, Oyo, Nigeria**, a public secondary institution with deep-rooted traditions (e.g., class arms derived from institution letters `O`, `L`, `I`, `V`, `E`, `T`, `B`, `H`, `S`, `Y`, and department-specific arm distributions).
+This document specifies the technical architecture for a high-performance, multi-tenant academic records management platform designed for primary and secondary institutions in Nigeria and internationally. The pilot deployment is **Olivet Baptist High School, Oyo, Nigeria**, a public secondary institution with deep-rooted traditions (e.g., class arms derived from institution letters `O`, `L`, `I`, `V`, `E`, `T`, `B`, `H`, `S`, `Y`, and department-specific arm distributions). M9 adds Nigerian three-term primary support for Basic 1–6 (LIVE; §17) without changing the live secondary workflows.
 
 The platform is engineered around **FastAPI**, **Pydantic v2**, and **SQLAlchemy 2.0 (Async)**, providing strict schema guarantees, asynchronous request handling, and clear dependency injection.
 
@@ -97,13 +104,13 @@ The platform is engineered around **FastAPI**, **Pydantic v2**, and **SQLAlchemy
 ## 2. Product Understanding & Scope Boundary
 
 ### 2.1 Problem Statement & Platform Purpose
-Secondary schools frequently struggle with fragmented end-of-term academic processing:
+Primary and secondary schools frequently struggle with fragmented end-of-term academic processing:
 - Manual score entry errors, inconsistent continuous assessment (CA) formulas, and delayed result compilation.
 - Insecure report distribution (transmitting confidential minor records via unencrypted public email attachments or vulnerable web URLs).
-- Inflexible school software that hardcodes rigid British, American, or arbitrary state setups, breaking down when handling public Nigerian school hierarchies (e.g., non-departmental JSS vs. specialized SS arms).
+- Inflexible school software that hardcodes rigid British, American, or arbitrary state setups, breaking down when handling public Nigerian school hierarchies (e.g., non-departmental Basic/JSS vs. specialized SS arms).
 - Lack of auditability when grades are altered post-examination.
 
-The platform provides an authoritative, auditable, and automated system of record for student life-cycles, subject assignments, continuous assessments, examination marks, grade computation, and tamper-resistant digital report card access.
+The platform provides an authoritative, auditable, and automated system of record for pupil/student life-cycles, subject assignments, continuous assessments, examination marks, grade computation, and tamper-resistant digital report card access.
 
 ### 2.2 Actor & Stakeholder Taxonomy
 
@@ -112,9 +119,9 @@ The platform provides an authoritative, auditable, and automated system of recor
 | **Platform Super Administrator** | Global / Platform-wide | School onboarding, global subscription management, platform audit log inspection, template definitions. | Tier 0 (Global System) |
 | **School Principal / Director** | Tenant / School | Final executive approval for term publication, school-wide academic policy setup, staff appointment authorizations. | Tier 1 (Tenant Executive) |
 | **Academic Officer / Vice Principal (Academics)** | Tenant / School | Session/term setups, assessment structure creation, curriculum subject offerings, result review, score unlock approvals. | Tier 2 (Tenant Academic Ops) |
-| **Class Teacher / Form Master** | Class Arm / Section | Class-level attendance tracking, conduct/psychomotor comments, class-wide performance review, broadsheet verification. | Tier 3 (Class Scoped) |
-| **Subject Teacher** | Class-Subject Assignment | Score entry for assigned subjects and class arms, draft submission, correction request initiation. | Tier 4 (Subject-Arm Scoped) |
-| **Parent / Guardian / Student** | Individual Record | Viewing and downloading cryptographically verified, time-limited, signed digital report cards via secure web links. | Tier 5 (Consumer Token) |
+| **Class Teacher / Form Master / Homeroom Teacher** | Class Arm / Section (primary or secondary) | Class-level attendance tracking, conduct/psychomotor comments, class-wide performance review, broadsheet verification. In primary schools (M9, LIVE) the homeroom/class teacher supplies the `class_teacher_comment`. | Tier 3 (Class Scoped) |
+| **Subject Teacher** | Class-Subject Assignment | Score entry for assigned subjects and class arms, draft submission, correction request initiation. Primary subject teachers work only with compulsory core subjects. | Tier 4 (Subject-Arm Scoped) |
+| **Parent / Guardian / Student / Pupil** | Individual Record | Viewing and downloading cryptographically verified, time-limited, signed digital report cards via secure web links. `Pupil` is the primary-school UI label for a `Student` record (M9, LIVE). | Tier 5 (Consumer Token) |
 
 ### 2.3 MVP vs. Post-MVP Capability Matrix
 
@@ -151,12 +158,13 @@ graph TD
 > **Milestone numbering note:** the `M1`–`M11` labels above are MVP *capability
 > tags* used for scope planning; they are distinct from the delivery milestone
 > numbers in §14 and `BACKEND_DEV_PLAN.md`. The delivery sequence currently ends
-> at M8. **M8 (Guided Onboarding, Defaults, Branding & Structure Templates) is
-> LIVE** and specified in §6.4. `P7` (school custom subdomains) remains
-> post-pilot and PLANNED.
+> at M9: **M8 (Guided Onboarding, Defaults, Branding & Structure Templates) is
+> LIVE** and specified in §6.4; **M9 (Nigerian Primary Basic 1–6 Support) is
+> LIVE** and specified in §17. `P7` (school custom subdomains) remains post-pilot
+> and PLANNED.
 
 ### 2.4 Fundamental Architectural Assumptions
-1. **Academic Session Model:** An Academic Session corresponds to an academic year (e.g., `2024/2025`) and is divided into distinct sequential terms (typically 3 terms: `First Term`, `Second Term`, `Third Term`).
+1. **Academic Session Model:** An Academic Session corresponds to an academic year (e.g., `2024/2025`) and is divided into distinct sequential terms (typically 3 terms: `First Term`, `Second Term`, `Third Term`). Nigerian primary schools (M9, LIVE) use the same three-term model and the existing term computation; no generic multi-term refactor is in scope.
 2. **Student Identity Permanence:** A student maintains one permanent identifier (`admission_number`) within a school regardless of promotions, department changes, or disciplinary leaves.
 3. **Report Card Delivery Model:** For the MVP, students/parents will **not** require credentialed user accounts. Results will be accessed via high-entropy, cryptographically signed, expiring URLs dispatched to verified guardian email addresses, protected by an optional secondary proof of identity (student birth date or PIN).
 4. **Internet Connectivity & Offline Constraints:** While school operations require cloud synchronization, score entry forms must support resilient front-end caching (local session preservation) to prevent data loss during erratic power or network drops typical in developing regions.
@@ -219,12 +227,12 @@ flowchart LR
 
 - **School (Tenant Root):** Represents the educational institution. Top-level boundary for multi-tenancy.
 - **AcademicSession & AcademicTerm:** The temporal boundary of academic activity. Terms are child records of sessions.
-- **AcademicLevel:** The educational progression tier (e.g., "JSS 1", "SS 3", "Grade 10"). Holds a display order and category (Junior vs. Senior).
-- **Department:** Specialization cluster within senior secondary education (e.g., "Science", "Commercial", "Arts"). Completely optional at the school and level tier.
+- **AcademicLevel:** The educational progression tier (e.g., "Basic 1", "JSS 1", "SS 3", "Grade 10"). Holds a display order and category (`PRIMARY`, `JUNIOR_SECONDARY`, or `SENIOR_SECONDARY`).
+- **Department:** Specialization cluster within senior secondary education (e.g., "Science", "Commercial", "Arts"). Completely optional at the school and level tier; primary (Basic 1–6) and junior secondary levels have `department_id = NULL`.
 - **ClassArm:** Canonical arm designator (e.g., "O", "A", "Gold").
-- **ClassGroup (The Section Aggregate):** The physical or organizational cohort of students for a specific academic session. Formed by the tuple `(School, AcademicSession, AcademicLevel, Department [Optional], ClassArm)`. Example: *"SS1 Science O - 2024/2025"*.
+- **ClassGroup (The Section Aggregate):** The physical or organizational cohort of students for a specific academic session. Formed by the tuple `(School, AcademicSession, AcademicLevel, Department [Optional], ClassArm)`. Examples: *"SS1 Science O - 2024/2025"* and *"Basic 1 A - 2026/2027"* (M9, LIVE).
 - **Student & StudentEnrollment:** `Student` holds demographic, admission, and guardian data. `StudentEnrollment` binds a `Student` to a `ClassGroup` within an `AcademicSession`.
-- **Subject & SubjectOffering:** `Subject` is the catalog item (e.g., "Mathematics", "Catering Craft Practice"). `SubjectOffering` defines a subject taught within a specific `AcademicSession` and `AcademicLevel` (optionally filtered by `Department`, or `department_id = NULL` for universal core or junior levels).
+- **Subject & SubjectOffering:** `Subject` is the catalog item (e.g., "Mathematics", "Catering Craft Practice"). `SubjectOffering` defines a subject taught within a specific `AcademicSession` and `AcademicLevel`, optionally filtered by `Department`. `department_id = NULL` means a universal core offering and is mandatory for primary and junior-secondary levels; senior-secondary offerings may be department-specific.
 - **ClassSubject & TeacherAssignment:** `ClassSubject` links a `SubjectOffering` to a concrete `ClassGroup`. `TeacherAssignment` designates which teacher instructs that `ClassSubject`, with assignment timestamps and active status.
 - **StudentSubjectRegistration:** The explicit link between a student's session enrollment (`StudentEnrollment`) and a specific `ClassSubject`. Categorized as `COMPULSORY_CORE`, `DEPARTMENT_CORE`, `TRADE_ELECTIVE`, or `FREE_ELECTIVE`. Ensures teachers of elective/trade subjects (e.g., Catering Craft) only see and grade students who registered for that subject, and enables student-specific total obtainable calculations on report cards.
 - **AssessmentDefinition:** Configures assessment components for a subject or school-wide term (e.g., "Test 1", max 10; "Test 2", max 10; "Assignments/Attendance", max 10; "Terminal Exam", max 70 for Olivet).
@@ -408,6 +416,11 @@ CREATE TABLE schools (
 CREATE INDEX idx_schools_slug ON schools(slug) WHERE deleted_at IS NULL;
 ```
 
+> **M9 (LIVE):** `school_type VARCHAR(16) NOT NULL DEFAULT 'SECONDARY'` with
+> `CHECK (school_type IN ('PRIMARY', 'SECONDARY'))` is applied by
+> `b1c4d7e9a2f0_m9_primary_school_support.py`; existing tenants stay
+> `SECONDARY`. Seeding rules are specified in §17.2.
+
 ##### `school_configurations`
 ```sql
 CREATE TABLE school_configurations (
@@ -498,6 +511,10 @@ CREATE INDEX idx_user_permission_grants_lookup ON user_permission_grants(user_id
 
 Uniqueness for soft-retirable structure records is enforced with partial unique indexes scoped to rows where `deleted_at IS NULL`.
 
+> **M9 (LIVE):** `academic_levels.category` supports `PRIMARY`; primary and
+> junior-secondary `ClassGroup`/`SubjectOffering` rows keep
+> `department_id = NULL`. The migration is specified in §17.2.
+
 ##### `academic_sessions` & `academic_terms`
 ```sql
 CREATE TABLE academic_sessions (
@@ -541,14 +558,14 @@ CREATE UNIQUE INDEX uq_current_term_per_school ON academic_terms(school_id) WHER
 CREATE TABLE academic_levels (
     id UUID PRIMARY KEY, -- application-generated UUIDv7
     school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
-    name VARCHAR(64) NOT NULL, -- e.g., 'JSS 1', 'SS 1'
-    code VARCHAR(16) NOT NULL, -- e.g., 'JSS1', 'SS1'
+    name VARCHAR(64) NOT NULL, -- e.g., 'Basic 1', 'JSS 1', 'SS 1'
+    code VARCHAR(16) NOT NULL, -- e.g., 'BASIC1', 'JSS1', 'SS1'
     level_order SMALLINT NOT NULL, -- Sequence: 1, 2, 3, 4, 5, 6
-    category VARCHAR(32) NOT NULL, -- 'JUNIOR_SECONDARY', 'SENIOR_SECONDARY'
+    category VARCHAR(32) NOT NULL, -- 'PRIMARY', 'JUNIOR_SECONDARY', 'SENIOR_SECONDARY' (M9 LIVE)
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     deleted_at TIMESTAMPTZ NULL,
-    CONSTRAINT chk_level_category CHECK (category IN ('JUNIOR_SECONDARY', 'SENIOR_SECONDARY'))
+    CONSTRAINT chk_level_category CHECK (category IN ('PRIMARY', 'JUNIOR_SECONDARY', 'SENIOR_SECONDARY'))
 );
 CREATE UNIQUE INDEX uq_school_level_code_active ON academic_levels(school_id, code) WHERE deleted_at IS NULL;
 CREATE UNIQUE INDEX uq_school_level_order_active ON academic_levels(school_id, level_order) WHERE deleted_at IS NULL;
@@ -582,10 +599,10 @@ CREATE TABLE class_groups (
     school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
     academic_session_id UUID NOT NULL REFERENCES academic_sessions(id) ON DELETE RESTRICT,
     academic_level_id UUID NOT NULL REFERENCES academic_levels(id) ON DELETE RESTRICT,
-    department_id UUID REFERENCES departments(id) ON DELETE RESTRICT, -- NULLABLE for JSS or non-departmental schools
+    department_id UUID REFERENCES departments(id) ON DELETE RESTRICT, -- NULLABLE / required NULL for primary (M9) and JSS or non-departmental schools
     class_arm_id UUID NOT NULL REFERENCES class_arms(id) ON DELETE RESTRICT,
     class_teacher_id UUID REFERENCES users(id) ON DELETE SET NULL,
-    display_name VARCHAR(128) NOT NULL, -- e.g., 'SS1 Science O' or 'JSS1 A'
+    display_name VARCHAR(128) NOT NULL, -- e.g., 'SS1 Science O', 'JSS1 A', or 'Basic 1 A' (M9)
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     deleted_at TIMESTAMPTZ NULL
@@ -683,7 +700,7 @@ CREATE TABLE subject_offerings (
     subject_id UUID NOT NULL REFERENCES subjects(id) ON DELETE RESTRICT,
     academic_session_id UUID NOT NULL REFERENCES academic_sessions(id) ON DELETE CASCADE,
     academic_level_id UUID NOT NULL REFERENCES academic_levels(id) ON DELETE RESTRICT,
-    department_id UUID REFERENCES departments(id) ON DELETE RESTRICT, -- Nullable: applies to all depts or junior levels if null
+    department_id UUID REFERENCES departments(id) ON DELETE RESTRICT, -- Nullable: universal core; must be NULL for primary (M9) and junior levels
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     deleted_at TIMESTAMPTZ NULL
@@ -1127,7 +1144,7 @@ Every success response must use `SuccessResponse[T]` from `app/modules/common/sc
 
 ### 6.2 Endpoint Catalog by Domain
 
-This catalog is authoritative. `BACKEND_DEV_PLAN.md`, module routers, tests, and frontend clients must match these paths exactly. Rows marked **(LIVE — M8)** are implemented contracts; custom-domain rows remain explicitly post-pilot.
+This catalog is authoritative. `BACKEND_DEV_PLAN.md`, module routers, tests, and frontend clients must match these paths exactly. Rows marked **(LIVE — M8)** or **(LIVE — M9)** are implemented contracts; custom-domain rows remain explicitly post-pilot.
 
 | Domain | Method | Canonical Path | Description | Permitted Roles |
 |---|---|---|---|---|
@@ -1160,7 +1177,9 @@ This catalog is authoritative. `BACKEND_DEV_PLAN.md`, module routers, tests, and
 | **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/arms/{arm_id}` | Read, update, or retire a class arm | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Structure** | `GET`, `POST` | `/api/v1/structure/class-groups` | List or instantiate class cohorts | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/class-groups/{class_group_id}` | Read, update, or retire a class group | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
-| **Structure** | `POST` | `/api/v1/structure/templates/apply` | **(LIVE — M8)** Idempotently create selected levels, departments, arms, and optional class groups for a session from a template | `structure:manage` |
+| **Structure** | `POST` | `/api/v1/structure/templates/apply` | **(LIVE — M8/M9)** Idempotently apply a secondary (`olivet_nigeria_jss_ss3`) or primary (`nigeria_primary_basic1_6`) structure template for a session via `template_type = PRIMARY\|SECONDARY` | `structure:manage` |
+| **Identity** | `POST` | `/api/v1/identity/schools` | **(LIVE — M9)** Accept `school_type = PRIMARY\|SECONDARY` and seed the matching defaults/report template | `SUPER_ADMIN` |
+| **Identity** | `GET`, `PATCH` | `/api/v1/identity/schools/{school_id}/setup` | **(LIVE — M9)** Read/save `school_type` and the selected primary or secondary template | `SCHOOL_ADMIN` |
 | **Students** | `GET`, `POST` | `/api/v1/students` | List or register students | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Students** | `GET`, `PATCH` | `/api/v1/students/{student_id}` | Read or update a student | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Students** | `POST` | `/api/v1/students/{student_id}/status` | Transition student lifecycle status with an audit note | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
@@ -1339,6 +1358,28 @@ class BulkScoreEntryRequest(BaseModel):
 > These are local paths during the pilot; generated PDFs are never stored
 > server-side.
 
+> **M9 primary variant (LIVE):** the same payload shape is used for primary
+> schools, with `student.department = null`, `student.academic_level = "Basic 4"`,
+> `class_group = "Basic 4 A"`, letter grades `A`–`F`, and
+> `summary.class_teacher_comment` (the homeroom/class teacher comment) in place of
+> a secondary form-master comment. Illustration of the changed fields only:
+> ```json
+> {
+>   "student": {
+>     "academic_level": "Basic 4",
+>     "department": null,
+>     "class_group": "Basic 4 A"
+>   },
+>   "summary": {
+>     "class_teacher_comment": "A diligent pupil who reads widely and helps classmates."
+>   },
+>   "subject_breakdown": [
+>     { "subject_code": "MTH", "grade": "B", "remark": "VERY GOOD" }
+>   ]
+> }
+> ```
+> Frontends should render this variant for primary schools.
+
 ### 6.4 Guided Onboarding, Defaults & Structure Templates (M8 — LIVE)
 
 **Status: LIVE.** M8 adds an optional guided setup
@@ -1380,6 +1421,14 @@ uploads branding assets before continuing into normal staff workflows.
   a session. Re-applying the same template must not create duplicates; use the
   active-row partial unique indexes (§4.3.2) to detect existing records. Junior
   levels keep `department_id = NULL`.
+
+> **M9 extension (LIVE):** `GET /api/v1/identity/onboarding/templates` returns
+> both secondary (`olivet_nigeria_default`) and primary
+> (`nigeria_primary_default`) templates; setup carries `school_type`. Changing
+> school type without explicit config reseeds the matching defaults. The primary
+> template (`nigeria_primary_basic1_6`) creates Basic 1–6 levels, arms A–D, and
+> compulsory core subject offerings/class subjects with `department_id = NULL`.
+> See §17.
 
 #### 6.4.3 Branding storage
 
@@ -1470,6 +1519,19 @@ The engine implements dynamic grading lookup against a JSON schema stored per sc
 | 0.00 | 39.99 | **F9** | 0.00 | FAIL |
 
 *Precision Rule:* All raw scores and percentage summations are calculated using high-precision `Decimal` objects and rounded to two decimal places using the `ROUND_HALF_UP` financial rounding standard.
+
+#### Nigerian Primary Default Grading Scale (M9 — LIVE)
+
+| Lower Bound | Upper Bound | Grade | Grade Point | Standard Remark |
+|---|---|---|---|---|
+| 70.00 | 100.00 | **A** | 0.00 | EXCELLENT |
+| 60.00 | 69.99 | **B** | 0.00 | VERY GOOD |
+| 50.00 | 59.99 | **C** | 0.00 | GOOD |
+| 45.00 | 49.99 | **D** | 0.00 | PASS |
+| 40.00 | 44.99 | **E** | 0.00 | FAIR |
+| 0.00 | 39.99 | **F** | 0.00 | FAIL |
+
+Primary grade points are deliberately `0.00` for every band; primary reports use letter grades and remarks, not a grade-point average. This scale is the `PRIMARY` seed default in `school_configurations.grading_scale_schema` and is frozen into published snapshots like any other scale.
 
 ### 7.3 Ranking Algorithms, Subject Averages & Tie-Breakers
 
@@ -1950,6 +2012,19 @@ When a teacher departs an institution or is transferred, the `deactivate_teacher
 - An existing active term’s assessment weights cannot be altered once score entry has commenced (`DRAFT` scores > 0).
 - When a new academic session is created, the system clones the configuration of the previous session into a new versioned schema row, allowing the school administrator to adjust parameters without affecting past records.
 
+### 11.4 Nigerian Primary School Blueprint (M9 — LIVE)
+
+Seed defaults for Nigerian three-term primary schools. These are template values, not hardcoded business rules; the existing configuration/template routes remain authoritative.
+
+- **Levels:** `Basic 1`–`Basic 6`, codes `BASIC1`–`BASIC6`, orders 1–6, category `PRIMARY`.
+- **Arms:** `A`, `B`, `C`, `D`.
+- **Departments:** none. Primary class groups, subject offerings, and permission scopes use `department_id = NULL`; use `ACADEMIC_LEVEL` or `CLASS_GROUP` scopes where delegation is needed.
+- **Subjects:** all primary subjects are compulsory core (`is_elective = FALSE`, `is_trade_subject = FALSE`, registration category `COMPULSORY_CORE`). No electives, trade subjects, or elective-registration steps. The live primary template (`nigeria_primary_basic1_6`) seeds 10 configurable core subjects: English Language (`ENG`), Mathematics (`MTH`), Basic Science (`BSC`), Social Studies (`SOS`), Civic Education (`CIV`), Religious and Moral Education (`RME`), Physical and Health Education (`PHE`), Creative Arts (`CRA`), Computer Studies (`CST`), and Nigerian Language (`NLG`).
+- **Assessment defaults:** `TEST1` 10, `TEST2` 10, `ASSIGN` 10, `EXAM` 70 — 30% continuous assessment / 70% terminal examination.
+- **Grading default:** the primary `A`–`F` scale in §7.2 (grade point `0.00`).
+- **Annual rules:** the same three terms with equal weights (1/3 each); `>= 50%` → `PROMOTED`, `40–49.99%` → `PROMOTED_ON_TRIAL`, `< 40%` → `REPEATING`. Reuse the current three-term computation; no generic multi-term refactor in M9.
+- **Report template id:** `default_primary_v1`.
+
 ---
 
 ## 12. Testing & Quality Assurance Strategy
@@ -2067,8 +2142,10 @@ gantt
     Client Report Card Payload & QR Verification :p4_1, after p3_3, 10d
     Magic Link Distribution & Token Auth         :p4_2, after p4_1, 8d
     SQLAdmin Setup & Pilot Simulation at Olivet  :p4_3, after p4_2, 14d
-    section Phase 5: Guided Onboarding (PLANNED)
+    section Phase 5: Guided Onboarding (LIVE - M8)
     Guided Onboarding, Defaults & Branding       :p5_1, after p4_3, 10d
+    section Phase 6: Nigerian Primary Support (LIVE - M9)
+    Primary Basic 1-6 defaults, templates & tests:p6_1, after p5_1, 10d
 ```
 
 ### Detailed Phase Deliverables & Acceptance Criteria
@@ -2092,6 +2169,10 @@ gantt
 #### Phase 5: Guided Onboarding, Defaults, Branding & Structure Templates (M8 — LIVE)
 - **Deliverables:** Public default-template catalog, aggregate admin setup read/save, tenant-isolated local branding uploads, and idempotent structure template apply.
 - **Acceptance Criteria:** A new school can review defaults, save its configuration, optionally apply a structure template twice without duplicates, and upload branding that only its own tenant can read. Custom domains remain out of scope.
+
+#### Phase 6: Nigerian Primary Basic 1–6 Support (M9 — LIVE)
+- **Deliverables:** `school_type` plus `PRIMARY` level category, primary defaults/templates, onboarding template choice, and a primary structure/subject template that creates core offerings and class subjects.
+- **Acceptance Criteria:** See §17.5: no departments/electives/trades, idempotent template apply, primary grading/assessment/annual rules verified, and cross-tenant isolation preserved.
 
 ---
 
@@ -2155,6 +2236,86 @@ All core architectural questions have been formally reviewed and confirmed:
    - *Custom domains are post-pilot/PLANNED:* documented in §6.4.4 only; no custom-domain endpoints ship for the pilot.
    - *Branding uploads are included in M8:* local storage for the pilot, with S3/Cloudinary as later providers behind the existing `StorageService` abstraction. Assets are tenant-namespaced and PDFs are not stored server-side.
    - *Catalog vs. setup access:* the default-template catalog is public; school-specific setup read/save, branding uploads, and template application are admin-authenticated.
+
+---
+
+## 17. M9: Nigerian Primary Basic 1-6 Support (LIVE)
+
+**Status: LIVE.** M9 extends the platform to Nigerian three-term primary schools
+(Basic 1–6). It reuses the current term computation, publication snapshots, and
+verification flow unchanged; there is **no generic multi-term refactor** in this
+milestone. All M9 routes, fields, templates, and the primary report variant are
+live.
+
+### 17.1 Scope decisions
+
+- Target: Nigerian primary schools with three terms per session, levels `Basic 1`
+  through `Basic 6` (`PRIMARY`, codes `BASIC1`–`BASIC6`), and arms `A`, `B`, `C`,
+  `D`.
+- No departments anywhere in primary: class groups, subject offerings, and
+  scoped grants use `department_id = NULL` with `ACADEMIC_LEVEL`/`CLASS_GROUP`
+  scopes instead.
+- All primary subjects are compulsory core. No electives, trade subjects, or
+  `student_subject_registrations` choices for `TRADE_ELECTIVE`/`FREE_ELECTIVE`.
+- `Student` remains the data-model name; primary UIs may label the person
+  **pupil**. The class teacher is the **homeroom teacher** and supplies the
+  report's `class_teacher_comment`.
+- Defaults: primary `A`–`F` grading (§7.2), `10/10/10/70` assessment split
+  (30% CA / 70% exam), equal term weights, `50%`/`40%` promotion thresholds
+  (§11.4), and report template `default_primary_v1`.
+
+### 17.2 Data model & migration
+
+- `schools.school_type VARCHAR(16) NOT NULL DEFAULT 'SECONDARY'`, constrained to
+  `PRIMARY | SECONDARY`. Existing tenants are backfilled to `SECONDARY`.
+- `academic_levels.category` extends its check constraint to
+  `PRIMARY | JUNIOR_SECONDARY | SENIOR_SECONDARY`; no new tables are required.
+- Existing nullable `department_id` columns on `class_groups` and
+  `subject_offerings` are reused; M9 services enforce `NULL` for primary rows.
+- Alembic revision `b1c4d7e9a2f0_m9_primary_school_support.py` applies the column,
+  constraint, and backfill. Downgrade restores the previous category constraint
+  and drops `school_type`. Configuration defaults/templates are seeded by a
+  service/seed step, not by DDL.
+
+```sql
+ALTER TABLE schools ADD COLUMN school_type VARCHAR(16) NOT NULL DEFAULT 'SECONDARY';
+ALTER TABLE schools ADD CONSTRAINT chk_schools_school_type
+  CHECK (school_type IN ('PRIMARY', 'SECONDARY'));
+ALTER TABLE academic_levels DROP CONSTRAINT chk_level_category;
+ALTER TABLE academic_levels ADD CONSTRAINT chk_level_category
+  CHECK (category IN ('PRIMARY', 'JUNIOR_SECONDARY', 'SENIOR_SECONDARY'));
+```
+
+### 17.3 Endpoint additions (all LIVE)
+
+No new domains or legacy aliases; M9 extends existing canonical routes.
+
+| Method | Path | M9 change | Permission |
+|---|---|---|---|
+| `GET` | `/api/v1/identity/onboarding/templates` | Public catalog returns a JSON array (`data: [...]`) containing both `olivet_nigeria_default` (`school_type: "SECONDARY"`) and `nigeria_primary_default` (`school_type: "PRIMARY"`). | `ANONYMOUS` |
+| `POST` | `/api/v1/identity/schools` | Accept `school_type = PRIMARY\|SECONDARY`; seed the matching grading/assessment/annual schema and report template (`default_primary_v1` for primary). | `SUPER_ADMIN` |
+| `GET`, `PATCH` | `/api/v1/identity/schools/{school_id}/setup` | Read/save `school_type` and the selected template in the aggregate setup payload. | `SCHOOL_ADMIN` |
+| `POST` | `/api/v1/structure/templates/apply` | Accept `template_type = PRIMARY\|SECONDARY` (or internal `template_id` such as `nigeria_primary_basic1_6`); primary template creates Basic 1–6, arms A–D, no departments, and core subject offerings/class subjects for the session. Idempotent. | `structure:manage` |
+| `GET`, `POST` | `/api/v1/subjects/offerings`, `/api/v1/class-subjects` | Unchanged routes used by the primary template; primary rows have `department_id = NULL` and `is_elective = FALSE`. | `subjects:manage` |
+| `POST` | `/api/v1/computation/calculate-term`, `GET /api/v1/computation/broadsheet/{class_group_id}`, `POST /api/v1/publication/publish-term` | Unchanged reuse of the live three-term flow. (Note: `GET /api/v1/results/verify/{token}` and the rendered report card JSON payload in §6.3.2—where `TermReportCard.teacher_comment` maps to `class_teacher_comment`—are specified for **Milestone 6**, which remains PLANNED/PARTIAL.) | Existing permissions |
+
+### 17.4 Tasks
+
+- [x] **Task 9.1: Documentation and architecture alignment.** Mark M9 LIVE in `ARCHITECTURE.md`, `BACKEND_DEV_PLAN.md`, and the frontend docs; record shipped primary scope, defaults, endpoints, and report variant.
+- [x] **Task 9.2: Schema and migration.** Added `schools.school_type`, extended `academic_levels.category` with `PRIMARY`, backfilled existing schools, and verified clean upgrade/downgrade in `b1c4d7e9a2f0_m9_primary_school_support.py`.
+- [x] **Task 9.3: Primary defaults and templates.** Seed the `A`–`F` grading scale, `10/10/10/70` assessment weights, equal term weights, `50%`/`40%` promotion thresholds, Basic 1–6 levels, arms A–D, 10 compulsory core subjects, and `default_primary_v1`.
+- [x] **Task 9.4: Onboarding `school_type`.** Accept PRIMARY/SECONDARY at school creation and in setup; return both templates from the public catalog; select the matching defaults while preserving existing secondary behaviour. Changing school type without explicit config reseeds the matching defaults.
+- [x] **Task 9.5: Structure/subject template apply.** `POST /api/v1/structure/templates/apply` accepts `template_type`; `nigeria_primary_basic1_6` idempotently creates levels, arms, 60 core offerings, and 240 class subjects across 24 groups with no departments/electives/trades, and backfills registrations.
+- [x] **Task 9.6: Tests.** Cover success, validation, cross-tenant denial, idempotent re-apply, primary computation/annual rules, and end-to-end primary lifecycle.
+
+### 17.5 Definition of Done
+
+- [x] Migration upgrades/downgrades cleanly; all existing secondary tenants remain `SECONDARY` and all existing levels retain valid categories.
+- [x] Onboarding can select a primary school; the public catalog exposes both secondary and primary templates and primary seeds `default_primary_v1`.
+- [x] Applying the primary template twice creates no duplicates: six `PRIMARY` levels, four arms, no departments, 10 core subjects, 60 offerings, and 240 class subjects across 24 groups.
+- [x] All primary registrations are `COMPULSORY_CORE`; no elective or trade registration path is exposed for primary.
+- [x] `Decimal` engine tests verify `70–100 = A`, `60–69.99 = B`, `50–59.99 = C`, `45–49.99 = D`, `40–44.99 = E`, `0–39.99 = F`, grade point `0.00`, 30/70 assessment split, equal term weights, and `50%`/`40%` promotion outcomes.
+- [x] Cross-tenant denial and validation tests pass for every changed route; idempotency is asserted for template apply; M9 is **LIVE** in all docs (with M6 report verification payload clearly separated as M6).
 
 ---
 *End of Architectural Specification. Document maintained under strict version control.*

@@ -1,6 +1,6 @@
 # Olivet Frontend Handoff
 
-This directory is the frontend contract for the Olivet Academic Records Management Platform. It explains what the backend exposes today, what is planned next, and how school staff, administrators, and result recipients move through the product.
+This directory is the frontend contract for the Olivet Academic Records Management Platform. It explains what the backend exposes today, what is planned next, and how primary and secondary school staff, administrators, and result recipients move through the product.
 
 ## Who this is for
 
@@ -41,8 +41,9 @@ Current milestone status:
 | M6 | Verified report-card payloads and notifications | **PARTIAL** |
 | M7 | Admin dashboard, Olivet seed script, security hardening, performance verification | **PLANNED** |
 | M8 | Guided onboarding, defaults, branding uploads, structure templates | **LIVE** |
+| M9 | Nigerian Primary Basic 1–6 support (school type, primary templates, no departments/electives) | **LIVE** |
 
-Milestone `LIVE` means the main workflow exists. Scoped permission enforcement remains **PARTIAL** within M1 only because `/identity/me` does not return grant scopes and there is no grant-list endpoint; actual enforcement -- including list filtering -- is live across structure/students/subjects/assessments/computation. M6 is **PARTIAL** because token generation and publication are live, while public verification, the report-card JSON payload, and email/SMS delivery are not. M8 is **LIVE**: the public template catalog, admin setup read/save, branding uploads, and optional structure template apply are available. Custom domains are post-pilot **PLANNED**. See [personas-and-permissions.md](./personas-and-permissions.md) for exactly which routes are scope-aware.
+Milestone `LIVE` means the main workflow exists. Scoped permission enforcement remains **PARTIAL** within M1 only because `/identity/me` does not return grant scopes and there is no grant-list endpoint; actual enforcement -- including list filtering -- is live across structure/students/subjects/assessments/computation. M6 is **PARTIAL** because token generation and publication are live, while public verification, the report-card JSON payload, and email/SMS delivery are not. M8 is **LIVE**: the public template catalog, admin setup read/save, branding uploads, and optional structure template apply are available. Custom domains are post-pilot **PLANNED**. M9 is **LIVE**: primary schools are selectable at onboarding, use Basic 1–6 levels and A–D arms with no departments/electives/trades, and return a report variant with `department = null` and `class_teacher_comment`. See [personas-and-permissions.md](./personas-and-permissions.md) for exactly which routes are scope-aware.
 
 ## API quick reference
 
@@ -125,6 +126,8 @@ Paginated endpoints return:
 - Branding uploads (M8) use local pilot storage namespaced by school; generated PDFs are never stored server-side.
 - A scoped grant now filters list endpoints (e.g. `GET /structure/class-groups`) down to the caller's department/level/class-group, not an all-or-nothing `403`/everything. The exceptions are the subject catalog (`GET /subjects`) and staff/user management, which have no scope dimension to filter by. See [personas-and-permissions.md](./personas-and-permissions.md) for the full breakdown.
 - Bulk imports are asynchronous. A `202 Accepted` response is not a completed import.
+- M9 primary support is **LIVE**: render school-type selection, primary templates, and the primary report variant. Primary pupils still use the existing `Student` model; "pupil" and "homeroom teacher" are UI labels only.
+- Primary flows skip departments, electives, and trade subjects entirely; all primary subjects are compulsory core and auto-registered.
 
 ## Recommended reading order
 

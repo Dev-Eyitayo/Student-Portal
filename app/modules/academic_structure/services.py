@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import Select, func, select, update
@@ -33,15 +34,26 @@ from app.modules.academic_structure.schemas import (
     SessionUpdateRequest,
     StructureTemplateApplyRequest,
     StructureTemplateApplyResponse,
+    StructureTemplateType,
     TermCreateRequest,
     TermUpdateRequest,
 )
-from app.modules.academic_structure.templates import get_structure_template_preview
+from app.modules.academic_structure.templates import (
+    PRIMARY_STRUCTURE_TEMPLATE_ID,
+    SECONDARY_STRUCTURE_TEMPLATE_ID,
+    get_structure_template_preview,
+)
+from app.modules.assessments.services import seed_assessment_definitions_for_term
 from app.modules.audit.services import AuditContext, record_audit_log
 from app.modules.common.pagination import paginate
 from app.modules.common.schemas import PageMeta
 from app.modules.identity.models import User
 from app.modules.students.models import StudentEnrollment
+from app.modules.subjects.models import Subject, SubjectOffering
+from app.modules.subjects.services import (
+    backfill_compulsory_registrations_for_class_group,
+    get_or_create_class_subject_with_status,
+)
 
 CLASS_TEACHER_ROLES = {"TEACHER", "ACADEMIC_OFFICER", "SCHOOL_ADMIN"}
 
@@ -683,6 +695,7 @@ async def create_term(
     )
     db.add(term)
     await db.flush()
+    await seed_assessment_definitions_for_term(db, school_id, term)
     record_audit_log(
         db,
         audit,
@@ -911,6 +924,33 @@ async def update_level(
     if req.level_order is not None:
         level.level_order = req.level_order
     if req.category is not None:
+        if req.category.value in ("PRIMARY", "JUNIOR_SECONDARY"):
+            has_dept_group = (
+                await db.execute(
+                    select(ClassGroup.id).where(
+                        ClassGroup.school_id == school_id,
+                        ClassGroup.academic_level_id == level.id,
+                        ClassGroup.department_id.is_not(None),
+                        ClassGroup.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            has_dept_offering = (
+                await db.execute(
+                    select(SubjectOffering.id).where(
+                        SubjectOffering.school_id == school_id,
+                        SubjectOffering.academic_level_id == level.id,
+                        SubjectOffering.department_id.is_not(None),
+                        SubjectOffering.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if has_dept_group is not None or has_dept_offering is not None:
+                level_label = "Primary" if req.category.value == "PRIMARY" else "Junior secondary"
+                raise ValidationException(
+                    f"{level_label} levels cannot use departments, and this level already has "
+                    "classes or subject offerings assigned to a department."
+                )
         level.category = req.category.value
 
     await db.flush()
@@ -1250,9 +1290,10 @@ async def create_class_group(
     arm = await _get_arm(db, school_id, req.class_arm_id)
 
     department: Department | None = None
-    if level.category == "JUNIOR_SECONDARY" and req.department_id is not None:
+    if level.category in ("JUNIOR_SECONDARY", "PRIMARY") and req.department_id is not None:
+        level_label = "Primary" if level.category == "PRIMARY" else "Junior secondary"
         raise ValidationException(
-            "Junior secondary classes do not use a department. Please leave the department "
+            f"{level_label} classes do not use a department. Please leave the department "
             "empty for this class."
         )
     if req.department_id is not None:
@@ -1410,13 +1451,131 @@ async def retire_class_group(
     return class_group
 
 
+def _resolve_structure_template_id(req: StructureTemplateApplyRequest) -> str:
+    if req.template_id is not None:
+        return req.template_id
+    if req.template_type == StructureTemplateType.PRIMARY:
+        return PRIMARY_STRUCTURE_TEMPLATE_ID
+    return SECONDARY_STRUCTURE_TEMPLATE_ID
+
+
+async def _get_or_create_core_subject(
+    db: AsyncSession,
+    school_id: UUID,
+    item: dict[str, Any],
+) -> tuple[Subject, bool]:
+    code = item["code"].strip().upper()
+    stmt = select(Subject).where(
+        Subject.school_id == school_id,
+        Subject.code == code,
+        Subject.deleted_at.is_(None),
+    )
+    subject = (await db.execute(stmt)).scalar_one_or_none()
+    if subject is not None:
+        return subject, False
+
+    subject = Subject(
+        school_id=school_id,
+        name=item["name"].strip(),
+        code=code,
+        is_elective=False,
+        is_trade_subject=False,
+    )
+    db.add(subject)
+    await db.flush()
+    return subject, True
+
+
+async def _provision_template_subjects(
+    db: AsyncSession,
+    school_id: UUID,
+    session_id: UUID,
+    preview: dict[str, Any],
+    levels_by_code: dict[str, AcademicLevel],
+) -> dict[str, int]:
+    subject_items = preview.get("subjects") or []
+    counts = {
+        "subjects_created": 0,
+        "subjects_reused": 0,
+        "subject_offerings_created": 0,
+        "subject_offerings_reused": 0,
+        "class_subjects_created": 0,
+        "class_subjects_reused": 0,
+        "subject_registrations_created": 0,
+    }
+    if not subject_items:
+        return counts
+
+    class_groups = (
+        (
+            await db.execute(
+                select(ClassGroup).where(
+                    ClassGroup.school_id == school_id,
+                    ClassGroup.academic_session_id == session_id,
+                    ClassGroup.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    groups_by_level: dict[UUID, list[ClassGroup]] = {}
+    for group in class_groups:
+        groups_by_level.setdefault(group.academic_level_id, []).append(group)
+
+    for item in subject_items:
+        subject, created = await _get_or_create_core_subject(db, school_id, item)
+        counts["subjects_created" if created else "subjects_reused"] += 1
+
+        for level_item in preview["levels"]:
+            level = levels_by_code[level_item["code"]]
+            offering_stmt = select(SubjectOffering).where(
+                SubjectOffering.school_id == school_id,
+                SubjectOffering.subject_id == subject.id,
+                SubjectOffering.academic_session_id == session_id,
+                SubjectOffering.academic_level_id == level.id,
+                SubjectOffering.department_id.is_(None),
+                SubjectOffering.deleted_at.is_(None),
+            )
+            offering = (await db.execute(offering_stmt)).scalar_one_or_none()
+            offering_created = False
+            if offering is None:
+                offering = SubjectOffering(
+                    school_id=school_id,
+                    subject_id=subject.id,
+                    academic_session_id=session_id,
+                    academic_level_id=level.id,
+                    department_id=None,
+                )
+                db.add(offering)
+                await db.flush()
+                offering_created = True
+            counts[
+                "subject_offerings_created" if offering_created else "subject_offerings_reused"
+            ] += 1
+
+            for class_group in groups_by_level.get(level.id, []):
+                _, cs_created = await get_or_create_class_subject_with_status(
+                    db, school_id, offering, class_group
+                )
+                counts["class_subjects_created" if cs_created else "class_subjects_reused"] += 1
+
+    for class_group in class_groups:
+        counts[
+            "subject_registrations_created"
+        ] += await backfill_compulsory_registrations_for_class_group(db, school_id, class_group)
+
+    return counts
+
+
 async def apply_structure_template(
     db: AsyncSession,
     school_id: UUID,
     req: StructureTemplateApplyRequest,
     audit: AuditContext,
 ) -> StructureTemplateApplyResponse:
-    preview = get_structure_template_preview(req.template_id)
+    template_id = _resolve_structure_template_id(req)
+    preview = get_structure_template_preview(template_id)
     if preview is None:
         raise ValidationException(
             "We couldn't find that structure template. Please refresh the setup page and choose one of the available templates."
@@ -1575,6 +1734,9 @@ async def apply_structure_template(
             class_groups_created += 1
 
     await db.flush()
+    subject_counts = await _provision_template_subjects(
+        db, school_id, session.id, preview, levels_by_code
+    )
     record_audit_log(
         db,
         audit,
@@ -1582,11 +1744,13 @@ async def apply_structure_template(
         resource_type="AcademicSession",
         resource_id=session.id,
         diff_payload={
-            "template_id": req.template_id,
+            "template_id": template_id,
+            "template_type": preview["template_type"],
             "levels_created": levels_created,
             "departments_created": departments_created,
             "arms_created": arms_created,
             "class_groups_created": class_groups_created,
+            **subject_counts,
         },
     )
     await _commit_or_conflict(
@@ -1599,7 +1763,8 @@ async def apply_structure_template(
     )
 
     return StructureTemplateApplyResponse(
-        template_id=req.template_id,
+        template_id=template_id,
+        template_type=StructureTemplateType(preview["template_type"]),
         academic_session_id=session.id,
         levels_created=levels_created,
         levels_reused=len(preview["levels"]) - levels_created,
@@ -1609,5 +1774,6 @@ async def apply_structure_template(
         arms_reused=len(preview["arms"]) - arms_created,
         class_groups_created=class_groups_created,
         class_groups_reused=class_groups_reused,
+        **subject_counts,
         message=("The structure template has been applied. Existing records were kept unchanged."),
     )

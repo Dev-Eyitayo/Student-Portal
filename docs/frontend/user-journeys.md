@@ -4,7 +4,7 @@
 
 Each journey identifies whether the workflow is **LIVE** or **PLANNED**. Planned flows describe the intended contract from `ARCHITECTURE.md` and `BACKEND_DEV_PLAN.md`; they are not available through the current API.
 
-All endpoints are relative to `/api/v1`. All success responses use the standard envelope, and all failures use the standard error envelope.
+All endpoints are relative to `/api/v1`. All success responses use the standard envelope, and all failures use the standard error envelope. Nigerian primary (Basic 1–6) support is Milestone 9 and is **LIVE** throughout.
 
 ```mermaid
 flowchart LR
@@ -16,6 +16,8 @@ flowchart LR
     Scores --> Compute[M5 Compute results]
     Compute --> Publish[M6 Publish and share results]
     Publish --> Verify[M6 Parent verifies and prints]
+    Wizard -.-> Primary[M9 Primary template: Basic 1-6, no departments/electives - LIVE]
+    Primary -.-> Structure
 ```
 
 ## M1: Identity and school onboarding
@@ -75,6 +77,8 @@ Side effects:
 - Global permission definitions are seeded at application startup, not by this request.
 
 The response does not return an access token. Redirect to sign-in.
+
+> **M9 (LIVE):** the request accepts `school_type: PRIMARY | SECONDARY`. A primary school seeds the A–F primary grading scale, 10/10/10/70 assessment weights, equal term weights, 50%/40% promotion rules, and `report_card_template_id = default_primary_v1`. The example above remains secondary-only.
 
 ### 1.2 Sign in
 
@@ -329,6 +333,13 @@ Full configuration means grading scale, assessment weights, term definitions, an
 - Custom domains are **PLANNED post-pilot** — no endpoints; require DNS verification, verified domains only, no tenant selection from `Host` on authenticated APIs, dynamic CORS, and HTTPS/cookies.
 - A `school_id` that differs from the authenticated tenant must be treated as not found (no cross-tenant reads/writes/uploads).
 
+### 8.4 Primary vs secondary template choice (M9 — LIVE)
+
+1. **Review both templates** — the public `GET /identity/onboarding/templates` catalog returns a JSON array (`data: [...]`) containing both `olivet_nigeria_default` (`school_type: "SECONDARY"`) and `nigeria_primary_default` (`school_type: "PRIMARY"`). Filter by `school_type` and render both choices.
+2. **Choose a school type** — admins select PRIMARY or SECONDARY in setup (`PATCH /identity/schools/{school_id}/setup`). Primary uses Basic 1–6 levels, arms A–D, primary grading/assessment/annual defaults, and `default_primary_v1`. Changing school type without explicit config reseeds the matching defaults.
+3. **Apply the matching template** — `POST /structure/templates/apply` accepts `template_type` (`"PRIMARY"` or `"SECONDARY"`). Pass `template_type: "PRIMARY"` (or the internal structure ID `nigeria_primary_basic1_6`, not the catalog ID `nigeria_primary_default`); it creates levels, arms, 10 compulsory core subjects, 60 offerings, and 240 class subjects across 24 groups; no departments and no elective/trade subjects. Re-application is idempotent and backfills registrations.
+4. **Skip inapplicable steps** — for primary schools, hide department, elective, and trade-subject steps and use `department_id = null` on class groups and offerings.
+
 ## M2: Academic structure, students, and enrollment
 
 **Status: LIVE**
@@ -344,6 +355,8 @@ Full configuration means grading scale, assessment weights, term definitions, an
 7. Register students.
 8. Enroll students into class groups.
 9. Optionally import students in bulk.
+
+For primary schools (M9, **LIVE**), skip step 4 entirely: create levels `Basic 1`–`Basic 6` (category `PRIMARY`), arms `A`–`D`, and class groups with `department_id = null` and names like `Basic 1 A`.
 
 **Permission for all structure routes:** `structure:manage`.
 
@@ -418,7 +431,7 @@ Olivet's configuration stores default term definitions named First Term, Second 
 }
 ```
 
-- `category` must be `JUNIOR_SECONDARY` or `SENIOR_SECONDARY`.
+- `category` must be `PRIMARY` (Basic 1–6), `JUNIOR_SECONDARY`, or `SENIOR_SECONDARY` (M9 LIVE).
 
 `POST /structure/departments`
 
@@ -466,9 +479,22 @@ Junior example:
 }
 ```
 
+Primary example (M9 — LIVE; same shape as junior, with a `PRIMARY` level and arm `A`–`D`):
+
+```json
+{
+  "academic_session_id": "01912345-...",
+  "academic_level_id": "01912345-...",
+  "department_id": null,
+  "class_arm_id": "01912345-...",
+  "class_teacher_id": "01912345-...",
+  "display_name": "Basic 1 A"
+}
+```
+
 Rules:
 
-- Junior-secondary class groups must have `department_id=null`.
+- Primary (M9, LIVE) and junior-secondary class groups must have `department_id=null`.
 - Senior-secondary class groups may have a department.
 - Session, level, department, and arm must be unique together among active class groups.
 - Class teacher must be an active `TEACHER`, `ACADEMIC_OFFICER`, or `SCHOOL_ADMIN`.
@@ -643,6 +669,8 @@ Celery failure without a structured result returns a generic failed status. Show
 
 **Status: LIVE**
 
+For primary schools (M9, **LIVE**), the template creates compulsory core subjects, their session offerings, and class subjects directly. All primary subjects use `is_elective: false` and `is_trade_subject: false`; skip §3.5 elective/trade registration entirely.
+
 ### 3.1 Create subjects
 
 **Permission:** `subjects:manage`.
@@ -799,6 +827,8 @@ Creating a class subject seeds definitions for each non-retired term using the s
 | `TEST2` | Test 2 | 10 | 10 | `CONTINUOUS_ASSESSMENT` |
 | `ASSIGN` | Assignments/Attendance | 10 | 10 | `CONTINUOUS_ASSESSMENT` |
 | `EXAM` | Terminal Examination | 70 | 70 | `EXAMINATION` |
+
+Primary defaults (M9 — LIVE) use the same component codes and weights: 30% continuous assessment / 70% examination, with letter grades `A` 70–100 EXCELLENT, `B` 60–69.99 VERY GOOD, `C` 50–59.99 GOOD, `D` 45–49.99 PASS, `E` 40–44.99 FAIR, `F` 0–39.99 FAIL, and grade point `0.00` for every band.
 
 Custom definitions can be created with `POST /assessments/definitions`:
 
@@ -1042,6 +1072,7 @@ The broadsheet returns a high-density matrix of students, subjects, component sc
 - Student percentage uses marks obtained divided by that student's registered subject maximums.
 - Ranking uses standard competition ranking (`1, 2, 2, 4`).
 - Annual weights and promotion thresholds come from `annual_results_schema`.
+- Primary defaults (M9, LIVE): the same three terms with equal weights; `>= 50%` → `PROMOTED`, `40–49.99%` → `PROMOTED_ON_TRIAL`, below `40%` → `REPEATING`. Reuse the current three-term calculation; no generic multi-term refactor in M9.
 - Published historical values never recalculate from current configuration.
 
 ### 5.4 Publication flow
@@ -1193,6 +1224,7 @@ Notes:
 - The QR payload is for physical print verification; the frontend should not treat it as a secret.
 - All assets are paths/URLs served by the planned storage service; M8 uploads use local pilot storage namespaced by school, with S3/Cloudinary later.
 - Generated PDFs are not stored server-side; the frontend renders and exports them locally.
+- M9 primary variant (**PLANNED for M6 report delivery**): render the same payload shape with `student.department = null`, `student.academic_level = "Basic 4"`, `class_group = "Basic 4 A"`, primary letter grades, and `summary.class_teacher_comment` (homeroom teacher, projected from `TermReportCard.teacher_comment`) in place of a secondary form-master comment. Primary reports use `default_primary_v1`, and primary UIs should label `principal_signature_url` and `principal_comment` as **Head Teacher**.
 
 ### 6.4 Planned parent journey
 
@@ -1259,3 +1291,6 @@ Recommended polling:
 - Treat M8 guided-setup routes as absent until verified; do not render the wizard in production navigation yet.
 - Do not derive tenant identity from `Host` or a custom domain.
 - When M8 is live, keep assessment-weight editing before class-subject creation in the wizard.
+- M9 is **LIVE**: render school-type selection, primary templates, and the primary report variant.
+- Hide departments, electives, and trades for primary schools; use "pupil" and "homeroom/class teacher" labels while keeping `Student`/`ClassGroup` ids in API calls.
+- Primary score sheets include every pupil in the class because all subjects are compulsory core.

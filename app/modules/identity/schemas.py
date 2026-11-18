@@ -27,6 +27,11 @@ class PermissionScopeType(StrEnum):
     CLASS_GROUP = "CLASS_GROUP"
 
 
+class SchoolType(StrEnum):
+    PRIMARY = "PRIMARY"
+    SECONDARY = "SECONDARY"
+
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
@@ -175,6 +180,7 @@ class SchoolCreateRequest(BaseModel):
     admin_first_name: str = Field(..., min_length=1, max_length=64)
     admin_last_name: str = Field(..., min_length=1, max_length=64)
     admin_password: str = Field(..., min_length=8)
+    school_type: SchoolType = SchoolType.SECONDARY
 
 
 class SchoolResponse(BaseModel):
@@ -188,6 +194,7 @@ class SchoolResponse(BaseModel):
     state: str
     city: str
     address: str
+    school_type: SchoolType
     is_active: bool
     created_at: datetime
 
@@ -248,6 +255,12 @@ class AssessmentComponent(BaseModel):
 
 class AssessmentWeightSchema(BaseModel):
     components: dict[str, AssessmentComponent] = Field(..., min_length=1)
+
+    @model_validator(mode="before")
+    def normalize_components(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "components" not in data:
+            return {"components": data}
+        return data
 
     @model_validator(mode="after")
     def validate_totals(self) -> "AssessmentWeightSchema":
@@ -339,6 +352,7 @@ class SchoolProfileUpdateRequest(BaseModel):
     city: str | None = Field(None, min_length=2, max_length=64)
     address: str | None = Field(None, min_length=5)
     country_code: str | None = Field(None, min_length=2, max_length=2)
+    school_type: SchoolType | None = None
 
 
 class SchoolBrandingPaths(BaseModel):
@@ -392,6 +406,7 @@ class OnboardingTemplateResponse(BaseModel):
     id: str
     name: str
     description: str
+    school_type: SchoolType
     configuration_defaults: dict[str, Any]
     structure_template: dict[str, Any]
     custom_domain: CustomDomainStatusResponse

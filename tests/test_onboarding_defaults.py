@@ -21,17 +21,24 @@ async def test_onboarding_templates_are_public():
     assert response.status_code == 200
     body = response.json()
     assert body["success"] is True
-    assert len(body["data"]) == 1
-    template = body["data"][0]
-    assert template["id"] == "olivet_nigeria_default"
-    assert template["configuration_defaults"]["timezone"] == "Africa/Lagos"
-    assert template["configuration_defaults"]["currency"] == "NGN"
+    assert len(body["data"]) == 2
+    secondary = next(item for item in body["data"] if item["id"] == "olivet_nigeria_default")
+    primary = next(item for item in body["data"] if item["id"] == "nigeria_primary_default")
+
+    assert secondary["school_type"] == "SECONDARY"
+    assert secondary["configuration_defaults"]["timezone"] == "Africa/Lagos"
+    assert secondary["configuration_defaults"]["currency"] == "NGN"
     assert (
-        template["configuration_defaults"]["assessment_weight_schema"]["EXAM"]["weight_percentage"]
+        secondary["configuration_defaults"]["assessment_weight_schema"]["EXAM"]["weight_percentage"]
         == 70
     )
-    assert template["structure_template"]["class_group_count"] == 120
-    assert template["custom_domain"]["status"] == "PLANNED_POST_PILOT"
+    assert secondary["structure_template"]["class_group_count"] == 120
+
+    assert primary["school_type"] == "PRIMARY"
+    assert primary["configuration_defaults"]["report_card_template_id"] == "default_primary_v1"
+    assert primary["configuration_defaults"]["grading_scale_schema"]["grades"][0]["grade"] == "A"
+    assert primary["structure_template"]["class_group_count"] == 24
+    assert all(item["custom_domain"]["status"] == "PLANNED_POST_PILOT" for item in body["data"])
 
 
 def test_structure_template_preview_is_deterministic():
@@ -43,6 +50,20 @@ def test_structure_template_preview_is_deterministic():
     assert len(preview["arms"]) == 10
     assert preview["class_groups"][0]["level_code"] == "JSS1"
     assert preview["class_groups"][0]["department_code"] is None
+
+
+def test_primary_structure_template_preview_is_deterministic():
+    preview = get_structure_template_preview("nigeria_primary_basic1_6")
+
+    assert preview is not None
+    assert preview["template_type"] == "PRIMARY"
+    assert len(preview["levels"]) == 6
+    assert preview["levels"][0]["code"] == "BASIC1"
+    assert len(preview["departments"]) == 0
+    assert preview["arms"] == ["A", "B", "C", "D"]
+    assert len(preview["subjects"]) == 10
+    assert preview["class_group_count"] == 24
+    assert all(item["department_code"] is None for item in preview["class_groups"])
 
 
 def test_grading_scale_rejects_gaps():
@@ -79,6 +100,17 @@ def test_assessment_weights_must_total_one_hundred():
                 }
             }
         )
+
+
+def test_assessment_weights_accept_stored_flat_shape():
+    schema = AssessmentWeightSchema.model_validate(
+        {
+            "TEST1": {"name": "Test 1", "max_score": 10, "weight_percentage": 10},
+            "EXAM": {"name": "Exam", "max_score": 90, "weight_percentage": 90},
+        }
+    )
+
+    assert schema.components["EXAM"].max_score == 90
 
 
 @pytest.mark.asyncio
@@ -189,3 +221,137 @@ async def test_apply_structure_template_on_brand_new_school_creates_full_class_g
         assert reapply_data["arms_created"] == 0
         assert reapply_data["class_groups_created"] == 0
         assert reapply_data["class_groups_reused"] == 120
+
+
+@pytest.mark.asyncio
+async def test_primary_school_registration_seeds_primary_defaults():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        suffix = uuid.uuid4().hex[:6]
+        payload = {
+            "name": f"Olivet Primary Onboarding {suffix}",
+            "slug": f"olivet-primary-{suffix}",
+            "official_code": f"OBHS-PRI-{suffix.upper()}",
+            "state": "Oyo State",
+            "city": "Oyo",
+            "address": "Olivet Heights, Oyo, Nigeria",
+            "country_code": "NG",
+            "admin_email": f"primary.principal.{suffix}@olivet-test.edu.ng",
+            "admin_first_name": "Adebayo",
+            "admin_last_name": "Adeyemi",
+            "admin_password": "PrimaryAdminSecurePassword123!",
+            "school_type": "PRIMARY",
+        }
+        register_resp = await client.post("/api/v1/identity/schools", json=payload)
+        assert register_resp.status_code == 201, register_resp.text
+        school_id = register_resp.json()["data"]["id"]
+
+        login_resp = await client.post(
+            "/api/v1/identity/login",
+            json={"email": payload["admin_email"], "password": payload["admin_password"]},
+        )
+        assert login_resp.status_code == 200, login_resp.text
+        headers = {"Authorization": f"Bearer {login_resp.json()['data']['access_token']}"}
+
+        setup_resp = await client.get(
+            f"/api/v1/identity/schools/{school_id}/setup", headers=headers
+        )
+        assert setup_resp.status_code == 200, setup_resp.text
+        data = setup_resp.json()["data"]
+
+        assert data["school"]["school_type"] == "PRIMARY"
+        config = data["configuration"]
+        assert config["report_card_template_id"] == "default_primary_v1"
+        assert {grade["grade"] for grade in config["grading_scale_schema"]["grades"]} == {
+            "A",
+            "B",
+            "C",
+            "D",
+            "E",
+            "F",
+        }
+        assert all(grade["grade_point"] == 0 for grade in config["grading_scale_schema"]["grades"])
+        assert config["assessment_weight_schema"]["TEST1"]["weight_percentage"] == 10
+        assert config["assessment_weight_schema"]["ASSIGN"]["weight_percentage"] == 10
+        assert config["assessment_weight_schema"]["EXAM"]["weight_percentage"] == 70
+
+
+@pytest.mark.asyncio
+async def test_apply_primary_template_creates_core_subjects_idempotently():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        suffix = uuid.uuid4().hex[:6]
+        payload = {
+            "name": f"Olivet Primary Template {suffix}",
+            "slug": f"olivet-primary-template-{suffix}",
+            "official_code": f"OBHS-TPL-{suffix.upper()}",
+            "state": "Oyo State",
+            "city": "Oyo",
+            "address": "Olivet Heights, Oyo, Nigeria",
+            "country_code": "NG",
+            "admin_email": f"primary.template.{suffix}@olivet-test.edu.ng",
+            "admin_first_name": "Adebayo",
+            "admin_last_name": "Adeyemi",
+            "admin_password": "PrimaryTemplateSecurePassword123!",
+            "school_type": "PRIMARY",
+        }
+        register_resp = await client.post("/api/v1/identity/schools", json=payload)
+        assert register_resp.status_code == 201, register_resp.text
+
+        login_resp = await client.post(
+            "/api/v1/identity/login",
+            json={"email": payload["admin_email"], "password": payload["admin_password"]},
+        )
+        assert login_resp.status_code == 200, login_resp.text
+        headers = {"Authorization": f"Bearer {login_resp.json()['data']['access_token']}"}
+
+        apply_resp = await client.post(
+            "/api/v1/structure/templates/apply",
+            json={
+                "template_type": "PRIMARY",
+                "session_name": f"2024/2025 {suffix}",
+                "session_start_date": "2024-09-09",
+                "session_end_date": "2025-07-18",
+                "include_class_groups": True,
+            },
+            headers=headers,
+        )
+        assert apply_resp.status_code == 201, apply_resp.text
+        data = apply_resp.json()["data"]
+        assert data["template_id"] == "nigeria_primary_basic1_6"
+        assert data["template_type"] == "PRIMARY"
+        assert data["levels_created"] == 6
+        assert data["departments_created"] == 0
+        assert data["arms_created"] == 4
+        assert data["class_groups_created"] == 24
+        assert data["subjects_created"] == 10
+        assert data["subject_offerings_created"] == 60
+        assert data["class_subjects_created"] == 240
+
+        subjects_resp = await client.get(
+            "/api/v1/subjects", params={"page_size": 100}, headers=headers
+        )
+        assert subjects_resp.status_code == 200, subjects_resp.text
+        subjects = subjects_resp.json()["data"]["items"]
+        assert len(subjects) == 10
+        assert all(subject["is_elective"] is False for subject in subjects)
+        assert all(subject["is_trade_subject"] is False for subject in subjects)
+
+        reapply_resp = await client.post(
+            "/api/v1/structure/templates/apply",
+            json={
+                "template_type": "PRIMARY",
+                "academic_session_id": data["academic_session_id"],
+                "include_class_groups": True,
+            },
+            headers=headers,
+        )
+        assert reapply_resp.status_code == 201, reapply_resp.text
+        reapply_data = reapply_resp.json()["data"]
+        assert reapply_data["levels_created"] == 0
+        assert reapply_data["departments_created"] == 0
+        assert reapply_data["arms_created"] == 0
+        assert reapply_data["class_groups_created"] == 0
+        assert reapply_data["subjects_created"] == 0
+        assert reapply_data["subject_offerings_created"] == 0
+        assert reapply_data["class_subjects_created"] == 0

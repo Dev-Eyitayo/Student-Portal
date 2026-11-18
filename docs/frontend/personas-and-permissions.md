@@ -19,7 +19,7 @@ Authorization is a backend responsibility. The frontend uses permissions to shap
 
 - **System role:** `SCHOOL_ADMIN`
 - **Live behavior:** bypasses permission checks within the school.
-- **Typical work:** onboard the school, invite staff, configure structure, manage students and subjects, oversee score approval and publication, and complete guided setup including defaults, branding, and optional structure templates.
+- **Typical work:** onboard the school, invite staff, configure structure, manage students and subjects, oversee score approval and publication, and complete guided setup including defaults, branding, and optional structure templates. Admins also choose the primary or secondary template at onboarding.
 - **Frontend caveat:** `SCHOOL_ADMIN` can be assigned as a class teacher. The role bypass does not replace the class-teacher relationship.
 
 ### Academic officer
@@ -34,18 +34,18 @@ Authorization is a backend responsibility. The frontend uses permissions to shap
 
 - **System role:** `TEACHER`
 - **Live role defaults:** `scores:enter`, `scores:modify`, `scores:submit`.
-- **Typical work:** view rosters for assigned class subjects, enter scores, submit score sheets.
+- **Typical work:** view rosters for assigned class subjects, enter scores, submit score sheets. Primary subject teachers (M9, LIVE) see only compulsory core subjects.
 - **Frontend caveat:** approval, unlock, student management, structure management, and subject management are not default teacher capabilities.
 - **Partial limitation:** the backend does not yet expose a teacher-facing "my assignments" discovery endpoint. A teacher can be authorized for a class subject, but the frontend must obtain the class subject and assessment definition ids from another part of the product or wait for a backend addition.
 
-### Form master or class teacher
+### Form master, class teacher, or homeroom teacher
 
 - **Not a role.**
-- A form master is the staff user stored in `ClassGroup.class_teacher_id`.
+- A form master / homeroom teacher is the staff user stored in `ClassGroup.class_teacher_id`.
 - One teacher can be class teacher for multiple class groups.
 - Assignment accepts `TEACHER`, `ACADEMIC_OFFICER`, or `SCHOOL_ADMIN`, and requires `structure:manage`.
-- Form-master responsibilities such as conduct or comments are not live. There is no seeded `classes:enter_remarks` permission and no remarks endpoint.
-- A form master is not automatically granted approval, publication, or student-management permissions.
+- There is no seeded `classes:enter_remarks` permission and no remarks endpoint. For primary reports (M9, LIVE), the homeroom/class teacher is the source of the live `class_teacher_comment` payload field.
+- A form master is not automatically granted approval, publication, or student-management permissions. For primary schools (M9, LIVE) use `ACADEMIC_LEVEL` or `CLASS_GROUP` grants instead of `DEPARTMENT` grants.
 
 ### Head of department
 
@@ -61,11 +61,19 @@ Authorization is a backend responsibility. The frontend uses permissions to shap
 - Same live enforcement as a head of department.
 - There is no coordinator field on `AcademicLevel`.
 
-### Parent, guardian, or student
+### Pupil / student (primary — M9 LIVE)
+
+- **No login accounts.** A pupil is a `Student` record shown with primary-school UI labels.
+- Primary pupils belong to Basic 1–6 levels with `department_id = NULL` and take only compulsory core subjects.
+- Result access is planned through the same expiring magic link as secondary students; no pupil portal exists.
+- Render pupil labels in primary-school navigation; no separate pupil portal exists.
+
+### Parent, guardian, student, or pupil
 
 - **No login accounts.**
 - Result access is planned as an expiring, revocable magic link with an access limit.
 - Do not design a parent dashboard or student portal against live endpoints.
+- For primary recipients (M9, LIVE), render the report variant with `department: null`, letter grades, and a `class_teacher_comment`.
 - The planned public verification surface is described as `PLANNED` in [user-journeys.md](./user-journeys.md).
 
 ## System roles and default permissions
@@ -127,6 +135,8 @@ Only four system roles exist:
 | `audit:view` | Admin | View audit logs | No audit read route yet. |
 
 `classes:enter_remarks` appears in friendly error translation but is not a seeded permission and has no route.
+
+M9 (LIVE) adds **no new permission codes**: `configuration:manage`, `structure:manage`, and `subjects:manage` cover primary configuration, levels/arms, and core subject offerings/class subjects. Primary delegation cannot use `DEPARTMENT` scope because primary has no departments; use `ACADEMIC_LEVEL` or `CLASS_GROUP`. For primary schools (`school_type == "PRIMARY"`), display **Pupil** (for student), **Class/Homeroom Teacher** (for form master), and **Head Teacher** (for `principal_signature_url` and `principal_comment`).
 
 ## Effective permissions in the frontend
 
@@ -265,6 +275,18 @@ Supported scope types:
 
 Do not gate navigation on these routes until the backend is verified. Once live, a `school_id` belonging to another tenant must be denied (404/403) on setup and branding routes, and branding asset reads must stay inside the school's namespace.
 
+### M9 route permissions (LIVE)
+
+| Route | Authorization |
+| --- | --- |
+| `GET /identity/onboarding/templates` | Public; returns both secondary and primary templates. |
+| `POST /identity/schools` | Platform-admin operation; accepts `school_type` and seeds matching defaults. |
+| `GET`, `PATCH /identity/schools/{school_id}/setup` | Admin-only; `school_type` and template choice must stay inside the tenant. |
+| `POST /structure/templates/apply` | `structure:manage`; primary template creates levels, arms, and core subject offerings/class subjects. |
+| Primary score/computation/publication/results routes | Unchanged live permissions; the primary report variant only changes payload fields. |
+
+Render M9 navigation and actions for primary schools; this table is a live capability.
+
 ## Assessment-specific ownership rules
 
 Assessment authorization layers teacher ownership on top of the permission check:
@@ -294,6 +316,8 @@ Frontend implications:
 | Principal publishes a term | Role default/admin grant with `reports:publish`. | **LIVE** |
 | School administrator edits grading and annual rules | `configuration:manage`. | **LIVE** |
 | School administrator completes guided setup (defaults, branding, optional template) | Admin-only setup/branding routes; `structure:manage` to apply a template. | **LIVE** (M8) |
+| School administrator selects the primary template | Admin-only setup with `school_type = PRIMARY`; `structure:manage` to apply it. | **LIVE** (M9) |
+| Primary class/homeroom teacher scoped to one Basic level | `ACADEMIC_LEVEL` or `CLASS_GROUP` grant; no `DEPARTMENT` scope exists for primary. | **LIVE** (M9) |
 | Staff manager grants permissions | `users:manage`, not `permissions:delegate`. | **LIVE** |
 
 ## Staff deactivation effects

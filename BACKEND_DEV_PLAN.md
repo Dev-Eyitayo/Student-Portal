@@ -5,6 +5,7 @@
 **Agent & Code Guidelines:** [`AGENTS.md`](./AGENTS.md)  
 **Document Version:** 1.0.0  
 **Target Audience:** Backend Engineering Team
+**M9 Status:** LIVE (Nigerian Primary Basic 1-6 Support)
 
 ---
 
@@ -12,7 +13,7 @@
 
 The backend engineering team is building the authoritative, secure, multi-tenant core of the **Olivet Academic Records Management Platform**. 
 
-Our primary operational goal is to deliver a rock-solid, production-grade system ready for end-of-term academic processing at Olivet Baptist High School, with complete modularity to onboard additional secondary schools.
+Our primary operational goal is to deliver a rock-solid, production-grade system ready for end-of-term academic processing at Olivet Baptist High School, with complete modularity to onboard additional primary (Basic 1–6) and secondary schools.
 
 ### Frontend Handoff Principle
 The frontend team is building a separate client (web and mobile). The backend team does **not** generate or store static report card PDFs on the server. Instead, our deliverable to the frontend team is a set of clean, predictable, typed REST APIs with standardized JSON response envelopes, culminating in a **cryptographically verified Report Card Document Payload** that the frontend will render and export to PDF on the client side.
@@ -47,6 +48,7 @@ graph TD
     M5A --> M6[Milestone 6: Verified Client Payload & Email Delivery]
     M6 --> M7[Milestone 7: Backoffice SQLAdmin, Pilot Seeding & Load Verification]
     M7 --> M8[Milestone 8: Guided Onboarding, Defaults, Branding & Structure Templates - LIVE]
+    M8 --> M9[Milestone 9: Nigerian Primary Basic 1-6 Support - LIVE]
 ```
 
 ---
@@ -387,6 +389,71 @@ graph TD
 
 ---
 
+### Milestone 9: Nigerian Primary Basic 1-6 Support
+**Target Sprint:** Sprint 9
+**Lead Focus:** Identity, Structure, Subjects & Computation (`app/modules/identity/`, `app/modules/academic_structure/`, `app/modules/subjects/`, `app/modules/computation/`)
+
+**Status: LIVE** — primary routes, templates, defaults, and the report variant are shipped.
+
+#### Objectives:
+1. Support Nigerian three-term primary schools in addition to the existing secondary pilot.
+2. Provide configurable primary defaults and onboarding/structure templates while reusing the live three-term computation and publication flow.
+3. Keep primary data model-compatible: no departments, no electives, no trade subjects, and no new permission codes.
+
+#### Scope decisions:
+- Levels: `Basic 1`–`Basic 6`, category `PRIMARY`, codes `BASIC1`–`BASIC6`; arms `A`, `B`, `C`, `D`; no departments.
+- Every primary subject is compulsory core (`is_elective = FALSE`, `is_trade_subject = FALSE`, registration category `COMPULSORY_CORE`). No electives or trade subjects.
+- Grading default: A 70–100 EXCELLENT, B 60–69.99 VERY GOOD, C 50–59.99 GOOD, D 45–49.99 PASS, E 40–44.99 FAIR, F 0–39.99 FAIL; grade point `0.00` for all bands.
+- Assessment default: `TEST1` 10, `TEST2` 10, `ASSIGN` 10, `EXAM` 70 (30% CA / 70% exam).
+- Annual: same three terms, equal term weights; `>= 50%` promoted, `40–49.99%` promoted on trial, `< 40%` repeating. Reuse the current three-term computation; no generic multi-term refactor in M9.
+- Report template default id: `default_primary_v1`.
+
+#### Data model & migration:
+- `schools.school_type VARCHAR(16) NOT NULL DEFAULT 'SECONDARY'` with `CHECK (school_type IN ('PRIMARY', 'SECONDARY'))`; backfill existing rows to `SECONDARY`.
+- `academic_levels.category` check constraint extended to `('PRIMARY', 'JUNIOR_SECONDARY', 'SENIOR_SECONDARY')`.
+- Reuse nullable `department_id` on `class_groups`/`subject_offerings` with `NULL` required for primary rows; no new tables.
+- Alembic revision `b1c4d7e9a2f0_m9_primary_school_support.py` applies the schema change with a verified downgrade path. Defaults/templates are seeded by service/seed code, not DDL.
+
+#### Endpoints (all LIVE; extensions of canonical routes):
+| Method | Path | M9 change | Permission |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/identity/onboarding/templates` | Public catalog returns both secondary and primary templates. | `ANONYMOUS` |
+| `POST` | `/api/v1/identity/schools` | Accept `school_type`; seed matching defaults and report template. | `SUPER_ADMIN` |
+| `GET`, `PATCH` | `/api/v1/identity/schools/{school_id}/setup` | Read/save `school_type` and selected template. | `SCHOOL_ADMIN` |
+| `POST` | `/api/v1/structure/templates/apply` | Accept `template_type = PRIMARY`; create Basic 1–6, arms A–D, core subject offerings and class subjects idempotently. | `structure:manage` |
+| Unchanged | `subjects`, `class-subjects`, `computation`, `publication`, `results` routes | Reused as-is; primary report payload uses `department: null` and `class_teacher_comment`. | Existing permissions |
+
+#### Tasks & Implementation Details:
+- [x] **Task 9.1: Documentation & architecture alignment**
+  - Mark M9 LIVE in `ARCHITECTURE.md`, this plan, and frontend docs.
+  - Record shipped primary scope, defaults, endpoints, and report payload variant.
+- [x] **Task 9.2: Schema & migration**
+  - Add `schools.school_type`, extend `academic_levels.category` with `PRIMARY`, backfill existing schools.
+  - Verified `alembic upgrade head` and `alembic downgrade -1` via `b1c4d7e9a2f0_m9_primary_school_support.py`.
+- [x] **Task 9.3: Primary defaults & templates**
+  - Seed primary grading scale (A–F, grade point `0.00`), assessment weights (10/10/10/70), equal term weights, promotion thresholds (`50%`/`40%`), Basic 1–6 levels, arms A–D, core subject list, and `default_primary_v1`.
+  - Keep all primary subjects `is_elective = FALSE` and `is_trade_subject = FALSE`.
+- [x] **Task 9.4: Onboarding `school_type`**
+  - Accept `PRIMARY|SECONDARY` at `POST /api/v1/identity/schools` and in setup read/save.
+  - Return both secondary and primary templates from `GET /api/v1/identity/onboarding/templates`; preserve the existing secondary response as-is. Changing school type without explicit config reseeds matching defaults.
+- [x] **Task 9.5: Structure & subject template apply**
+  - Extend `POST /api/v1/structure/templates/apply` with `template_type`.
+  - Primary template `nigeria_primary_basic1_6` creates Basic 1–6 levels, arms A–D, 10 core subjects, 60 subject offerings, and 240 class subjects across 24 groups; no departments or elective/trade registration path.
+  - Re-application is idempotent and backfills registrations (active-row partial unique indexes).
+- [x] **Task 9.6: Tests**
+  - Success tests for primary onboarding, both-template catalog, and idempotent primary template apply.
+  - Validation tests for invalid `school_type`/`template_type`, department-bearing primary rows, and elective/trade attempts.
+  - Cross-tenant denial tests for setup and template apply; pure-engine tests for primary grading, 30/70 assessment split, equal term weights, and promotion outcomes.
+  - Report payload test asserting `department: null` and `class_teacher_comment` for primary. Full suite passes (65 passed).
+
+#### Definition of Done:
+- Migration upgrades/downgrades cleanly; existing secondary tenants and levels are unchanged.
+- Primary onboarding and template apply produce the documented defaults with no departments, electives, or trades.
+- Idempotency, validation, cross-tenant isolation, computation, and report-payload tests pass.
+- M9 is LIVE in all documentation; migration and tests verified, full suite passes (65 passed).
+
+---
+
 ## 4. Frontend & Backend Collaboration Contracts
 
 ### 4.1 Standard Response Envelopes
@@ -488,6 +555,8 @@ When the frontend fetches `GET /api/v1/results/verify/{token}?dob=YYYY-MM-DD`, t
 ```
 
 Branding URLs above are illustrative. M8 uploads use local pilot storage namespaced by school slug/id; S3/Cloudinary are later providers. Generated PDFs are not stored server-side.
+
+**M9 (LIVE) primary variant:** the same payload contract is reused with `student.department = null` and `terminal_summary.class_teacher_comment` (homeroom/class teacher) in place of the secondary form-master comment; primary grades are letters `A`–`F` and the template id is `default_primary_v1`. See `ARCHITECTURE.md` §6.3.2 and §17. Frontends should render this variant for primary schools.
 
 ---
 

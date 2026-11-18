@@ -1,20 +1,21 @@
 # Academic Records Management Platform
-**Multi-Tenant SaaS for Secondary Academic Records, Grading & Result Distribution**  
+**Multi-Tenant SaaS for Primary & Secondary Academic Records, Grading & Result Distribution**
 **Target Pilot:** Olivet Baptist High School, Oyo, Nigeria
+**Primary Support:** M9 (Nigerian Basic 1–6) — LIVE
 
 ---
 
 ## 📌 Overview
 
-The **Academic Records Management Platform** is a secure, high-performance, multi-tenant SaaS designed for Nigerian and international secondary schools. It replaces error-prone spreadsheets and fragmented result compilation with an automated, auditable system of record for:
-- Student admissions, session enrollments, class arms, and departments.
+The **Academic Records Management Platform** is a secure, high-performance, multi-tenant SaaS designed for Nigerian and international primary and secondary schools. It replaces error-prone spreadsheets and fragmented result compilation with an automated, auditable system of record for:
+- Pupil/student admissions, session enrollments, class arms, and (secondary only) departments.
 - Subject offerings and granular teacher-arm assignments.
 - Configurable Continuous Assessment (CA) and examination score entry.
 - Dynamic result computation (grades, standard competition ranking, subject/class averages).
 - Cryptographic snapshotting and tamper-resistant digital report cards.
 - Secure, time-limited magic link result delivery to parents without unencrypted email attachments.
 
-The platform is designed around the core principle: **"Configurable by architecture, familiar by default"**. Olivet's unique traditions (historic arm letters `O`, `L`, `I`, `V`, `E`, `T`, `B`, `H`, `S`, `Y`, department structures, and the 10/10/10/70 assessment structure — Test 1, Test 2, Assignments/Attendance, and Terminal Examination) serve as the pre-configured seed template without hardcoding business rules into the codebase.
+The platform is designed around the core principle: **"Configurable by architecture, familiar by default"**. Olivet's unique traditions (historic arm letters `O`, `L`, `I`, `V`, `E`, `T`, `B`, `H`, `S`, `Y`, department structures, and the 10/10/10/70 assessment structure — Test 1, Test 2, Assignments/Attendance, and Terminal Examination) serve as the pre-configured seed template without hardcoding business rules into the codebase. M9 (LIVE) adds a Nigerian three-term primary template: Basic 1–6, arms A–D, no departments, compulsory core subjects only, an A–F grading scale, and the same 10/10/10/70 assessment split.
 
 ---
 
@@ -27,6 +28,8 @@ The authoritative technical architecture, schema definitions, mathematical compu
 For autonomous agents and developers working on this codebase:
 
 👉 **[AGENTS.md](./AGENTS.md)** (Operational Guidelines, Invariants & Conventions)
+
+Delivery status: M1–M5, M8, and M9 are live; M5A attendance, M6 verification/delivery, and M7 hardening are still planned or partial. M9 Nigerian Primary Basic 1–6 support is **LIVE** and specified in `ARCHITECTURE.md` §17 and `BACKEND_DEV_PLAN.md` Milestone 9.
 
 ---
 
@@ -48,7 +51,7 @@ For autonomous agents and developers working on this codebase:
 1. **Multi-Tenancy Defense-in-Depth:** Every query is scoped to the tenant at the application level via FastAPI `Depends(get_tenant_db)` and enforced at the database kernel level via PostgreSQL Row-Level Security (`SET LOCAL app.current_school_id = :school_id`).
 2. **Immutable Academic Snapshots:** Once a term's results are `PUBLISHED`, the student's scores, grades, positions, and grading scale schema are relationally frozen. Retroactive changes to subsequent terms will never alter past transcripts.
 3. **Hybrid Access Control (RBAC + ABAC):** Baseline role defaults (`TEACHER`, `ACADEMIC_OFFICER`) are paired with direct delegated user grants (e.g., an HOD or Form Master receiving scoped administrative rights while remaining a teaching staff).
-4. **Student Subject Registrations:** Electives and trade subjects (e.g., Catering Craft, Data Processing) are registered individually per student (`student_subject_registrations`), ensuring teachers only see enrolled students on score sheets and total obtainable marks are dynamically calculated.
+4. **Student Subject Registrations:** Electives and trade subjects (e.g., Catering Craft, Data Processing) are registered individually per student (`student_subject_registrations`), ensuring teachers only see enrolled students on score sheets and total obtainable marks are dynamically calculated. Primary schools (M9, LIVE) have only compulsory core subjects, so all registrations are automatic.
 5. **Canonical API Contract:** Every endpoint uses a domain-namespaced route (`/api/v1/<domain>/...`) and returns either `{"success": true, "data": ...}` or `{"error": {"code", "message", "details", "path"}}`. `ARCHITECTURE.md` §6.2 is authoritative; legacy flat aliases are not supported.
 
 ---
