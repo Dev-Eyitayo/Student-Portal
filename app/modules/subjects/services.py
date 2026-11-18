@@ -398,9 +398,10 @@ async def _validate_offering_department(
 ) -> Department | None:
     if department_id is None:
         return None
-    if level.category == "JUNIOR_SECONDARY":
+    if level.category in ("JUNIOR_SECONDARY", "PRIMARY"):
+        level_label = "Primary" if level.category == "PRIMARY" else "Junior secondary"
         raise ValidationException(
-            "Junior secondary subject offerings do not use a department. Please leave the "
+            f"{level_label} subject offerings do not use a department. Please leave the "
             "department empty for this offering."
         )
     stmt = select(Department).where(
@@ -660,12 +661,12 @@ async def _create_class_subject_record(
     return class_subject
 
 
-async def get_or_create_class_subject(
+async def get_or_create_class_subject_with_status(
     db: AsyncSession,
     school_id: UUID,
     offering: SubjectOffering,
     class_group: ClassGroup,
-) -> ClassSubject:
+) -> tuple[ClassSubject, bool]:
     stmt = select(ClassSubject).where(
         ClassSubject.subject_offering_id == offering.id,
         ClassSubject.class_group_id == class_group.id,
@@ -673,8 +674,20 @@ async def get_or_create_class_subject(
     )
     existing = (await db.execute(stmt)).scalar_one_or_none()
     if existing:
-        return existing
-    return await _create_class_subject_record(db, school_id, offering, class_group)
+        return existing, False
+    return await _create_class_subject_record(db, school_id, offering, class_group), True
+
+
+async def get_or_create_class_subject(
+    db: AsyncSession,
+    school_id: UUID,
+    offering: SubjectOffering,
+    class_group: ClassGroup,
+) -> ClassSubject:
+    class_subject, _ = await get_or_create_class_subject_with_status(
+        db, school_id, offering, class_group
+    )
+    return class_subject
 
 
 async def create_class_subject(
@@ -1307,6 +1320,91 @@ async def auto_register_compulsory_subjects(
             },
         )
     return registrations
+
+
+async def backfill_compulsory_registrations_for_class_group(
+    db: AsyncSession,
+    school_id: UUID,
+    class_group: ClassGroup,
+) -> int:
+    """Registers compulsory core subjects for students already enrolled in a class.
+
+    This is used when a structure/subject template adds subjects to an existing
+    class group, so historical enrollments receive the same roster as new ones.
+    """
+    subject_rows = (
+        await db.execute(
+            select(ClassSubject, SubjectOffering)
+            .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+            .join(Subject, Subject.id == SubjectOffering.subject_id)
+            .where(
+                ClassSubject.school_id == school_id,
+                ClassSubject.class_group_id == class_group.id,
+                ClassSubject.deleted_at.is_(None),
+                SubjectOffering.deleted_at.is_(None),
+                Subject.deleted_at.is_(None),
+                Subject.is_elective.is_(False),
+            )
+        )
+    ).all()
+    if not subject_rows:
+        return 0
+
+    enrollments = (
+        (
+            await db.execute(
+                select(StudentEnrollment).where(
+                    StudentEnrollment.school_id == school_id,
+                    StudentEnrollment.class_group_id == class_group.id,
+                    StudentEnrollment.enrollment_status.in_(["ENROLLED", "REPEATING"]),
+                    StudentEnrollment.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not enrollments:
+        return 0
+
+    enrollment_ids = [enrollment.id for enrollment in enrollments]
+    class_subject_ids = [class_subject.id for class_subject, _ in subject_rows]
+    existing_pairs = set(
+        (
+            await db.execute(
+                select(
+                    StudentSubjectRegistration.student_enrollment_id,
+                    StudentSubjectRegistration.class_subject_id,
+                ).where(
+                    StudentSubjectRegistration.school_id == school_id,
+                    StudentSubjectRegistration.student_enrollment_id.in_(enrollment_ids),
+                    StudentSubjectRegistration.class_subject_id.in_(class_subject_ids),
+                    StudentSubjectRegistration.is_active.is_(True),
+                )
+            )
+        ).all()
+    )
+
+    registrations: list[StudentSubjectRegistration] = []
+    for enrollment in enrollments:
+        for class_subject, offering in subject_rows:
+            key = (enrollment.id, class_subject.id)
+            if key in existing_pairs:
+                continue
+            category = "COMPULSORY_CORE" if offering.department_id is None else "DEPARTMENT_CORE"
+            registration = StudentSubjectRegistration(
+                school_id=school_id,
+                student_enrollment_id=enrollment.id,
+                class_subject_id=class_subject.id,
+                subject_category=category,
+            )
+            db.add(registration)
+            existing_pairs.add(key)
+            registrations.append(registration)
+
+    if registrations:
+        await db.flush()
+    return len(registrations)
 
 
 # --------------------------------------------------------------------------

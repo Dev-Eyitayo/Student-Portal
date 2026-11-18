@@ -1,5 +1,6 @@
 import asyncio
 import secrets
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -30,7 +31,8 @@ from app.modules.academic_structure.models import (
     Department,
 )
 from app.modules.academic_structure.templates import (
-    STRUCTURE_TEMPLATE_ID,
+    PRIMARY_STRUCTURE_TEMPLATE_ID,
+    SECONDARY_STRUCTURE_TEMPLATE_ID,
     get_structure_template_preview,
 )
 from app.modules.audit.services import AuditContext, record_audit_log
@@ -58,6 +60,7 @@ from app.modules.identity.schemas import (
     SchoolResponse,
     SchoolSetupResponse,
     SchoolSetupUpdateRequest,
+    SchoolType,
     StaffInviteRequest,
     StaffInviteResponse,
     StaffVerifyInviteResponse,
@@ -94,7 +97,7 @@ async def _scope_audit_to_school(db: AsyncSession, school_id: UUID) -> None:
     )
 
 
-DEFAULT_ASSESSMENT_WEIGHTS = {
+SECONDARY_ASSESSMENT_WEIGHTS = {
     "TEST1": {"name": "Test 1", "max_score": 10, "weight_percentage": 10},
     "TEST2": {"name": "Test 2", "max_score": 10, "weight_percentage": 10},
     "ASSIGN": {
@@ -105,7 +108,18 @@ DEFAULT_ASSESSMENT_WEIGHTS = {
     "EXAM": {"name": "Terminal Examination", "max_score": 70, "weight_percentage": 70},
 }
 
-DEFAULT_GRADING_SCALE = [
+PRIMARY_ASSESSMENT_WEIGHTS = {
+    "TEST1": {"name": "Test 1", "max_score": 10, "weight_percentage": 10},
+    "TEST2": {"name": "Test 2", "max_score": 10, "weight_percentage": 10},
+    "ASSIGN": {
+        "name": "Assignments/Attendance",
+        "max_score": 10,
+        "weight_percentage": 10,
+    },
+    "EXAM": {"name": "Terminal Examination", "max_score": 70, "weight_percentage": 70},
+}
+
+SECONDARY_GRADING_SCALE = [
     {"grade": "A1", "min_score": 75, "max_score": 100, "grade_point": 4, "remark": "Excellent"},
     {"grade": "B2", "min_score": 70, "max_score": 74.99, "grade_point": 3.5, "remark": "Very Good"},
     {"grade": "B3", "min_score": 65, "max_score": 69.99, "grade_point": 3, "remark": "Good"},
@@ -115,6 +129,15 @@ DEFAULT_GRADING_SCALE = [
     {"grade": "D7", "min_score": 45, "max_score": 49.99, "grade_point": 1, "remark": "Pass"},
     {"grade": "E8", "min_score": 40, "max_score": 44.99, "grade_point": 0.5, "remark": "Pass"},
     {"grade": "F9", "min_score": 0, "max_score": 39.99, "grade_point": 0, "remark": "Fail"},
+]
+
+PRIMARY_GRADING_SCALE = [
+    {"grade": "A", "min_score": 70, "max_score": 100, "grade_point": 0, "remark": "Excellent"},
+    {"grade": "B", "min_score": 60, "max_score": 69.99, "grade_point": 0, "remark": "Very Good"},
+    {"grade": "C", "min_score": 50, "max_score": 59.99, "grade_point": 0, "remark": "Good"},
+    {"grade": "D", "min_score": 45, "max_score": 49.99, "grade_point": 0, "remark": "Pass"},
+    {"grade": "E", "min_score": 40, "max_score": 44.99, "grade_point": 0, "remark": "Fair"},
+    {"grade": "F", "min_score": 0, "max_score": 39.99, "grade_point": 0, "remark": "Fail"},
 ]
 
 DEFAULT_TERM_DEFINITIONS = [
@@ -131,6 +154,37 @@ DEFAULT_ANNUAL_RESULTS_CONFIG = {
         "trial_min_percentage": "40.00",
     },
 }
+
+SECONDARY_REPORT_CARD_TEMPLATE_ID = "default_v1"
+PRIMARY_REPORT_CARD_TEMPLATE_ID = "default_primary_v1"
+
+SCHOOL_DEFAULTS: dict[SchoolType, dict[str, Any]] = {
+    SchoolType.SECONDARY: {
+        "grading_scale_schema": {"grades": SECONDARY_GRADING_SCALE},
+        "assessment_weight_schema": SECONDARY_ASSESSMENT_WEIGHTS,
+        "academic_term_definitions": {"terms": DEFAULT_TERM_DEFINITIONS},
+        "annual_results_schema": DEFAULT_ANNUAL_RESULTS_CONFIG,
+        "timezone": "Africa/Lagos",
+        "currency": "NGN",
+        "report_card_template_id": SECONDARY_REPORT_CARD_TEMPLATE_ID,
+        "structure_template_id": SECONDARY_STRUCTURE_TEMPLATE_ID,
+    },
+    SchoolType.PRIMARY: {
+        "grading_scale_schema": {"grades": PRIMARY_GRADING_SCALE},
+        "assessment_weight_schema": PRIMARY_ASSESSMENT_WEIGHTS,
+        "academic_term_definitions": {"terms": DEFAULT_TERM_DEFINITIONS},
+        "annual_results_schema": DEFAULT_ANNUAL_RESULTS_CONFIG,
+        "timezone": "Africa/Lagos",
+        "currency": "NGN",
+        "report_card_template_id": PRIMARY_REPORT_CARD_TEMPLATE_ID,
+        "structure_template_id": PRIMARY_STRUCTURE_TEMPLATE_ID,
+    },
+}
+
+
+def get_school_defaults(school_type: SchoolType | str) -> dict[str, Any]:
+    normalized = SchoolType(school_type)
+    return deepcopy(SCHOOL_DEFAULTS[normalized])
 
 
 @dataclass
@@ -309,6 +363,9 @@ async def register_school_with_admin(
             detail=f"An account with email '{req.admin_email}' is already registered in the system.",
         )
 
+    school_type = SchoolType(req.school_type)
+    defaults = get_school_defaults(school_type)
+
     # Create School
     school = School(
         slug=req.slug.lower().strip(),
@@ -318,6 +375,7 @@ async def register_school_with_admin(
         state=req.state.strip(),
         city=req.city.strip(),
         address=req.address.strip(),
+        school_type=school_type.value,
         is_active=True,
     )
     db.add(school)
@@ -326,13 +384,13 @@ async def register_school_with_admin(
     # Create default configuration
     config = SchoolConfiguration(
         school_id=school.id,
-        grading_scale_schema={"grades": DEFAULT_GRADING_SCALE},
-        assessment_weight_schema=DEFAULT_ASSESSMENT_WEIGHTS,
-        academic_term_definitions={"terms": DEFAULT_TERM_DEFINITIONS},
-        annual_results_schema=DEFAULT_ANNUAL_RESULTS_CONFIG,
-        timezone="Africa/Lagos",
-        currency="NGN",
-        report_card_template_id="default_v1",
+        grading_scale_schema=defaults["grading_scale_schema"],
+        assessment_weight_schema=defaults["assessment_weight_schema"],
+        academic_term_definitions=defaults["academic_term_definitions"],
+        annual_results_schema=defaults["annual_results_schema"],
+        timezone=defaults["timezone"],
+        currency=defaults["currency"],
+        report_card_template_id=defaults["report_card_template_id"],
     )
     db.add(config)
 
@@ -355,7 +413,13 @@ async def register_school_with_admin(
         action="SCHOOL_REGISTERED",
         resource_type="School",
         resource_id=school.id,
-        diff_payload={"after": {"name": school.name, "official_code": school.official_code}},
+        diff_payload={
+            "after": {
+                "name": school.name,
+                "official_code": school.official_code,
+                "school_type": school.school_type,
+            }
+        },
     )
     await _commit_or_conflict(
         db,
@@ -398,6 +462,9 @@ def _apply_configuration_updates(
     config: SchoolConfiguration, req: SchoolConfigurationUpdateRequest
 ) -> None:
     changes = req.model_dump(mode="json", exclude_unset=True)
+    assessment_weights = changes.get("assessment_weight_schema")
+    if isinstance(assessment_weights, dict) and "components" in assessment_weights:
+        changes["assessment_weight_schema"] = assessment_weights["components"]
     for field in CONFIGURATION_FIELDS:
         if field in changes and changes[field] is not None:
             setattr(config, field, changes[field])
@@ -434,31 +501,47 @@ async def update_school_configuration(
 
 
 def get_onboarding_templates() -> list[OnboardingTemplateResponse]:
-    structure_template = get_structure_template_preview(STRUCTURE_TEMPLATE_ID)
-    if structure_template is None:
-        return []
-
-    return [
-        OnboardingTemplateResponse(
-            id="olivet_nigeria_default",
-            name="Olivet Nigeria Default",
-            description=(
+    templates: list[OnboardingTemplateResponse] = []
+    catalog = [
+        (
+            "olivet_nigeria_default",
+            "Olivet Nigeria Default",
+            (
                 "Olivet's familiar grading, 10/10/10/70 assessment pattern, three terms, "
                 "and JSS-SS3 structure."
             ),
-            configuration_defaults={
-                "grading_scale_schema": {"grades": DEFAULT_GRADING_SCALE},
-                "assessment_weight_schema": DEFAULT_ASSESSMENT_WEIGHTS,
-                "academic_term_definitions": {"terms": DEFAULT_TERM_DEFINITIONS},
-                "annual_results_schema": DEFAULT_ANNUAL_RESULTS_CONFIG,
-                "timezone": "Africa/Lagos",
-                "currency": "NGN",
-                "report_card_template_id": "default_v1",
-            },
-            structure_template=structure_template,
-            custom_domain={},
-        )
+            SchoolType.SECONDARY,
+            SECONDARY_STRUCTURE_TEMPLATE_ID,
+        ),
+        (
+            "nigeria_primary_default",
+            "Nigeria Primary Basic 1-6",
+            (
+                "Basic 1-6 with arms A-D, compulsory core subjects, an A-F grading scale, "
+                "and the same 10/10/10/70 assessment pattern."
+            ),
+            SchoolType.PRIMARY,
+            PRIMARY_STRUCTURE_TEMPLATE_ID,
+        ),
     ]
+
+    for template_id, name, description, school_type, structure_template_id in catalog:
+        structure_template = get_structure_template_preview(structure_template_id)
+        if structure_template is None:
+            continue
+        defaults = get_school_defaults(school_type)
+        templates.append(
+            OnboardingTemplateResponse(
+                id=template_id,
+                name=name,
+                description=description,
+                school_type=school_type,
+                configuration_defaults=defaults,
+                structure_template=structure_template,
+                custom_domain={},
+            )
+        )
+    return templates
 
 
 async def _get_school_for_setup(db: AsyncSession, school_id: UUID) -> School:
@@ -548,6 +631,7 @@ async def update_school_setup(
                 "city",
                 "address",
                 "country_code",
+                "school_type",
                 "logo_storage_path",
                 "stamp_image_url",
                 "principal_signature_url",
@@ -556,8 +640,14 @@ async def update_school_setup(
         "configuration": _configuration_snapshot(config),
     }
 
+    school_type_changed = False
     if req.profile is not None:
         profile: SchoolProfileUpdateRequest = req.profile
+        if profile.school_type is not None:
+            new_school_type = SchoolType(profile.school_type)
+            if school.school_type != new_school_type.value:
+                school.school_type = new_school_type.value
+                school_type_changed = True
         if profile.slug is not None:
             normalized_slug = profile.slug.lower().strip()
             await _ensure_profile_field_available(
@@ -591,6 +681,13 @@ async def update_school_setup(
 
     if req.configuration is not None:
         _apply_configuration_updates(config, req.configuration)
+    elif school_type_changed:
+        defaults = get_school_defaults(school.school_type)
+        config.grading_scale_schema = defaults["grading_scale_schema"]
+        config.assessment_weight_schema = defaults["assessment_weight_schema"]
+        config.academic_term_definitions = defaults["academic_term_definitions"]
+        config.annual_results_schema = defaults["annual_results_schema"]
+        config.report_card_template_id = defaults["report_card_template_id"]
 
     await db.flush()
     record_audit_log(

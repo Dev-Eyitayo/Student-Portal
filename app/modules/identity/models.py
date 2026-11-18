@@ -2,7 +2,17 @@ from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -20,10 +30,17 @@ class School(Base, TimestampMixin):
     state: Mapped[str] = mapped_column(String(64), nullable=False)
     city: Mapped[str] = mapped_column(String(64), nullable=False)
     address: Mapped[str] = mapped_column(Text, nullable=False)
+    school_type: Mapped[str] = mapped_column(
+        String(16), default="SECONDARY", server_default="SECONDARY", nullable=False
+    )
     logo_storage_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     stamp_image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     principal_signature_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("school_type IN ('PRIMARY', 'SECONDARY')", name="chk_schools_school_type"),
+    )
 
     # Relationships
     configuration: Mapped[Optional["SchoolConfiguration"]] = relationship(

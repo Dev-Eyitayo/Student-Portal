@@ -6,8 +6,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class LevelCategory(StrEnum):
+    PRIMARY = "PRIMARY"
     JUNIOR_SECONDARY = "JUNIOR_SECONDARY"
     SENIOR_SECONDARY = "SENIOR_SECONDARY"
+
+
+class StructureTemplateType(StrEnum):
+    PRIMARY = "PRIMARY"
+    SECONDARY = "SECONDARY"
 
 
 class SessionCreateRequest(BaseModel):
@@ -169,7 +175,8 @@ class ClassGroupUpdateRequest(BaseModel):
 
 
 class StructureTemplateApplyRequest(BaseModel):
-    template_id: str = Field(..., min_length=2, max_length=64)
+    template_id: str | None = Field(None, min_length=2, max_length=64)
+    template_type: StructureTemplateType = StructureTemplateType.SECONDARY
     academic_session_id: UUID | None = None
     session_name: str | None = Field(None, min_length=2, max_length=32)
     session_start_date: date | None = None
@@ -190,6 +197,7 @@ class StructureTemplateApplyRequest(BaseModel):
 
 class StructureTemplateApplyResponse(BaseModel):
     template_id: str
+    template_type: StructureTemplateType
     academic_session_id: UUID
     levels_created: int
     levels_reused: int
@@ -199,6 +207,13 @@ class StructureTemplateApplyResponse(BaseModel):
     arms_reused: int
     class_groups_created: int
     class_groups_reused: int
+    subjects_created: int = 0
+    subjects_reused: int = 0
+    subject_offerings_created: int = 0
+    subject_offerings_reused: int = 0
+    class_subjects_created: int = 0
+    class_subjects_reused: int = 0
+    subject_registrations_created: int = 0
     message: str
 
 

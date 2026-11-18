@@ -106,7 +106,7 @@ class AcademicLevel(Base, TenantMixin, TimestampMixin):
     level_order: Mapped[int] = mapped_column(SmallInteger, nullable=False)  # 1, 2, 3, 4, 5, 6
     category: Mapped[str] = mapped_column(
         String(32), nullable=False
-    )  # 'JUNIOR_SECONDARY', 'SENIOR_SECONDARY'
+    )  # 'PRIMARY', 'JUNIOR_SECONDARY', 'SENIOR_SECONDARY'
 
     __table_args__ = (
         Index(
@@ -124,7 +124,7 @@ class AcademicLevel(Base, TenantMixin, TimestampMixin):
             postgresql_where=text("deleted_at IS NULL"),
         ),
         CheckConstraint(
-            "category IN ('JUNIOR_SECONDARY', 'SENIOR_SECONDARY')",
+            "category IN ('PRIMARY', 'JUNIOR_SECONDARY', 'SENIOR_SECONDARY')",
             name="chk_level_category",
         ),
     )

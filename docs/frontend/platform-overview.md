@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Olivet is a multi-tenant academic records platform for Nigerian secondary schools. The pilot tenant is Olivet Baptist High School, Oyo. The platform is designed for junior and senior secondary schools and can be configured for other schools without changing application code.
+Olivet is a multi-tenant academic records platform for Nigerian primary and secondary schools. The pilot tenant is Olivet Baptist High School, Oyo, a junior and senior secondary school. Nigerian three-term primary support for Basic 1–6 (M9) is **LIVE**; schools can be configured without changing application code.
 
 The frontend should feel like a familiar school records system while remaining driven by the school's configuration: sessions, terms, levels, departments, arms, subjects, assessment weights, grading scales, and permissions are data, not hardcoded UI assumptions.
 
@@ -19,6 +19,7 @@ Live today:
 - Define assessments, enter scores, submit score sheets, approve them, and unlock them with a reason.
 - Compute term and cumulative annual results, rank students, and produce broadsheets.
 - Publish term results, create immutable snapshots, and issue expiring result links.
+- Support Nigerian three-term primary schools with Basic 1–6 levels, four arms, primary defaults/templates, and no departments or electives (M9).
 
 Planned next:
 
@@ -103,29 +104,29 @@ flowchart TD
 
 - **Academic session**: a school year, with start and end dates. One session can be marked current per school; marking a new session current unsets the previous one.
 - **Academic term**: a date range inside a session, ordered by `term_order`. One term can be current per school. A term can be locked for scoring; while locked, term details cannot be changed and the term cannot be retired.
-- **Academic level**: a level such as JSS1 or SS1, with a category of `JUNIOR_SECONDARY` or `SENIOR_SECONDARY` and a sort order.
-- **Department**: senior-secondary department such as Science, Arts, or Commercial. Junior-secondary classes do not use a department.
-- **Class arm**: the arm letter or label for a class, such as `O`, `L`, `I`, `V`, `E`, `T`, `B`, `H`, `S`, or `Y`.
-- **Class group**: the join of session, level, optional department, and arm. It may have one class teacher. Its display name is either supplied or composed as `{level.code} {department.name} {arm.name}`; junior classes omit the department.
+- **Academic level**: a level such as Basic 1, JSS1, or SS1, with a category of `PRIMARY` (M9, LIVE), `JUNIOR_SECONDARY`, or `SENIOR_SECONDARY` and a sort order.
+- **Department**: senior-secondary department such as Science, Arts, or Commercial. Primary (Basic 1–6) and junior-secondary classes do not use a department.
+- **Class arm**: the arm letter or label for a class, such as `O`, `L`, `I`, `V`, `E`, `T`, `B`, `H`, `S`, or `Y` for the pilot, or `A`–`D` for primary schools (M9, LIVE).
+- **Class group**: the join of session, level, optional department, and arm. It may have one class teacher. Its display name is either supplied or composed as `{level.code} {department.name} {arm.name}`; primary and junior classes omit the department.
 
 ### Students and enrollment
 
-- A **student** is a person with a school-wide admission number, demographics, guardian information, and lifecycle status.
+- A **student** is a person with a school-wide admission number, demographics, guardian information, and lifecycle status. Primary UIs call this person a **pupil** (M9, LIVE); the data model and API remain `Student`.
 - An **enrollment** links a student to a class group for one academic session.
 - Enrollment is the unit that owns subject registrations, scores, and eventually report cards.
 - A student can have only one enrollment per session.
 - Enrolling an `ADMITTED` student changes them to `ACTIVE`.
-- Enrollment automatically registers compulsory subjects. Trade and free electives require explicit registration.
+- Enrollment automatically registers compulsory subjects. Trade and free electives require explicit registration. In primary schools (M9, LIVE) every subject is compulsory core, so all registrations are automatic and no elective/trade step exists.
 
 ### Subjects and teaching
 
 - A **subject** is the school-wide catalog entry, for example Chemistry or Data Processing.
-- A **subject** carries `is_elective` and `is_trade_subject` flags. A **subject offering** connects that subject to a session, level, and optional department.
+- A **subject** carries `is_elective` and `is_trade_subject` flags. A **subject offering** connects that subject to a session, level, and optional department; primary and junior offerings must use `department_id = NULL`.
 - A **class subject** connects an offering to a specific class group. It is the unit teachers are assigned to and the unit results are computed for.
 - A **teacher assignment** links a staff user to a class subject.
 - A **student subject registration** links an enrollment to the class subject the student actually takes.
 
-This distinction matters for electives: not every student in an arm takes every class subject. Score sheets and result totals must use the active registrations for that class subject, never the whole class roster.
+This distinction matters for electives: not every student in an arm takes every class subject. Score sheets and result totals must use the active registrations for that class subject, never the whole class roster. Primary schools (M9, LIVE) have no electives, so every pupil takes every core class subject.
 
 ### Assessments and scoring
 
@@ -220,16 +221,42 @@ Onboarding stores the following school configuration:
 
 The target Olivet blueprint in `ARCHITECTURE.md` includes JSS1-JSS3 and SS1-SS3, Science/Arts/Commercial departments, and arm letters `O, L, I, V, E, T, B, H, S, Y`. These values are seed defaults, not hardcoded business logic.
 
+### Nigerian primary defaults (M9 — LIVE)
+
+Primary defaults mirror the secondary template's 10/10/10/70 assessment structure but use a six-band primary grading scale and no departments.
+
+- Levels: `Basic 1`–`Basic 6` (codes `BASIC1`–`BASIC6`, category `PRIMARY`); arms `A`, `B`, `C`, `D`; no departments.
+- Subjects: all compulsory core; no electives or trade subjects.
+
+| Grade | Range | Remark | Grade point |
+| --- | --- | --- | --- |
+| A | 70.00–100.00 | Excellent | 0.00 |
+| B | 60.00–69.99 | Very Good | 0.00 |
+| C | 50.00–59.99 | Good | 0.00 |
+| D | 45.00–49.99 | Pass | 0.00 |
+| E | 40.00–44.99 | Fair | 0.00 |
+| F | 0.00–39.99 | Fail | 0.00 |
+
+| Code | Name | Max score | Weight |
+| --- | --- | --- | --- |
+| `TEST1` | Test 1 | 10 | 10 |
+| `TEST2` | Test 2 | 10 | 10 |
+| `ASSIGN` | Assignments/Attendance | 10 | 10 |
+| `EXAM` | Terminal Examination | 70 | 70 |
+
+This is 30% continuous assessment / 70% examination. Annual results use the same three terms with equal weights: `>= 50%` promoted, `40–49.99%` promoted on trial, below `40%` repeating. Report template default id: `default_primary_v1`. Primary reports show `department: null` and `class_teacher_comment` (homeroom teacher).
+
 ### Defaults and structure templates (M8 — LIVE)
 
 | Class | Meaning | Frontend use |
 | --- | --- | --- |
 | **School-editable defaults** | Seeded config/profile: grading scale, assessment weights, term definitions, annual rules, timezone, currency, report template. | Pre-fill the setup form; admins may change and save via `PATCH /identity/schools/{school_id}/setup`. |
-| **Optional structure templates** | Preview of levels/departments/arms/optional class groups; applied only on explicit opt-in. | Offer as an optional wizard step; `POST /structure/templates/apply` is idempotent. |
+| **Optional structure templates** | Preview of levels/departments/arms/optional class groups; applied only on explicit opt-in. M9 (LIVE) adds a primary template with Basic 1–6, arms A–D, and core subject offerings/class subjects. | Offer as an optional wizard step; `POST /structure/templates/apply` is idempotent. Let admins choose primary vs secondary. |
 | **Platform defaults (not exposed)** | Internal TTLs, rate limits, rounding, audit retention. | Never render or offer to edit. |
 
 - **Ordering rule:** save assessment-weight edits before creating any `ClassSubject`, because definitions are cloned at creation time. Put setup editing before structure/subject creation in the wizard.
 - Branding uploads use local pilot storage namespaced by school; no server-side PDF storage.
+- M9 (**LIVE**): the public catalog returns both secondary (`olivet_nigeria_default`) and primary (`nigeria_primary_default`) templates; onboarding lets admins choose the school type. The primary template (`nigeria_primary_basic1_6`) applies levels, arms, and core subject offerings/class subjects with no departments. Render the matching school-type and template choices.
 - Custom domains are **PLANNED post-pilot**: DNS verification, verified domains only, `Host` must not select tenant for authenticated APIs, dynamic CORS, HTTPS/cookies.
 
 ## API conventions
@@ -276,6 +303,9 @@ sequenceDiagram
 | School setup aggregate read/save | **LIVE** | M8; admin-only `GET`/`PATCH /identity/schools/{school_id}/setup`. |
 | Branding uploads | **LIVE** | M8; local pilot storage, namespaced by school. |
 | Structure template apply | **LIVE** | M8; idempotent `POST /structure/templates/apply`. |
+| Primary school type and Basic 1–6 templates | **LIVE** | M9; onboarding chooses primary vs secondary; primary has no departments/electives/trades. |
+| Primary grading, assessment, and annual defaults | **LIVE** | M9; A–F scale with grade point `0.00`, 10/10/10/70, equal term weights, 50%/40% promotion. |
+| Primary report variant | **LIVE** | M9; `department = null`, letter grades, `default_primary_v1`, and `class_teacher_comment` in the verified payload. |
 | Custom domains | **PLANNED** | Post-pilot only; no endpoints. |
 | Login, refresh, logout | **LIVE** | JWT access token, HTTP-only refresh cookie, Redis revocation. |
 | Current user and effective permissions | **LIVE** | `GET /identity/me`. |
@@ -341,3 +371,6 @@ Rules the frontend must preserve:
 - M8 endpoints are live; the guided wizard can be rendered in onboarding navigation.
 - Do not derive the school tenant from the `Host` header or a custom domain.
 - Keep assessment-weight editing before class-subject creation in the wizard.
+- M9 is **LIVE**: offer primary school type selection, primary templates, and the primary report variant.
+- Hide departments, electives, and trades for primary schools; label people as pupils and homeroom/class teachers, while keeping `Student`/`ClassGroup` ids in API calls.
+- Primary subjects are all compulsory core: score sheets and totals include the whole class roster, and no subject-registration step is needed.
