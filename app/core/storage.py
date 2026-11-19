@@ -44,6 +44,14 @@ class StorageService:
 
         filename = f"{generate_uuid7()}{extension}"
         relative_path = Path("schools") / safe_slug / "branding" / asset_type / filename
+        if self.settings.STORAGE_PROVIDER == "local" and self.settings.ENVIRONMENT.lower() not in {
+            "development",
+            "test",
+        }:
+            # Staging/production without cloud storage: validate and return a stub path
+            # without writing files to the ephemeral server filesystem.
+            return relative_path.as_posix()
+
         destination = Path(self.settings.STORAGE_LOCAL_DIR) / relative_path
         await self._write_bytes(destination, content)
         return relative_path.as_posix()

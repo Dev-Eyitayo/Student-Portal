@@ -355,3 +355,24 @@ async def test_apply_primary_template_creates_core_subjects_idempotently():
         assert reapply_data["subjects_created"] == 0
         assert reapply_data["subject_offerings_created"] == 0
         assert reapply_data["class_subjects_created"] == 0
+
+
+@pytest.mark.asyncio
+async def test_staging_local_storage_returns_stub_without_writing_to_disk(tmp_path: Path):
+    staging_settings = Settings(
+        ENVIRONMENT="staging",
+        STORAGE_PROVIDER="local",
+        STORAGE_LOCAL_DIR=str(tmp_path),
+    )
+    service = StorageService(staging_settings)
+
+    path = await service.save_school_branding_asset(
+        school_slug="olivet-staging",
+        asset_type="logo",
+        content_type="image/png",
+        content=b"\x89PNG\r\n\x1a\nfake-png-bytes",
+    )
+
+    assert path.startswith("schools/olivet-staging/branding/logo/")
+    assert path.endswith(".png")
+    assert list(tmp_path.rglob("*")) == []
