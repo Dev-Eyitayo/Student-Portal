@@ -77,6 +77,17 @@ class UserResponse(BaseModel):
     staff_profile: StaffProfileResponse | None = None
 
 
+class AssignedClassGroupSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    display_name: str
+    academic_session_id: UUID
+    academic_level_id: UUID
+    department_id: UUID | None = None
+    class_arm_id: UUID
+
+
 class MeResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -92,6 +103,7 @@ class MeResponse(BaseModel):
     is_mfa_enabled: bool
     staff_profile: StaffProfileResponse | None = None
     permissions: list[str] = Field(default_factory=list)
+    assigned_class_groups: list[AssignedClassGroupSummary] = Field(default_factory=list)
 
 
 class StaffInviteRequest(BaseModel):

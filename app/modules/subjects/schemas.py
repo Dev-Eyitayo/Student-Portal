@@ -138,3 +138,37 @@ class SubjectRegistrationBulkSkip(BaseModel):
 class SubjectRegistrationBulkResponse(BaseModel):
     registered: list[SubjectRegistrationResponse]
     skipped: list[SubjectRegistrationBulkSkip]
+
+
+class MyTeachingAssignmentResponse(BaseModel):
+    assignment_id: UUID
+    class_subject_id: UUID
+    class_group_id: UUID
+    class_group_name: str
+    academic_session_id: UUID
+    subject_id: UUID
+    subject_name: str
+    subject_code: str
+    is_elective: bool
+    is_trade_subject: bool
+    start_date: date
+
+
+class ClassSubjectTeacherSummary(BaseModel):
+    assignment_id: UUID
+    teacher_id: UUID
+    first_name: str
+    last_name: str
+    email: str
+    start_date: date
+
+
+class ClassGroupSubjectItem(BaseModel):
+    class_subject_id: UUID
+    subject_offering_id: UUID
+    subject_id: UUID
+    subject_name: str
+    subject_code: str
+    is_elective: bool
+    is_trade_subject: bool
+    teachers: list[ClassSubjectTeacherSummary] = Field(default_factory=list)

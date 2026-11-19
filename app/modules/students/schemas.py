@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 class Gender(StrEnum):
@@ -143,3 +143,125 @@ class StudentBulkImportStatusResponse(BaseModel):
     task_id: str
     state: str
     result: dict[str, Any] | None = None
+
+
+class AttendanceStatus(StrEnum):
+    PRESENT = "PRESENT"
+    ABSENT = "ABSENT"
+    LATE = "LATE"
+
+
+class AttendanceSource(StrEnum):
+    DAILY = "DAILY"
+    MANUAL = "MANUAL"
+
+
+class AttendanceRecordItem(BaseModel):
+    student_enrollment_id: UUID
+    status: AttendanceStatus
+
+
+class ClassAttendanceMarkRequest(BaseModel):
+    academic_term_id: UUID
+    attendance_date: date
+    reason: str | None = Field(None, max_length=500)
+    records: list[AttendanceRecordItem] = Field(..., min_length=1)
+
+
+class EnrollmentAttendanceMarkRequest(BaseModel):
+    academic_term_id: UUID
+    attendance_date: date
+    status: AttendanceStatus
+    reason: str | None = Field(None, max_length=500)
+
+
+class AttendanceRecordResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    school_id: UUID
+    student_enrollment_id: UUID
+    academic_term_id: UUID
+    attendance_date: date
+    status: AttendanceStatus
+    reason: str | None
+    recorded_by_id: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ClassAttendanceMarkResponse(BaseModel):
+    class_group_id: UUID
+    academic_term_id: UUID
+    attendance_date: date
+    records_saved: int
+
+
+class AttendanceSummaryUpdateRequest(BaseModel):
+    academic_term_id: UUID
+    times_school_opened: int = Field(..., ge=0, le=32767)
+    times_present: int = Field(..., ge=0, le=32767)
+    times_absent: int = Field(..., ge=0, le=32767)
+    override_reason: str = Field(..., min_length=3, max_length=500)
+
+    @field_validator("override_reason")
+    @classmethod
+    def strip_override_reason(cls, value: str) -> str:
+        cleaned = value.strip()
+        if len(cleaned) < 3:
+            raise ValueError("Please provide an override reason of at least 3 characters.")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_totals(self) -> "AttendanceSummaryUpdateRequest":
+        if self.times_present + self.times_absent != self.times_school_opened:
+            raise ValueError(
+                "Days present plus days absent must equal the total days school opened."
+            )
+        return self
+
+
+class ClassAttendanceSummaryItem(BaseModel):
+    student_enrollment_id: UUID
+    times_school_opened: int = Field(..., ge=0, le=32767)
+    times_present: int = Field(..., ge=0, le=32767)
+    times_absent: int = Field(..., ge=0, le=32767)
+
+    @model_validator(mode="after")
+    def validate_totals(self) -> "ClassAttendanceSummaryItem":
+        if self.times_present + self.times_absent != self.times_school_opened:
+            raise ValueError(
+                "Days present plus days absent must equal the total days school opened."
+            )
+        return self
+
+
+class ClassAttendanceSummaryUpdateRequest(BaseModel):
+    academic_term_id: UUID
+    override_reason: str = Field(..., min_length=3, max_length=500)
+    summaries: list[ClassAttendanceSummaryItem] = Field(..., min_length=1)
+
+    @field_validator("override_reason")
+    @classmethod
+    def strip_override_reason(cls, value: str) -> str:
+        cleaned = value.strip()
+        if len(cleaned) < 3:
+            raise ValueError("Please provide an override reason of at least 3 characters.")
+        return cleaned
+
+
+class AttendanceSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    school_id: UUID
+    student_enrollment_id: UUID
+    academic_term_id: UUID
+    times_school_opened: int
+    times_present: int
+    times_absent: int
+    source: AttendanceSource
+    override_reason: str | None
+    updated_by_id: UUID | None
+    created_at: datetime
+    updated_at: datetime

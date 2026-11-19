@@ -32,7 +32,10 @@ from app.modules.subjects.models import (
     TeacherAssignment,
 )
 from app.modules.subjects.schemas import (
+    ClassGroupSubjectItem,
     ClassSubjectCreateRequest,
+    ClassSubjectTeacherSummary,
+    MyTeachingAssignmentResponse,
     OfferingCreateRequest,
     OfferingUpdateRequest,
     SubjectCreateRequest,
@@ -1453,3 +1456,154 @@ async def get_class_subject_with_context(
     subject_stmt = select(Subject).where(Subject.id == offering.subject_id)
     subject = (await db.execute(subject_stmt)).scalar_one()
     return class_subject, offering, subject
+
+
+async def list_my_teaching_assignments(
+    db: AsyncSession,
+    school_id: UUID,
+    current_user: User,
+    *,
+    academic_session_id: UUID | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[MyTeachingAssignmentResponse], PageMeta]:
+    base_stmt = (
+        select(TeacherAssignment, ClassSubject, ClassGroup, Subject)
+        .join(ClassSubject, ClassSubject.id == TeacherAssignment.class_subject_id)
+        .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+        .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+        .join(Subject, Subject.id == SubjectOffering.subject_id)
+        .where(
+            TeacherAssignment.school_id == school_id,
+            TeacherAssignment.teacher_id == current_user.id,
+            TeacherAssignment.is_active.is_(True),
+            TeacherAssignment.deleted_at.is_(None),
+            ClassSubject.deleted_at.is_(None),
+            ClassGroup.deleted_at.is_(None),
+            SubjectOffering.deleted_at.is_(None),
+            Subject.deleted_at.is_(None),
+        )
+    )
+    if academic_session_id is not None:
+        base_stmt = base_stmt.where(ClassGroup.academic_session_id == academic_session_id)
+
+    total_stmt = select(func.count()).select_from(base_stmt.subquery())
+    total = int((await db.execute(total_stmt)).scalar_one() or 0)
+    total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 0
+
+    rows = (
+        await db.execute(
+            base_stmt.order_by(ClassGroup.display_name.asc(), Subject.name.asc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).all()
+
+    items = [
+        MyTeachingAssignmentResponse(
+            assignment_id=assignment.id,
+            class_subject_id=class_subject.id,
+            class_group_id=class_group.id,
+            class_group_name=class_group.display_name,
+            academic_session_id=class_group.academic_session_id,
+            subject_id=subject.id,
+            subject_name=subject.name,
+            subject_code=subject.code,
+            is_elective=subject.is_elective,
+            is_trade_subject=subject.is_trade_subject,
+            start_date=assignment.start_date,
+        )
+        for assignment, class_subject, class_group, subject in rows
+    ]
+    return items, PageMeta(
+        page=page,
+        page_size=page_size,
+        total=total,
+        total_pages=total_pages,
+    )
+
+
+async def list_class_group_subjects(
+    db: AsyncSession,
+    school_id: UUID,
+    class_group_id: UUID,
+    current_user: User,
+) -> list[ClassGroupSubjectItem]:
+    class_group = await _get_active_class_group(db, school_id, class_group_id)
+
+    if class_group.class_teacher_id != current_user.id:
+        allowed = False
+        for perm_code in ("subjects:manage", "teachers:assign", "structure:manage"):
+            try:
+                await require_scoped_permission(
+                    db,
+                    current_user,
+                    perm_code,
+                    department_id=class_group.department_id,
+                    academic_level_id=class_group.academic_level_id,
+                    class_group_id=class_group.id,
+                )
+                allowed = True
+                break
+            except InsufficientPermissionException:
+                continue
+        if not allowed:
+            raise InsufficientPermissionException("subjects:manage")
+
+    cs_rows = (
+        await db.execute(
+            select(ClassSubject, SubjectOffering, Subject)
+            .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+            .join(Subject, Subject.id == SubjectOffering.subject_id)
+            .where(
+                ClassSubject.school_id == school_id,
+                ClassSubject.class_group_id == class_group.id,
+                ClassSubject.deleted_at.is_(None),
+                SubjectOffering.deleted_at.is_(None),
+                Subject.deleted_at.is_(None),
+            )
+            .order_by(Subject.name.asc())
+        )
+    ).all()
+
+    cs_ids = [cs.id for cs, _, _ in cs_rows]
+    teachers_by_cs: dict[UUID, list[ClassSubjectTeacherSummary]] = {}
+    if cs_ids:
+        ta_rows = (
+            await db.execute(
+                select(TeacherAssignment, User)
+                .join(User, User.id == TeacherAssignment.teacher_id)
+                .where(
+                    TeacherAssignment.school_id == school_id,
+                    TeacherAssignment.class_subject_id.in_(cs_ids),
+                    TeacherAssignment.is_active.is_(True),
+                    TeacherAssignment.deleted_at.is_(None),
+                )
+                .order_by(User.first_name.asc(), User.last_name.asc())
+            )
+        ).all()
+        for assignment, teacher in ta_rows:
+            teachers_by_cs.setdefault(assignment.class_subject_id, []).append(
+                ClassSubjectTeacherSummary(
+                    assignment_id=assignment.id,
+                    teacher_id=teacher.id,
+                    first_name=teacher.first_name,
+                    last_name=teacher.last_name,
+                    email=teacher.email,
+                    start_date=assignment.start_date,
+                )
+            )
+
+    return [
+        ClassGroupSubjectItem(
+            class_subject_id=cs.id,
+            subject_offering_id=offering.id,
+            subject_id=subject.id,
+            subject_name=subject.name,
+            subject_code=subject.code,
+            is_elective=subject.is_elective,
+            is_trade_subject=subject.is_trade_subject,
+            teachers=teachers_by_cs.get(cs.id, []),
+        )
+        for cs, offering, subject in cs_rows
+    ]

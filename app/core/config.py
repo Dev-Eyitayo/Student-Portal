@@ -84,10 +84,20 @@ class Settings(BaseSettings):
     STORAGE_LOCAL_DIR: str = "var/storage"
     STORAGE_PUBLIC_BASE_URL: str | None = None
     BRANDING_UPLOAD_MAX_BYTES: int = 2 * 1024 * 1024
+    CLOUDINARY_CLOUD_NAME: str | None = None
+    CLOUDINARY_API_KEY: str | None = None
+    CLOUDINARY_API_SECRET: str | None = None
+    S3_BUCKET: str | None = None
+    S3_REGION: str = "us-east-1"
+    S3_ENDPOINT_URL: str | None = None
+    AWS_ACCESS_KEY_ID: str | None = None
+    AWS_SECRET_ACCESS_KEY: str | None = None
 
     # Email Delivery (Provider-Agnostic)
     MAIL_PROVIDER: str = "console"
-    DEFAULT_FROM_EMAIL: str = "Olivet Baptist High School <records@olivet.edu.ng>"
+    MAIL_BASE_URL: str = "https://api.senviok.live"
+    MAIL_FROM_NAME: str = "Olivet Academic Records Platform"
+    DEFAULT_FROM_EMAIL: str = "records@olivet.edu.ng"
     MAIL_API_KEY: str | None = None
     MAIL_DOMAIN: str | None = None
 

@@ -22,6 +22,10 @@ from app.modules.academic_structure.router import class_groups_router
 from app.modules.academic_structure.router import router as structure_router
 from app.modules.assessments.router import router as assessments_router
 from app.modules.computation.router import router as computation_router
+from app.modules.distribution.router import (
+    publication_distribution_router,
+    results_router,
+)
 from app.modules.identity.router import router as identity_router
 from app.modules.identity.seed import seed_system_permissions
 from app.modules.publication.router import router as publication_router
@@ -95,6 +99,8 @@ def create_app() -> FastAPI:
     app.include_router(assessments_router, prefix="/api/v1")
     app.include_router(computation_router, prefix="/api/v1")
     app.include_router(publication_router, prefix="/api/v1")
+    app.include_router(publication_distribution_router, prefix="/api/v1")
+    app.include_router(results_router, prefix="/api/v1")
 
     # Healthcheck
     @app.get("/api/v1/health", tags=["System"])

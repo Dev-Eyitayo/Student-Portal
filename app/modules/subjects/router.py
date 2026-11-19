@@ -12,6 +12,7 @@ from app.modules.subjects import services
 from app.modules.subjects.schemas import (
     ClassSubjectCreateRequest,
     ClassSubjectResponse,
+    MyTeachingAssignmentResponse,
     OfferingCreateRequest,
     OfferingResponse,
     OfferingUpdateRequest,
@@ -294,6 +295,30 @@ async def list_class_subjects(
     )
     return SuccessResponse[Page[ClassSubjectResponse]](
         data=Page[ClassSubjectResponse](items=items, meta=meta)
+    )
+
+
+@class_subjects_router.get(
+    "/my-assignments",
+    response_model=SuccessResponse[Page[MyTeachingAssignmentResponse]],
+)
+async def list_my_teaching_assignments(
+    academic_session_id: UUID | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    items, meta = await services.list_my_teaching_assignments(
+        db,
+        _school_id(current_user),
+        current_user,
+        academic_session_id=academic_session_id,
+        page=page,
+        page_size=page_size,
+    )
+    return SuccessResponse[Page[MyTeachingAssignmentResponse]](
+        data=Page[MyTeachingAssignmentResponse](items=items, meta=meta)
     )
 
 

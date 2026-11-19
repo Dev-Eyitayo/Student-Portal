@@ -17,6 +17,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.celery_app import celery_app
@@ -33,6 +34,7 @@ from app.core.permissions import require_permission
 from app.core.redis import get_redis
 from app.core.security import decode_access_token, revoke_access_token
 from app.core.storage import storage_service
+from app.modules.academic_structure.models import ClassGroup
 from app.modules.audit.services import AuditContext
 from app.modules.common.models import generate_uuid7
 from app.modules.common.schemas import MessageResponse, SuccessResponse
@@ -41,6 +43,7 @@ from app.modules.identity.bulk_import import MAX_STAFF_IMPORT_BYTES
 from app.modules.identity.models import User
 from app.modules.identity.schemas import (
     AcceptInvitationRequest,
+    AssignedClassGroupSummary,
     BrandingAssetType,
     BrandingUploadResponse,
     DeactivateUserResponse,
@@ -350,6 +353,26 @@ async def get_current_user_profile(
     """
     permissions = await services.get_user_effective_permissions(db, current_user)
     school_name = current_user.school.name if current_user.school else None
+    assigned_class_groups: list[AssignedClassGroupSummary] = []
+    if current_user.school_id is not None:
+        groups = (
+            (
+                await db.execute(
+                    select(ClassGroup)
+                    .where(
+                        ClassGroup.school_id == current_user.school_id,
+                        ClassGroup.class_teacher_id == current_user.id,
+                        ClassGroup.deleted_at.is_(None),
+                    )
+                    .order_by(ClassGroup.display_name.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assigned_class_groups = [
+            AssignedClassGroupSummary.model_validate(group) for group in groups
+        ]
 
     return SuccessResponse[MeResponse](
         data=MeResponse(
@@ -365,6 +388,7 @@ async def get_current_user_profile(
             is_mfa_enabled=current_user.is_mfa_enabled,
             staff_profile=current_user.staff_profile,
             permissions=permissions,
+            assigned_class_groups=assigned_class_groups,
         )
     )
 
