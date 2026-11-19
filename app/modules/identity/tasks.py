@@ -1,16 +1,19 @@
 import asyncio
 import base64
 import logging
+from html import escape
 from typing import Any
 from uuid import UUID
 
 from app.core.celery_app import celery_app
+from app.core.config import get_settings
 from app.core.database import (
     async_engine,
     async_session_factory,
     reset_tenant_scope,
     set_tenant_scope,
 )
+from app.core.mail import EmailDeliveryError, mail_client
 from app.core.redis import close_redis, get_redis
 from app.modules.identity import services
 from app.modules.identity.bulk_import import parse_staff_import_file
@@ -28,6 +31,9 @@ def _result(school_id: str, status: str, **payload: Any) -> dict[str, Any]:
 @celery_app.task(
     bind=True,
     name="app.modules.identity.tasks.send_staff_invitation_email",
+    autoretry_for=(EmailDeliveryError,),
+    retry_backoff=True,
+    max_retries=3,
 )
 def send_staff_invitation_email(
     self,
@@ -36,13 +42,22 @@ def send_staff_invitation_email(
     school_name: str,
     invitation_token: str,
 ) -> dict[str, Any]:
-    logger.info(
-        "Staff invitation email ready for delivery to %s (%s) at %s",
-        email,
-        first_name,
-        school_name,
+    app_url = get_settings().APP_URL.rstrip("/")
+    invite_url = f"{app_url}/invite?token={invitation_token}"
+    safe_name = escape(first_name)
+    safe_school = escape(school_name)
+    html = (
+        f"<p>Hello {safe_name},</p>"
+        f"<p>You have been invited to join <strong>{safe_school}</strong> on Olivet.</p>"
+        f'<p><a href="{escape(invite_url)}">Accept your invitation</a> (valid for 72 hours).</p>'
     )
-    return {"status": "queued", "email": email}
+    message_id = mail_client.send_sync(
+        to_email=email,
+        to_name=first_name,
+        subject=f"You are invited to {school_name}",
+        html=html,
+    )
+    return {"status": "sent", "email": email, "message_id": message_id}
 
 
 @celery_app.task(

@@ -23,9 +23,13 @@ from app.modules.audit.services import AuditContext
 from app.modules.common.models import generate_uuid7
 from app.modules.common.schemas import Page, SuccessResponse
 from app.modules.identity.models import User
-from app.modules.students import services
+from app.modules.students import attendance_services, services
 from app.modules.students.bulk_import import MAX_STUDENT_IMPORT_BYTES
 from app.modules.students.schemas import (
+    AttendanceRecordResponse,
+    AttendanceSummaryResponse,
+    AttendanceSummaryUpdateRequest,
+    EnrollmentAttendanceMarkRequest,
     EnrollmentCreateRequest,
     EnrollmentResponse,
     EnrollmentUpdateRequest,
@@ -386,3 +390,102 @@ async def update_enrollment(
         _audit_context(request, current_user),
     )
     return SuccessResponse[EnrollmentResponse](data=EnrollmentResponse.model_validate(enrollment))
+
+
+@router.post(
+    "/enrollments/{enrollment_id}/attendance",
+    response_model=SuccessResponse[AttendanceRecordResponse],
+)
+async def mark_enrollment_attendance(
+    enrollment_id: UUID,
+    req: EnrollmentAttendanceMarkRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    record = await attendance_services.mark_enrollment_attendance(
+        db,
+        _school_id(current_user),
+        enrollment_id,
+        req,
+        current_user,
+        _audit_context(request, current_user),
+    )
+    return SuccessResponse[AttendanceRecordResponse](
+        data=AttendanceRecordResponse.model_validate(record)
+    )
+
+
+@router.get(
+    "/enrollments/{enrollment_id}/attendance",
+    response_model=SuccessResponse[Page[AttendanceRecordResponse]],
+)
+async def list_enrollment_attendance(
+    enrollment_id: UUID,
+    academic_term_id: UUID | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    items, meta = await attendance_services.list_enrollment_attendance(
+        db,
+        _school_id(current_user),
+        enrollment_id,
+        current_user,
+        academic_term_id=academic_term_id,
+        page=page,
+        page_size=page_size,
+    )
+    return SuccessResponse[Page[AttendanceRecordResponse]](
+        data=Page(
+            items=[AttendanceRecordResponse.model_validate(item) for item in items],
+            meta=meta,
+        )
+    )
+
+
+@router.get(
+    "/enrollments/{enrollment_id}/attendance-summary",
+    response_model=SuccessResponse[AttendanceSummaryResponse],
+)
+async def get_enrollment_attendance_summary(
+    enrollment_id: UUID,
+    academic_term_id: UUID = Query(...),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    summary = await attendance_services.get_enrollment_attendance_summary(
+        db,
+        _school_id(current_user),
+        enrollment_id,
+        academic_term_id,
+        current_user,
+    )
+    return SuccessResponse[AttendanceSummaryResponse](
+        data=AttendanceSummaryResponse.model_validate(summary)
+    )
+
+
+@router.patch(
+    "/enrollments/{enrollment_id}/attendance-summary",
+    response_model=SuccessResponse[AttendanceSummaryResponse],
+)
+async def update_enrollment_attendance_summary(
+    enrollment_id: UUID,
+    req: AttendanceSummaryUpdateRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    summary = await attendance_services.update_enrollment_attendance_summary(
+        db,
+        _school_id(current_user),
+        enrollment_id,
+        req,
+        current_user,
+        _audit_context(request, current_user),
+    )
+    return SuccessResponse[AttendanceSummaryResponse](
+        data=AttendanceSummaryResponse.model_validate(summary)
+    )

@@ -35,6 +35,15 @@ from app.modules.academic_structure.schemas import (
 )
 from app.modules.common.schemas import MessageResponse, Page, SuccessResponse
 from app.modules.identity.models import User
+from app.modules.students import attendance_services
+from app.modules.students.schemas import (
+    AttendanceSummaryResponse,
+    ClassAttendanceMarkRequest,
+    ClassAttendanceMarkResponse,
+    ClassAttendanceSummaryUpdateRequest,
+)
+from app.modules.subjects import services as subjects_services
+from app.modules.subjects.schemas import ClassGroupSubjectItem
 
 router = APIRouter(
     prefix="/structure",
@@ -647,3 +656,67 @@ async def apply_structure_template(
         build_audit_context(request, current_user),
     )
     return SuccessResponse[StructureTemplateApplyResponse](data=result)
+
+
+@router.post(
+    "/class-groups/{class_group_id}/attendance",
+    response_model=SuccessResponse[ClassAttendanceMarkResponse],
+)
+async def mark_class_attendance(
+    class_group_id: UUID,
+    req: ClassAttendanceMarkRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    result = await attendance_services.mark_class_attendance(
+        db,
+        require_school_id(current_user),
+        class_group_id,
+        req,
+        current_user,
+        build_audit_context(request, current_user),
+    )
+    return SuccessResponse[ClassAttendanceMarkResponse](data=result)
+
+
+@router.patch(
+    "/class-groups/{class_group_id}/attendance-summary",
+    response_model=SuccessResponse[list[AttendanceSummaryResponse]],
+)
+async def update_class_attendance_summary(
+    class_group_id: UUID,
+    req: ClassAttendanceSummaryUpdateRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    summaries = await attendance_services.update_class_attendance_summary(
+        db,
+        require_school_id(current_user),
+        class_group_id,
+        req,
+        current_user,
+        build_audit_context(request, current_user),
+    )
+    return SuccessResponse[list[AttendanceSummaryResponse]](
+        data=[AttendanceSummaryResponse.model_validate(item) for item in summaries]
+    )
+
+
+@router.get(
+    "/class-groups/{class_group_id}/subjects",
+    response_model=SuccessResponse[list[ClassGroupSubjectItem]],
+)
+async def list_class_group_subjects(
+    class_group_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    items = await subjects_services.list_class_group_subjects(
+        db,
+        require_school_id(current_user),
+        class_group_id,
+        current_user,
+    )
+    return SuccessResponse[list[ClassGroupSubjectItem]](data=items)

@@ -7,7 +7,9 @@ from sqlalchemy import (
     Date,
     ForeignKey,
     Index,
+    SmallInteger,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -15,7 +17,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.modules.common.models import Base, TenantMixin, TimestampMixin, generate_uuid7
 
 if TYPE_CHECKING:
-    from app.modules.academic_structure.models import AcademicSession, ClassGroup
+    from app.modules.academic_structure.models import AcademicSession, AcademicTerm, ClassGroup
+    from app.modules.identity.models import User
     from app.modules.subjects.models import StudentSubjectRegistration
 
 
@@ -92,3 +95,79 @@ class StudentEnrollment(Base, TenantMixin, TimestampMixin):
         back_populates="student_enrollment",
         passive_deletes=True,
     )
+
+
+class AttendanceRecord(Base, TenantMixin, TimestampMixin):
+    __tablename__ = "attendance_records"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
+    student_enrollment_id: Mapped[UUID] = mapped_column(
+        ForeignKey("student_enrollments.id", ondelete="RESTRICT"), nullable=False
+    )
+    academic_term_id: Mapped[UUID] = mapped_column(
+        ForeignKey("academic_terms.id", ondelete="RESTRICT"), nullable=False
+    )
+    attendance_date: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recorded_by_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "student_enrollment_id",
+            "attendance_date",
+            name="uq_attendance_enrollment_date",
+        ),
+        CheckConstraint(
+            "status IN ('PRESENT', 'ABSENT', 'LATE')",
+            name="chk_attendance_record_status",
+        ),
+        Index("idx_attendance_records_term", "school_id", "academic_term_id", "attendance_date"),
+    )
+
+    student_enrollment: Mapped["StudentEnrollment"] = relationship("StudentEnrollment")
+    academic_term: Mapped["AcademicTerm"] = relationship("AcademicTerm")
+    recorded_by: Mapped[Optional["User"]] = relationship("User")
+
+
+class AttendanceSummary(Base, TenantMixin, TimestampMixin):
+    __tablename__ = "attendance_summaries"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
+    student_enrollment_id: Mapped[UUID] = mapped_column(
+        ForeignKey("student_enrollments.id", ondelete="RESTRICT"), nullable=False
+    )
+    academic_term_id: Mapped[UUID] = mapped_column(
+        ForeignKey("academic_terms.id", ondelete="RESTRICT"), nullable=False
+    )
+    times_school_opened: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)
+    times_present: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)
+    times_absent: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)
+    source: Mapped[str] = mapped_column(String(16), default="DAILY", nullable=False)
+    override_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_by_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "student_enrollment_id",
+            "academic_term_id",
+            name="uq_attendance_summary_enrollment_term",
+        ),
+        CheckConstraint(
+            "source IN ('DAILY', 'MANUAL')",
+            name="chk_attendance_summary_source",
+        ),
+        CheckConstraint(
+            "times_school_opened >= 0 AND times_present >= 0 AND times_absent >= 0",
+            name="chk_attendance_summary_non_negative",
+        ),
+        Index("idx_attendance_summaries_term", "school_id", "academic_term_id"),
+    )
+
+    student_enrollment: Mapped["StudentEnrollment"] = relationship("StudentEnrollment")
+    academic_term: Mapped["AcademicTerm"] = relationship("AcademicTerm")
+    updated_by: Mapped[Optional["User"]] = relationship("User")

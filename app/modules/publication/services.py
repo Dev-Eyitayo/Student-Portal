@@ -19,6 +19,7 @@ from app.modules.computation.schemas import (
 )
 from app.modules.distribution.models import ResultAccessToken
 from app.modules.identity.models import SchoolConfiguration
+from app.modules.students.models import AttendanceSummary
 
 TOKEN_TTL_DAYS = 90
 
@@ -91,6 +92,26 @@ async def publish_term(
         SubjectResult.academic_term_id == term.id,
     )
     subject_results = (await db.execute(results_stmt)).scalars().all()
+
+    summaries_stmt = select(AttendanceSummary).where(
+        AttendanceSummary.school_id == school_id,
+        AttendanceSummary.academic_term_id == term.id,
+        AttendanceSummary.deleted_at.is_(None),
+    )
+    summaries_by_enrollment = {
+        s.student_enrollment_id: s for s in (await db.execute(summaries_stmt)).scalars().all()
+    }
+    for card in cards:
+        summary = summaries_by_enrollment.get(card.student_enrollment_id)
+        if summary is not None:
+            if summary.times_present + summary.times_absent != summary.times_school_opened:
+                raise ValidationException(
+                    "Attendance totals do not match days opened for one or more learners. "
+                    "Please verify attendance summaries before publishing."
+                )
+            card.times_school_opened = summary.times_school_opened
+            card.times_present = summary.times_present
+            card.times_absent = summary.times_absent
 
     snapshot = computation_services.build_snapshot(config)
     published_at = datetime.now(UTC)
