@@ -23,6 +23,7 @@ from app.modules.subjects.schemas import (
     SubjectRegistrationCreateRequest,
     SubjectRegistrationResponse,
     SubjectResponse,
+    SubjectSummaryResponse,
     SubjectUpdateRequest,
     TeacherAssignmentBulkCreateRequest,
     TeacherAssignmentBulkResponse,
@@ -109,6 +110,24 @@ async def create_subject(
         db, _school_id(current_user), req, _audit_context(request, current_user)
     )
     return SuccessResponse[SubjectResponse](data=SubjectResponse.model_validate(subject))
+
+
+@router.get(
+    "/summary",
+    response_model=SuccessResponse[SubjectSummaryResponse],
+    dependencies=[Depends(require_permission("subjects:manage"))],
+)
+async def get_subjects_summary(
+    academic_session_id: UUID | None = Query(None),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    summary = await services.get_subjects_summary(
+        db, _school_id(current_user), academic_session_id=academic_session_id
+    )
+    return SuccessResponse[SubjectSummaryResponse](
+        data=SubjectSummaryResponse.model_validate(summary)
+    )
 
 
 @router.get(
@@ -277,6 +296,11 @@ async def retire_offering(
 async def list_class_subjects(
     class_group_id: UUID | None = Query(None),
     subject_offering_id: UUID | None = Query(None),
+    academic_session_id: UUID | None = Query(None),
+    academic_level_id: UUID | None = Query(None),
+    department_id: UUID | None = Query(None),
+    category: str | None = Query(None, max_length=32),
+    has_teacher: bool | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     include_retired: bool = Query(False),
@@ -289,6 +313,11 @@ async def list_class_subjects(
         current_user,
         class_group_id=class_group_id,
         subject_offering_id=subject_offering_id,
+        academic_session_id=academic_session_id,
+        academic_level_id=academic_level_id,
+        department_id=department_id,
+        category=category,
+        has_teacher=has_teacher,
         page=page,
         page_size=page_size,
         include_retired=include_retired,

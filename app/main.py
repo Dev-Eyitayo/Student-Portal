@@ -18,9 +18,10 @@ from app.core.exceptions import (
 )
 from app.core.redis import close_redis, init_redis
 from app.core.rls import verify_rls_enforcement
-from app.modules.academic_structure.router import class_groups_router
+from app.modules.academic_structure.router import class_groups_router, dashboard_router
 from app.modules.academic_structure.router import router as structure_router
 from app.modules.assessments.router import router as assessments_router
+from app.modules.audit.router import router as audit_router
 from app.modules.computation.router import router as computation_router
 from app.modules.distribution.router import (
     publication_distribution_router,
@@ -92,6 +93,7 @@ def create_app() -> FastAPI:
     app.include_router(identity_router, prefix="/api/v1")
     app.include_router(structure_router, prefix="/api/v1")
     app.include_router(class_groups_router, prefix="/api/v1")
+    app.include_router(dashboard_router, prefix="/api/v1")
     app.include_router(students_router, prefix="/api/v1")
     app.include_router(subjects_router, prefix="/api/v1")
     app.include_router(class_subjects_router, prefix="/api/v1")
@@ -101,6 +103,7 @@ def create_app() -> FastAPI:
     app.include_router(publication_router, prefix="/api/v1")
     app.include_router(publication_distribution_router, prefix="/api/v1")
     app.include_router(results_router, prefix="/api/v1")
+    app.include_router(audit_router, prefix="/api/v1")
 
     # Healthcheck
     @app.get("/api/v1/health", tags=["System"])

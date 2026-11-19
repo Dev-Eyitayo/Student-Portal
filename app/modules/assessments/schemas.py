@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.modules.common.schemas import PageMeta
+
 
 class AssessmentType(StrEnum):
     CONTINUOUS_ASSESSMENT = "CONTINUOUS_ASSESSMENT"
@@ -131,3 +133,32 @@ class ScoreSheetStatusResponse(BaseModel):
     unlock_reason: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ScoreSheetOverviewItem(BaseModel):
+    class_subject_id: UUID
+    academic_term_id: UUID
+    class_group_id: UUID
+    class_group_name: str
+    subject_id: UUID
+    subject_name: str
+    subject_code: str
+    teacher_names: list[str] = Field(default_factory=list)
+    status: str
+    submitted_at: datetime | None = None
+    approved_at: datetime | None = None
+    unlocked_at: datetime | None = None
+    unlock_reason: str | None = None
+
+
+class ScoreSheetOverviewSummary(BaseModel):
+    total: int
+    draft: int
+    submitted: int
+    approved: int
+
+
+class ScoreSheetOverviewPageResponse(BaseModel):
+    items: list[ScoreSheetOverviewItem]
+    meta: PageMeta
+    summary: ScoreSheetOverviewSummary

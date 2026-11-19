@@ -784,3 +784,174 @@ async def unlock_score_sheet(
     )
     await db.refresh(sheet_status)
     return sheet_status
+
+
+async def list_score_sheets_overview(
+    db: AsyncSession,
+    school_id: UUID,
+    academic_term_id: UUID,
+    current_user: User,
+    *,
+    class_group_id: UUID | None = None,
+    subject_id: UUID | None = None,
+    status_filter: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, int]]:
+    from app.modules.subjects.models import (
+        ClassSubject,
+        Subject,
+        SubjectOffering,
+        TeacherAssignment,
+    )
+
+    term = (
+        await db.execute(
+            select(AcademicTerm).where(
+                AcademicTerm.id == academic_term_id,
+                AcademicTerm.school_id == school_id,
+                AcademicTerm.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if term is None:
+        raise ResourceNotFoundException("academic term", academic_term_id)
+
+    approve_scope = await get_permission_scope(db, current_user, "scores:approve")
+    enter_scope = await get_permission_scope(db, current_user, "scores:enter")
+
+    stmt = (
+        select(
+            ClassSubject.id,
+            ClassGroup.id,
+            ClassGroup.display_name,
+            Subject.id,
+            Subject.name,
+            Subject.code,
+        )
+        .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+        .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+        .join(Subject, Subject.id == SubjectOffering.subject_id)
+        .where(
+            ClassSubject.school_id == school_id,
+            ClassSubject.deleted_at.is_(None),
+            ClassGroup.academic_session_id == term.academic_session_id,
+            ClassGroup.deleted_at.is_(None),
+        )
+    )
+
+    if not approve_scope.has_any_access and not enter_scope.has_any_access:
+        raise InsufficientPermissionException(permission_code="scores:enter")
+
+    from sqlalchemy import or_
+
+    access_clauses = []
+    if approve_scope.has_any_access:
+        if approve_scope.unscoped:
+            access_clauses = []
+        else:
+            access_clauses.append(
+                build_scope_filter(
+                    approve_scope,
+                    department_column=ClassGroup.department_id,
+                    academic_level_column=ClassGroup.academic_level_id,
+                    class_group_column=ClassGroup.id,
+                )
+            )
+    if enter_scope.has_any_access and not (approve_scope.has_any_access and approve_scope.unscoped):
+        if enter_scope.unscoped:
+            access_clauses = []
+        else:
+            assigned_sub = select(TeacherAssignment.class_subject_id).where(
+                TeacherAssignment.school_id == school_id,
+                TeacherAssignment.teacher_id == current_user.id,
+                TeacherAssignment.is_active.is_(True),
+                TeacherAssignment.deleted_at.is_(None),
+            )
+            access_clauses.append(ClassSubject.id.in_(assigned_sub))
+
+    if access_clauses:
+        stmt = stmt.where(or_(*access_clauses))
+
+    if class_group_id is not None:
+        stmt = stmt.where(ClassGroup.id == class_group_id)
+    if subject_id is not None:
+        stmt = stmt.where(Subject.id == subject_id)
+
+    all_cs = (
+        await db.execute(stmt.order_by(ClassGroup.display_name.asc(), Subject.name.asc()))
+    ).all()
+    cs_ids = [row[0] for row in all_cs]
+
+    status_map: dict[UUID, ScoreSheetStatus] = {}
+    teacher_map: dict[UUID, list[str]] = {}
+    if cs_ids:
+        status_rows = (
+            (
+                await db.execute(
+                    select(ScoreSheetStatus).where(
+                        ScoreSheetStatus.school_id == school_id,
+                        ScoreSheetStatus.academic_term_id == term.id,
+                        ScoreSheetStatus.class_subject_id.in_(cs_ids),
+                        ScoreSheetStatus.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        status_map = {s.class_subject_id: s for s in status_rows}
+
+        ta_rows = (
+            await db.execute(
+                select(TeacherAssignment.class_subject_id, User.first_name, User.last_name)
+                .join(User, User.id == TeacherAssignment.teacher_id)
+                .where(
+                    TeacherAssignment.school_id == school_id,
+                    TeacherAssignment.class_subject_id.in_(cs_ids),
+                    TeacherAssignment.is_active.is_(True),
+                    TeacherAssignment.deleted_at.is_(None),
+                )
+            )
+        ).all()
+        for cs_id, fname, lname in ta_rows:
+            teacher_map.setdefault(cs_id, []).append(f"{fname} {lname}".strip())
+
+    assembled: list[dict[str, Any]] = []
+    for cs_id, cg_id, cg_name, s_id, s_name, s_code in all_cs:
+        st_row = status_map.get(cs_id)
+        st_val = st_row.status if st_row else "DRAFT"
+        assembled.append(
+            {
+                "class_subject_id": cs_id,
+                "academic_term_id": term.id,
+                "class_group_id": cg_id,
+                "class_group_name": cg_name,
+                "subject_id": s_id,
+                "subject_name": s_name,
+                "subject_code": s_code,
+                "teacher_names": teacher_map.get(cs_id, []),
+                "status": st_val,
+                "submitted_at": st_row.submitted_at if st_row else None,
+                "approved_at": st_row.approved_at if st_row else None,
+                "unlocked_at": st_row.unlocked_at if st_row else None,
+                "unlock_reason": st_row.unlock_reason if st_row else None,
+            }
+        )
+
+    summary = {
+        "total": len(assembled),
+        "draft": sum(1 for item in assembled if item["status"] == "DRAFT"),
+        "submitted": sum(1 for item in assembled if item["status"] == "SUBMITTED"),
+        "approved": sum(1 for item in assembled if item["status"] == "APPROVED"),
+    }
+
+    if status_filter:
+        normalized = status_filter.strip().upper()
+        assembled = [item for item in assembled if item["status"] == normalized]
+
+    total = len(assembled)
+    offset = (page - 1) * page_size
+    paged = assembled[offset : offset + page_size]
+    meta = PageMeta.build(page=page, page_size=page_size, total=total)
+    return paged, meta, summary

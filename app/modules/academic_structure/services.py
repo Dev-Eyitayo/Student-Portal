@@ -1230,6 +1230,7 @@ def _class_group_query(
     level_id: UUID | None,
     department_id: UUID | None,
     include_retired: bool,
+    has_class_teacher: bool | None = None,
 ) -> Select[tuple[ClassGroup]]:
     stmt = select(ClassGroup).where(ClassGroup.school_id == school_id)
     if not include_retired:
@@ -1240,6 +1241,10 @@ def _class_group_query(
         stmt = stmt.where(ClassGroup.academic_level_id == level_id)
     if department_id is not None:
         stmt = stmt.where(ClassGroup.department_id == department_id)
+    if has_class_teacher is True:
+        stmt = stmt.where(ClassGroup.class_teacher_id.is_not(None))
+    elif has_class_teacher is False:
+        stmt = stmt.where(ClassGroup.class_teacher_id.is_(None))
     return stmt.order_by(ClassGroup.display_name.asc())
 
 
@@ -1254,6 +1259,7 @@ async def list_class_groups(
     page: int,
     page_size: int,
     include_retired: bool,
+    has_class_teacher: bool | None = None,
 ) -> tuple[list[ClassGroup], PageMeta]:
     scope = await get_permission_scope(db, current_user, "structure:manage")
     if not scope.has_any_access:
@@ -1265,6 +1271,7 @@ async def list_class_groups(
         level_id=level_id,
         department_id=department_id,
         include_retired=include_retired,
+        has_class_teacher=has_class_teacher,
     )
     if not scope.unscoped:
         stmt = stmt.where(
@@ -1275,7 +1282,42 @@ async def list_class_groups(
                 class_group_column=ClassGroup.id,
             )
         )
-    return await paginate(db, stmt, page=page, page_size=page_size)
+    items, meta = await paginate(db, stmt, page=page, page_size=page_size)
+    if items:
+        from app.modules.students.models import StudentEnrollment
+
+        cg_ids = [cg.id for cg in items]
+        teacher_ids = [cg.class_teacher_id for cg in items if cg.class_teacher_id is not None]
+
+        teacher_map: dict[UUID, str] = {}
+        if teacher_ids:
+            teacher_rows = (
+                await db.execute(
+                    select(User.id, User.first_name, User.last_name).where(User.id.in_(teacher_ids))
+                )
+            ).all()
+            teacher_map = {uid: f"{fname} {lname}".strip() for uid, fname, lname in teacher_rows}
+
+        count_rows = (
+            await db.execute(
+                select(StudentEnrollment.class_group_id, func.count())
+                .where(
+                    StudentEnrollment.school_id == school_id,
+                    StudentEnrollment.class_group_id.in_(cg_ids),
+                    StudentEnrollment.enrollment_status == "ENROLLED",
+                    StudentEnrollment.deleted_at.is_(None),
+                )
+                .group_by(StudentEnrollment.class_group_id)
+            )
+        ).all()
+        count_map = {cg_id: cnt for cg_id, cnt in count_rows}
+
+        for cg in items:
+            cg.class_teacher_name = (
+                teacher_map.get(cg.class_teacher_id) if cg.class_teacher_id else None
+            )
+            cg.student_count = count_map.get(cg.id, 0)
+    return items, meta
 
 
 async def create_class_group(

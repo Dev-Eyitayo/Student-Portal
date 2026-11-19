@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.modules.common.schemas import PageMeta
+
 
 class LevelCategory(StrEnum):
     PRIMARY = "PRIMARY"
@@ -166,6 +168,8 @@ class ClassGroupCreateRequest(BaseModel):
     department_id: UUID | None = None
     class_arm_id: UUID
     class_teacher_id: UUID | None = None
+    class_teacher_name: str | None = None
+    student_count: int = 0
     display_name: str | None = Field(None, min_length=1, max_length=128)
 
 
@@ -227,7 +231,86 @@ class ClassGroupResponse(BaseModel):
     department_id: UUID | None = None
     class_arm_id: UUID
     class_teacher_id: UUID | None = None
+    class_teacher_name: str | None = None
+    student_count: int = 0
     display_name: str
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
+
+
+class DashboardAttentionItem(BaseModel):
+    id: str
+    issue_type: str
+    title: str
+    subtitle: str
+    action_label: str
+    target_route: str
+    class_group_id: UUID | None = None
+    class_subject_id: UUID | None = None
+    academic_term_id: UUID | None = None
+
+
+class DashboardRecentActivityItem(BaseModel):
+    id: UUID
+    action: str
+    resource_type: str
+    resource_id: UUID
+    actor_name: str | None = None
+    timestamp: datetime
+
+
+class TermWorkflowStep(BaseModel):
+    key: str
+    label: str
+    status: str
+    detail: str
+
+
+class AdminDashboardResponse(BaseModel):
+    active_session_id: UUID | None = None
+    active_session_name: str | None = None
+    current_term_id: UUID | None = None
+    current_term_name: str | None = None
+    term_status: str | None = None
+    students_enrolled: int
+    active_staff: int
+    score_sheets_approved: int
+    score_sheets_total: int
+    total_issues: int
+    term_workflow: list[TermWorkflowStep]
+    needs_attention: list[DashboardAttentionItem]
+    recent_activities: list[DashboardRecentActivityItem]
+
+
+class DashboardIssuesPageResponse(BaseModel):
+    items: list[DashboardAttentionItem]
+    meta: PageMeta
+
+
+class TeacherClassSummary(BaseModel):
+    class_group_id: UUID
+    display_name: str
+    student_count: int
+    today_attendance_marked: bool
+    marked_count: int
+
+
+class TeacherSubjectSummary(BaseModel):
+    class_subject_id: UUID
+    class_group_id: UUID
+    class_group_name: str
+    subject_id: UUID
+    subject_name: str
+    subject_code: str
+    approval_status: str
+    target_route: str
+
+
+class TeacherDashboardResponse(BaseModel):
+    current_term_id: UUID | None = None
+    current_term_name: str | None = None
+    my_classes: list[TeacherClassSummary]
+    subjects_count: int
+    pending_score_sheets: int
+    teaching_subjects: list[TeacherSubjectSummary]

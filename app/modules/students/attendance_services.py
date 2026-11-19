@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from decimal import ROUND_HALF_UP, Decimal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -16,7 +17,12 @@ from app.modules.audit.services import AuditContext, record_audit_log
 from app.modules.common.pagination import paginate
 from app.modules.common.schemas import PageMeta
 from app.modules.identity.models import SchoolConfiguration, User
-from app.modules.students.models import AttendanceRecord, AttendanceSummary, StudentEnrollment
+from app.modules.students.models import (
+    AttendanceRecord,
+    AttendanceSummary,
+    Student,
+    StudentEnrollment,
+)
 from app.modules.students.schemas import (
     AttendanceSummaryUpdateRequest,
     ClassAttendanceMarkRequest,
@@ -592,3 +598,240 @@ async def update_class_attendance_summary(
     for summary in summaries:
         await db.refresh(summary)
     return summaries
+
+
+async def get_class_attendance(
+    db: AsyncSession,
+    school_id: UUID,
+    class_group_id: UUID,
+    academic_term_id: UUID,
+    attendance_date: date | None,
+    current_user: User,
+) -> dict[str, object]:
+    group = await _get_class_group(db, school_id, class_group_id)
+    await _require_attendance_access(db, current_user, group)
+    term = await _get_term(db, school_id, academic_term_id)
+    target_date = attendance_date or await _school_today(db, school_id)
+
+    enroll_rows = (
+        await db.execute(
+            select(
+                StudentEnrollment.id,
+                Student.id,
+                Student.admission_number,
+                Student.first_name,
+                Student.last_name,
+            )
+            .join(Student, Student.id == StudentEnrollment.student_id)
+            .where(
+                StudentEnrollment.school_id == school_id,
+                StudentEnrollment.class_group_id == group.id,
+                StudentEnrollment.academic_session_id == term.academic_session_id,
+                StudentEnrollment.enrollment_status == "ENROLLED",
+                StudentEnrollment.deleted_at.is_(None),
+                Student.deleted_at.is_(None),
+            )
+            .order_by(Student.last_name.asc(), Student.first_name.asc())
+        )
+    ).all()
+
+    enrollment_ids = [row[0] for row in enroll_rows]
+    record_map: dict[UUID, AttendanceRecord] = {}
+    if enrollment_ids:
+        records = (
+            (
+                await db.execute(
+                    select(AttendanceRecord).where(
+                        AttendanceRecord.school_id == school_id,
+                        AttendanceRecord.academic_term_id == term.id,
+                        AttendanceRecord.attendance_date == target_date,
+                        AttendanceRecord.student_enrollment_id.in_(enrollment_ids),
+                        AttendanceRecord.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        record_map = {rec.student_enrollment_id: rec for rec in records}
+
+    items = []
+    for enrollment_id, student_id, adm_no, first_name, last_name in enroll_rows:
+        rec = record_map.get(enrollment_id)
+        items.append(
+            {
+                "student_enrollment_id": enrollment_id,
+                "student_id": student_id,
+                "admission_number": adm_no,
+                "student_name": f"{first_name} {last_name}".strip(),
+                "status": rec.status if rec else None,
+                "backdate_reason": rec.reason if rec else None,
+            }
+        )
+
+    return {
+        "class_group_id": group.id,
+        "academic_term_id": term.id,
+        "attendance_date": target_date,
+        "items": items,
+    }
+
+
+async def get_class_attendance_summary(
+    db: AsyncSession,
+    school_id: UUID,
+    class_group_id: UUID,
+    academic_term_id: UUID,
+    current_user: User,
+) -> list[dict[str, object]]:
+    group = await _get_class_group(db, school_id, class_group_id)
+    await _require_attendance_access(db, current_user, group)
+    term = await _get_term(db, school_id, academic_term_id)
+
+    enroll_rows = (
+        await db.execute(
+            select(
+                StudentEnrollment.id,
+                Student.id,
+                Student.admission_number,
+                Student.first_name,
+                Student.last_name,
+            )
+            .join(Student, Student.id == StudentEnrollment.student_id)
+            .where(
+                StudentEnrollment.school_id == school_id,
+                StudentEnrollment.class_group_id == group.id,
+                StudentEnrollment.academic_session_id == term.academic_session_id,
+                StudentEnrollment.enrollment_status == "ENROLLED",
+                StudentEnrollment.deleted_at.is_(None),
+                Student.deleted_at.is_(None),
+            )
+            .order_by(Student.last_name.asc(), Student.first_name.asc())
+        )
+    ).all()
+
+    enrollment_ids = [row[0] for row in enroll_rows]
+    summary_map: dict[UUID, AttendanceSummary] = {}
+    if enrollment_ids:
+        summaries = (
+            (
+                await db.execute(
+                    select(AttendanceSummary).where(
+                        AttendanceSummary.school_id == school_id,
+                        AttendanceSummary.academic_term_id == term.id,
+                        AttendanceSummary.student_enrollment_id.in_(enrollment_ids),
+                        AttendanceSummary.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        summary_map = {s.student_enrollment_id: s for s in summaries}
+
+    return [
+        {
+            "student_enrollment_id": enrollment_id,
+            "student_id": student_id,
+            "admission_number": adm_no,
+            "student_name": f"{first_name} {last_name}".strip(),
+            "times_school_opened": summary_map[enrollment_id].times_school_opened
+            if enrollment_id in summary_map
+            else 0,
+            "times_present": summary_map[enrollment_id].times_present
+            if enrollment_id in summary_map
+            else 0,
+            "times_absent": summary_map[enrollment_id].times_absent
+            if enrollment_id in summary_map
+            else 0,
+            "source": summary_map[enrollment_id].source if enrollment_id in summary_map else None,
+            "override_reason": summary_map[enrollment_id].override_reason
+            if enrollment_id in summary_map
+            else None,
+        }
+        for enrollment_id, student_id, adm_no, first_name, last_name in enroll_rows
+    ]
+
+
+async def get_attendance_overview_summary(
+    db: AsyncSession,
+    school_id: UUID,
+    academic_term_id: UUID,
+    target_date: date | None = None,
+) -> dict[str, object]:
+    term = await _get_term(db, school_id, academic_term_id)
+    check_date = target_date or await _school_today(db, school_id)
+
+    distinct_dates = (
+        await db.execute(
+            select(func.count(func.distinct(AttendanceRecord.attendance_date))).where(
+                AttendanceRecord.school_id == school_id,
+                AttendanceRecord.academic_term_id == term.id,
+                AttendanceRecord.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one()
+
+    today_records = (
+        await db.execute(
+            select(AttendanceRecord.status, StudentEnrollment.class_group_id)
+            .join(
+                StudentEnrollment,
+                StudentEnrollment.id == AttendanceRecord.student_enrollment_id,
+            )
+            .where(
+                AttendanceRecord.school_id == school_id,
+                AttendanceRecord.academic_term_id == term.id,
+                AttendanceRecord.attendance_date == check_date,
+                AttendanceRecord.deleted_at.is_(None),
+            )
+        )
+    ).all()
+
+    total_today = len(today_records)
+    present_today = sum(1 for st, _ in today_records if st in ("PRESENT", "LATE"))
+    present_today_pct = (
+        float(
+            ((Decimal(present_today) / Decimal(total_today)) * Decimal("100")).quantize(
+                Decimal("0.1"), rounding=ROUND_HALF_UP
+            )
+        )
+        if total_today
+        else 0.0
+    )
+    classes_marked_today = len({cg_id for _, cg_id in today_records})
+
+    total_classes = (
+        await db.execute(
+            select(func.count())
+            .select_from(ClassGroup)
+            .where(
+                ClassGroup.school_id == school_id,
+                ClassGroup.academic_session_id == term.academic_session_id,
+                ClassGroup.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one()
+
+    manual_overrides = (
+        await db.execute(
+            select(func.count())
+            .select_from(AttendanceSummary)
+            .where(
+                AttendanceSummary.school_id == school_id,
+                AttendanceSummary.academic_term_id == term.id,
+                AttendanceSummary.source == "MANUAL",
+                AttendanceSummary.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one()
+
+    return {
+        "academic_term_id": term.id,
+        "target_date": check_date,
+        "days_school_opened": distinct_dates,
+        "present_today_pct": present_today_pct,
+        "classes_marked_today": classes_marked_today,
+        "total_classes": total_classes,
+        "manual_overrides": manual_overrides,
+    }

@@ -18,6 +18,7 @@ from app.modules.distribution.schemas import (
     NotifyTermResultsRequest,
     NotifyTermResultsResponse,
     QrVerifyResponse,
+    ReportCardListResponse,
     ReportCardRemarksResponse,
     ReportCardRemarksUpdateRequest,
     VerifiedReportCardResponse,
@@ -64,6 +65,28 @@ async def verify_result_token(
 async def verify_qr(payload: str = Query(...)):
     result = services.verify_qr_payload(payload)
     return SuccessResponse[QrVerifyResponse](data=result)
+
+
+@publication_distribution_router.get(
+    "/report-cards",
+    response_model=SuccessResponse[ReportCardListResponse],
+)
+async def list_report_cards(
+    academic_term_id: UUID = Query(...),
+    class_group_id: UUID = Query(...),
+    promotion_decision: str | None = Query(None, max_length=32),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    result = await services.list_report_cards(
+        db,
+        require_school_id(current_user),
+        academic_term_id,
+        class_group_id,
+        current_user,
+        promotion_decision=promotion_decision,
+    )
+    return SuccessResponse[ReportCardListResponse](data=result)
 
 
 @publication_distribution_router.patch(

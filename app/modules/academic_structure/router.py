@@ -1,3 +1,4 @@
+from datetime import date
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -10,14 +11,17 @@ from app.core.dependencies import (
     require_school_id,
 )
 from app.core.permissions import require_permission
-from app.modules.academic_structure import services
+from app.modules.academic_structure import dashboard_services, services
 from app.modules.academic_structure.schemas import (
+    AdminDashboardResponse,
     ArmCreateRequest,
     ArmResponse,
     ArmUpdateRequest,
     ClassGroupCreateRequest,
     ClassGroupResponse,
     ClassGroupUpdateRequest,
+    DashboardAttentionItem,
+    DashboardIssuesPageResponse,
     DepartmentCreateRequest,
     DepartmentResponse,
     DepartmentUpdateRequest,
@@ -29,6 +33,7 @@ from app.modules.academic_structure.schemas import (
     SessionUpdateRequest,
     StructureTemplateApplyRequest,
     StructureTemplateApplyResponse,
+    TeacherDashboardResponse,
     TermCreateRequest,
     TermResponse,
     TermUpdateRequest,
@@ -37,9 +42,12 @@ from app.modules.common.schemas import MessageResponse, Page, SuccessResponse
 from app.modules.identity.models import User
 from app.modules.students import attendance_services
 from app.modules.students.schemas import (
+    AttendanceOverviewSummaryResponse,
     AttendanceSummaryResponse,
     ClassAttendanceMarkRequest,
     ClassAttendanceMarkResponse,
+    ClassAttendanceRosterResponse,
+    ClassAttendanceSummaryRow,
     ClassAttendanceSummaryUpdateRequest,
 )
 from app.modules.subjects import services as subjects_services
@@ -55,6 +63,11 @@ router = APIRouter(
 class_groups_router = APIRouter(
     prefix="/structure/class-groups",
     tags=["Academic Structure"],
+)
+
+dashboard_router = APIRouter(
+    prefix="/structure/dashboard",
+    tags=["Dashboard & Term Readiness"],
 )
 
 
@@ -533,6 +546,7 @@ async def list_class_groups(
     session_id: UUID | None = Query(None),
     level_id: UUID | None = Query(None),
     department_id: UUID | None = Query(None),
+    has_class_teacher: bool | None = Query(None),
     include_retired: bool = Query(False),
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
@@ -544,6 +558,7 @@ async def list_class_groups(
         session_id=session_id,
         level_id=level_id,
         department_id=department_id,
+        has_class_teacher=has_class_teacher,
         page=page,
         page_size=page_size,
         include_retired=include_retired,
@@ -658,6 +673,73 @@ async def apply_structure_template(
     return SuccessResponse[StructureTemplateApplyResponse](data=result)
 
 
+@class_groups_router.get(
+    "/{class_group_id}/attendance",
+    response_model=SuccessResponse[ClassAttendanceRosterResponse],
+)
+async def get_class_attendance(
+    class_group_id: UUID,
+    academic_term_id: UUID = Query(...),
+    attendance_date: date | None = Query(None),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    result = await attendance_services.get_class_attendance(
+        db,
+        require_school_id(current_user),
+        class_group_id,
+        academic_term_id,
+        attendance_date,
+        current_user,
+    )
+    return SuccessResponse[ClassAttendanceRosterResponse](
+        data=ClassAttendanceRosterResponse.model_validate(result)
+    )
+
+
+@class_groups_router.get(
+    "/{class_group_id}/attendance-summary",
+    response_model=SuccessResponse[list[ClassAttendanceSummaryRow]],
+)
+async def get_class_attendance_summary(
+    class_group_id: UUID,
+    academic_term_id: UUID = Query(...),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    rows = await attendance_services.get_class_attendance_summary(
+        db,
+        require_school_id(current_user),
+        class_group_id,
+        academic_term_id,
+        current_user,
+    )
+    return SuccessResponse[list[ClassAttendanceSummaryRow]](
+        data=[ClassAttendanceSummaryRow.model_validate(row) for row in rows]
+    )
+
+
+@router.get(
+    "/attendance/summary",
+    response_model=SuccessResponse[AttendanceOverviewSummaryResponse],
+)
+async def get_attendance_overview_summary(
+    academic_term_id: UUID = Query(...),
+    target_date: date | None = Query(None),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    summary = await attendance_services.get_attendance_overview_summary(
+        db,
+        require_school_id(current_user),
+        academic_term_id,
+        target_date,
+    )
+    return SuccessResponse[AttendanceOverviewSummaryResponse](
+        data=AttendanceOverviewSummaryResponse.model_validate(summary)
+    )
+
+
 @router.post(
     "/class-groups/{class_group_id}/attendance",
     response_model=SuccessResponse[ClassAttendanceMarkResponse],
@@ -720,3 +802,62 @@ async def list_class_group_subjects(
         current_user,
     )
     return SuccessResponse[list[ClassGroupSubjectItem]](data=items)
+
+
+@dashboard_router.get(
+    "/admin",
+    response_model=SuccessResponse[AdminDashboardResponse],
+)
+async def get_admin_dashboard(
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    data = await dashboard_services.get_admin_dashboard(
+        db, require_school_id(current_user), current_user
+    )
+    return SuccessResponse[AdminDashboardResponse](data=AdminDashboardResponse.model_validate(data))
+
+
+@dashboard_router.get(
+    "/issues",
+    response_model=SuccessResponse[DashboardIssuesPageResponse],
+)
+async def list_dashboard_issues(
+    issue_type: str | None = Query(None, max_length=64),
+    class_group_id: UUID | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    items, meta = await dashboard_services.list_dashboard_issues(
+        db,
+        require_school_id(current_user),
+        current_user,
+        issue_type=issue_type,
+        class_group_id=class_group_id,
+        page=page,
+        page_size=page_size,
+    )
+    return SuccessResponse[DashboardIssuesPageResponse](
+        data=DashboardIssuesPageResponse(
+            items=[DashboardAttentionItem.model_validate(item) for item in items],
+            meta=meta,
+        )
+    )
+
+
+@dashboard_router.get(
+    "/teacher",
+    response_model=SuccessResponse[TeacherDashboardResponse],
+)
+async def get_teacher_dashboard(
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    data = await dashboard_services.get_teacher_dashboard(
+        db, require_school_id(current_user), current_user
+    )
+    return SuccessResponse[TeacherDashboardResponse](
+        data=TeacherDashboardResponse.model_validate(data)
+    )

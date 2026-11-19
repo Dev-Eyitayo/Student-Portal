@@ -36,6 +36,7 @@ from app.modules.students.schemas import (
     StudentBulkImportAcceptedResponse,
     StudentBulkImportStatusResponse,
     StudentCreateRequest,
+    StudentDirectorySummaryResponse,
     StudentResponse,
     StudentStatusUpdateRequest,
     StudentUpdateRequest,
@@ -72,6 +73,21 @@ def _audit_context(request: Request, current_user: User) -> AuditContext:
 
 
 @router.get(
+    "/students/summary",
+    response_model=SuccessResponse[StudentDirectorySummaryResponse],
+    dependencies=student_permissions,
+)
+async def get_students_summary(
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    summary = await services.get_students_summary(db, _school_id(current_user))
+    return SuccessResponse[StudentDirectorySummaryResponse](
+        data=StudentDirectorySummaryResponse.model_validate(summary)
+    )
+
+
+@router.get(
     "/students",
     response_model=SuccessResponse[Page[StudentResponse]],
     dependencies=student_permissions,
@@ -81,6 +97,9 @@ async def list_students(
     page_size: int = Query(50, ge=1, le=200),
     q: str | None = Query(None, max_length=128),
     student_status: str | None = Query(None, alias="status"),
+    gender: str | None = Query(None, max_length=16),
+    academic_level_id: UUID | None = Query(None),
+    class_group_id: UUID | None = Query(None),
     include_archived: bool = Query(False),
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
@@ -93,6 +112,9 @@ async def list_students(
         q=q,
         status=student_status,
         include_archived=include_archived,
+        gender=gender,
+        academic_level_id=academic_level_id,
+        class_group_id=class_group_id,
     )
     return SuccessResponse[Page[StudentResponse]](
         data=Page[StudentResponse](items=items, meta=meta)

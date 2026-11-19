@@ -1,7 +1,7 @@
 from datetime import UTC, date, datetime
 from uuid import UUID
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -623,20 +623,66 @@ async def list_class_subjects(
     page: int,
     page_size: int,
     include_retired: bool,
+    academic_session_id: UUID | None = None,
+    academic_level_id: UUID | None = None,
+    department_id: UUID | None = None,
+    category: str | None = None,
+    has_teacher: bool | None = None,
 ) -> tuple[list[ClassSubject], PageMeta]:
     scope = await get_permission_scope(db, current_user, "subjects:manage")
     if not scope.has_any_access:
         raise InsufficientPermissionException(permission_code="subjects:manage")
 
-    stmt = select(ClassSubject).where(ClassSubject.school_id == school_id)
+    stmt = (
+        select(ClassSubject)
+        .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+        .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+        .join(Subject, Subject.id == SubjectOffering.subject_id)
+        .where(ClassSubject.school_id == school_id)
+    )
     if not include_retired:
-        stmt = stmt.where(ClassSubject.deleted_at.is_(None))
+        stmt = stmt.where(
+            ClassSubject.deleted_at.is_(None),
+            ClassGroup.deleted_at.is_(None),
+        )
     if class_group_id is not None:
         stmt = stmt.where(ClassSubject.class_group_id == class_group_id)
     if subject_offering_id is not None:
         stmt = stmt.where(ClassSubject.subject_offering_id == subject_offering_id)
+    if academic_session_id is not None:
+        stmt = stmt.where(ClassGroup.academic_session_id == academic_session_id)
+    if academic_level_id is not None:
+        stmt = stmt.where(ClassGroup.academic_level_id == academic_level_id)
+    if department_id is not None:
+        stmt = stmt.where(ClassGroup.department_id == department_id)
+    if category is not None:
+        cat = category.strip().upper()
+        if cat == "TRADE":
+            stmt = stmt.where(Subject.is_trade_subject.is_(True))
+        elif cat == "ELECTIVE":
+            stmt = stmt.where(Subject.is_elective.is_(True), Subject.is_trade_subject.is_(False))
+        elif cat == "CORE":
+            stmt = stmt.where(Subject.is_elective.is_(False), Subject.is_trade_subject.is_(False))
+        else:
+            raise ValidationException(
+                "Please choose a valid subject category: CORE, ELECTIVE, or TRADE."
+            )
+    if has_teacher is True:
+        assigned_sub = select(TeacherAssignment.class_subject_id).where(
+            TeacherAssignment.school_id == school_id,
+            TeacherAssignment.is_active.is_(True),
+            TeacherAssignment.deleted_at.is_(None),
+        )
+        stmt = stmt.where(ClassSubject.id.in_(assigned_sub))
+    elif has_teacher is False:
+        assigned_sub = select(TeacherAssignment.class_subject_id).where(
+            TeacherAssignment.school_id == school_id,
+            TeacherAssignment.is_active.is_(True),
+            TeacherAssignment.deleted_at.is_(None),
+        )
+        stmt = stmt.where(ClassSubject.id.not_in(assigned_sub))
     if not scope.unscoped:
-        stmt = stmt.join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id).where(
+        stmt = stmt.where(
             build_scope_filter(
                 scope,
                 department_column=ClassGroup.department_id,
@@ -644,7 +690,137 @@ async def list_class_subjects(
                 class_group_column=ClassGroup.id,
             )
         )
-    return await paginate(db, stmt, page=page, page_size=page_size)
+
+    stmt = stmt.order_by(ClassGroup.display_name.asc(), Subject.name.asc())
+    items, meta = await paginate(db, stmt, page=page, page_size=page_size)
+    if items:
+        cs_ids = [cs.id for cs in items]
+        meta_rows = (
+            await db.execute(
+                select(
+                    ClassSubject.id,
+                    Subject.name,
+                    Subject.code,
+                    Subject.is_elective,
+                    Subject.is_trade_subject,
+                    ClassGroup.display_name,
+                )
+                .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+                .join(Subject, Subject.id == SubjectOffering.subject_id)
+                .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+                .where(ClassSubject.id.in_(cs_ids))
+            )
+        ).all()
+        meta_map = {
+            cs_id: (
+                s_name,
+                s_code,
+                "TRADE" if is_trade else ("ELECTIVE" if is_elective else "CORE"),
+                cg_name,
+            )
+            for cs_id, s_name, s_code, is_elective, is_trade, cg_name in meta_rows
+        }
+
+        ta_rows = (
+            await db.execute(
+                select(TeacherAssignment.class_subject_id, User.first_name, User.last_name)
+                .join(User, User.id == TeacherAssignment.teacher_id)
+                .where(
+                    TeacherAssignment.school_id == school_id,
+                    TeacherAssignment.class_subject_id.in_(cs_ids),
+                    TeacherAssignment.is_active.is_(True),
+                    TeacherAssignment.deleted_at.is_(None),
+                )
+            )
+        ).all()
+        ta_map: dict[UUID, list[str]] = {}
+        for cs_id, fname, lname in ta_rows:
+            ta_map.setdefault(cs_id, []).append(f"{fname} {lname}".strip())
+
+        for cs in items:
+            info = meta_map.get(cs.id)
+            if info:
+                cs.subject_name, cs.subject_code, cs.category, cs.class_group_name = info
+            cs.teacher_names = ta_map.get(cs.id, [])
+    return items, meta
+
+
+async def get_subjects_summary(
+    db: AsyncSession, school_id: UUID, academic_session_id: UUID | None = None
+) -> dict[str, int]:
+    total_subjects = (
+        await db.execute(
+            select(func.count())
+            .select_from(Subject)
+            .where(
+                Subject.school_id == school_id,
+                Subject.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one()
+
+    elective_or_trade = (
+        await db.execute(
+            select(func.count())
+            .select_from(Subject)
+            .where(
+                Subject.school_id == school_id,
+                Subject.deleted_at.is_(None),
+                or_(Subject.is_elective.is_(True), Subject.is_trade_subject.is_(True)),
+            )
+        )
+    ).scalar_one()
+
+    target_session_id = academic_session_id
+    if target_session_id is None:
+        target_session_id = (
+            await db.execute(
+                select(AcademicSession.id).where(
+                    AcademicSession.school_id == school_id,
+                    AcademicSession.is_current.is_(True),
+                    AcademicSession.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+
+    cs_ids: list[UUID] = []
+    if target_session_id is not None:
+        cs_stmt = (
+            select(ClassSubject.id)
+            .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+            .where(
+                ClassSubject.school_id == school_id,
+                ClassSubject.deleted_at.is_(None),
+                ClassGroup.deleted_at.is_(None),
+                ClassGroup.academic_session_id == target_session_id,
+            )
+        )
+        cs_ids = list((await db.execute(cs_stmt)).scalars().all())
+    class_allocations = len(cs_ids)
+    without_teacher = 0
+    if cs_ids:
+        assigned_ids = set(
+            (
+                await db.execute(
+                    select(TeacherAssignment.class_subject_id).where(
+                        TeacherAssignment.school_id == school_id,
+                        TeacherAssignment.class_subject_id.in_(cs_ids),
+                        TeacherAssignment.is_active.is_(True),
+                        TeacherAssignment.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        without_teacher = sum(1 for cid in cs_ids if cid not in assigned_ids)
+
+    return {
+        "total_subjects": total_subjects,
+        "class_allocations": class_allocations,
+        "without_teacher": without_teacher,
+        "elective_or_trade": elective_or_trade,
+    }
 
 
 async def _create_class_subject_record(

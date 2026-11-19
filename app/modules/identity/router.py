@@ -17,7 +17,6 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.celery_app import celery_app
@@ -34,7 +33,6 @@ from app.core.permissions import require_permission
 from app.core.redis import get_redis
 from app.core.security import decode_access_token, revoke_access_token
 from app.core.storage import storage_service
-from app.modules.academic_structure.models import ClassGroup
 from app.modules.audit.services import AuditContext
 from app.modules.common.models import generate_uuid7
 from app.modules.common.schemas import MessageResponse, SuccessResponse
@@ -46,11 +44,14 @@ from app.modules.identity.schemas import (
     AssignedClassGroupSummary,
     BrandingAssetType,
     BrandingUploadResponse,
+    ChangePasswordRequest,
     DeactivateUserResponse,
     LoginRequest,
     LogoutRequest,
     MeResponse,
+    MeUpdateRequest,
     OnboardingTemplateResponse,
+    PermissionCatalogItemResponse,
     PermissionGrantRequest,
     RefreshTokenRequest,
     SchoolConfigurationResponse,
@@ -61,10 +62,14 @@ from app.modules.identity.schemas import (
     SchoolSetupUpdateRequest,
     StaffBulkImportAcceptedResponse,
     StaffBulkImportStatusResponse,
+    StaffDirectoryPageResponse,
+    StaffDirectorySummary,
     StaffInviteRequest,
     StaffInviteResponse,
+    StaffListItemResponse,
     StaffVerifyInviteResponse,
     TokenResponse,
+    UserPermissionGrantDetailResponse,
     UserPermissionGrantResponse,
 )
 from app.modules.identity.tasks import (
@@ -343,6 +348,35 @@ async def logout(
     )
 
 
+async def _build_me_response(db: AsyncSession, current_user: User) -> MeResponse:
+    permissions = await services.get_user_effective_permissions(db, current_user)
+    school_name = current_user.school.name if current_user.school else None
+    assigned_class_groups: list[AssignedClassGroupSummary] = []
+    if current_user.school_id is not None:
+        groups = await services.get_assigned_class_groups(
+            db, current_user.school_id, current_user.id
+        )
+        assigned_class_groups = [
+            AssignedClassGroupSummary.model_validate(group) for group in groups
+        ]
+
+    return MeResponse(
+        id=current_user.id,
+        school_id=current_user.school_id,
+        school_name=school_name,
+        email=current_user.email,
+        first_name=current_user.first_name,
+        last_name=current_user.last_name,
+        phone_number=current_user.phone_number,
+        role=current_user.role,
+        is_active=current_user.is_active,
+        is_mfa_enabled=current_user.is_mfa_enabled,
+        staff_profile=current_user.staff_profile,
+        permissions=permissions,
+        assigned_class_groups=assigned_class_groups,
+    )
+
+
 @router.get("/me", response_model=SuccessResponse[MeResponse])
 async def get_current_user_profile(
     current_user: User = Depends(get_current_authenticated_user),
@@ -351,45 +385,39 @@ async def get_current_user_profile(
     """
     Returns the authenticated user's profile, linked school details, and effective permissions.
     """
-    permissions = await services.get_user_effective_permissions(db, current_user)
-    school_name = current_user.school.name if current_user.school else None
-    assigned_class_groups: list[AssignedClassGroupSummary] = []
-    if current_user.school_id is not None:
-        groups = (
-            (
-                await db.execute(
-                    select(ClassGroup)
-                    .where(
-                        ClassGroup.school_id == current_user.school_id,
-                        ClassGroup.class_teacher_id == current_user.id,
-                        ClassGroup.deleted_at.is_(None),
-                    )
-                    .order_by(ClassGroup.display_name.asc())
-                )
-            )
-            .scalars()
-            .all()
-        )
-        assigned_class_groups = [
-            AssignedClassGroupSummary.model_validate(group) for group in groups
-        ]
+    return SuccessResponse[MeResponse](data=await _build_me_response(db, current_user))
 
-    return SuccessResponse[MeResponse](
-        data=MeResponse(
-            id=current_user.id,
-            school_id=current_user.school_id,
-            school_name=school_name,
-            email=current_user.email,
-            first_name=current_user.first_name,
-            last_name=current_user.last_name,
-            phone_number=current_user.phone_number,
-            role=current_user.role,
-            is_active=current_user.is_active,
-            is_mfa_enabled=current_user.is_mfa_enabled,
-            staff_profile=current_user.staff_profile,
-            permissions=permissions,
-            assigned_class_groups=assigned_class_groups,
-        )
+
+@router.patch("/me", response_model=SuccessResponse[MeResponse])
+async def update_current_user_profile(
+    req: MeUpdateRequest,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    updated = await services.update_my_profile(
+        db,
+        current_user,
+        first_name=req.first_name,
+        last_name=req.last_name,
+        phone_number=req.phone_number,
+    )
+    return SuccessResponse[MeResponse](data=await _build_me_response(db, updated))
+
+
+@router.post("/change-password", response_model=SuccessResponse[MessageResponse])
+async def change_current_user_password(
+    req: ChangePasswordRequest,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    await services.change_my_password(
+        db,
+        current_user,
+        current_password=req.current_password,
+        new_password=req.new_password,
+    )
+    return SuccessResponse[MessageResponse](
+        data=MessageResponse(message="Your password has been updated.")
     )
 
 
@@ -680,4 +708,71 @@ async def deactivate_user(
                 "deactivated and signed out on all devices."
             ),
         )
+    )
+
+
+@router.get(
+    "/users",
+    response_model=SuccessResponse[StaffDirectoryPageResponse],
+    dependencies=[Depends(require_permission("users:manage"))],
+)
+async def list_school_users(
+    q: str | None = Query(None, max_length=128),
+    role: str | None = Query(None, max_length=32),
+    employment_status: str | None = Query(None, alias="status", max_length=32),
+    specialization: str | None = Query(None, alias="department", max_length=128),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    items, meta, summary = await services.list_school_users(
+        db,
+        require_school_id(current_user),
+        q=q,
+        role=role,
+        employment_status=employment_status,
+        specialization=specialization,
+        page=page,
+        page_size=page_size,
+    )
+    return SuccessResponse[StaffDirectoryPageResponse](
+        data=StaffDirectoryPageResponse(
+            items=[StaffListItemResponse.model_validate(item) for item in items],
+            meta=meta,
+            summary=StaffDirectorySummary.model_validate(summary),
+        )
+    )
+
+
+@router.get(
+    "/permissions",
+    response_model=SuccessResponse[list[PermissionCatalogItemResponse]],
+    dependencies=[Depends(require_permission("users:manage"))],
+)
+async def list_permissions_catalog(
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    perms = await services.list_permissions_catalog(db)
+    return SuccessResponse[list[PermissionCatalogItemResponse]](
+        data=[PermissionCatalogItemResponse.model_validate(p) for p in perms]
+    )
+
+
+@router.get(
+    "/users/{user_id}/permissions",
+    response_model=SuccessResponse[list[UserPermissionGrantDetailResponse]],
+    dependencies=[Depends(require_permission("users:manage"))],
+)
+async def list_user_permission_grants(
+    user_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    grants = await services.list_user_permission_grants(
+        db, require_school_id(current_user), user_id
+    )
+    return SuccessResponse[list[UserPermissionGrantDetailResponse]](
+        data=[UserPermissionGrantDetailResponse.model_validate(g) for g in grants]
     )

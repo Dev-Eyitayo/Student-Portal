@@ -12,6 +12,9 @@ from app.modules.assessments.schemas import (
     BulkScoreEntryRequest,
     BulkScoreEntryResponse,
     ScoreSheetActionRequest,
+    ScoreSheetOverviewItem,
+    ScoreSheetOverviewPageResponse,
+    ScoreSheetOverviewSummary,
     ScoreSheetResponse,
     ScoreSheetStatusResponse,
     ScoreSheetUnlockRequest,
@@ -135,6 +138,40 @@ async def update_definition(
 # --------------------------------------------------------------------------
 # Score sheet read + bulk entry
 # --------------------------------------------------------------------------
+
+
+@router.get(
+    "/sheets",
+    response_model=SuccessResponse[ScoreSheetOverviewPageResponse],
+)
+async def list_score_sheets_overview(
+    academic_term_id: UUID = Query(...),
+    class_group_id: UUID | None = Query(None),
+    subject_id: UUID | None = Query(None),
+    sheet_status: str | None = Query(None, alias="status", max_length=16),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    items, meta, summary = await services.list_score_sheets_overview(
+        db,
+        _school_id(current_user),
+        academic_term_id,
+        current_user,
+        class_group_id=class_group_id,
+        subject_id=subject_id,
+        status_filter=sheet_status,
+        page=page,
+        page_size=page_size,
+    )
+    return SuccessResponse[ScoreSheetOverviewPageResponse](
+        data=ScoreSheetOverviewPageResponse(
+            items=[ScoreSheetOverviewItem.model_validate(item) for item in items],
+            meta=meta,
+            summary=ScoreSheetOverviewSummary.model_validate(summary),
+        )
+    )
 
 
 @router.get(
