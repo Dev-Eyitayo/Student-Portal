@@ -85,6 +85,15 @@ class StudentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
+    current_class_group_id: UUID | None = None
+    current_class_name: str | None = None
+
+
+class StudentDirectorySummaryResponse(BaseModel):
+    total: int
+    enrolled_current_session: int
+    unenrolled: int
+    withdrawn_or_graduated: int
 
 
 class EnrollmentClassGroupSummary(BaseModel):
@@ -132,6 +141,8 @@ class EnrollmentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
+    current_class_group_id: UUID | None = None
+    current_class_name: str | None = None
 
 
 class StudentBulkImportAcceptedResponse(BaseModel):
@@ -265,3 +276,41 @@ class AttendanceSummaryResponse(BaseModel):
     updated_by_id: UUID | None
     created_at: datetime
     updated_at: datetime
+
+
+class ClassAttendanceRosterItem(BaseModel):
+    student_enrollment_id: UUID
+    student_id: UUID
+    admission_number: str
+    student_name: str
+    status: AttendanceStatus | None = None
+    backdate_reason: str | None = None
+
+
+class ClassAttendanceRosterResponse(BaseModel):
+    class_group_id: UUID
+    academic_term_id: UUID
+    attendance_date: date
+    items: list[ClassAttendanceRosterItem]
+
+
+class ClassAttendanceSummaryRow(BaseModel):
+    student_enrollment_id: UUID
+    student_id: UUID
+    admission_number: str
+    student_name: str
+    times_school_opened: int
+    times_present: int
+    times_absent: int
+    source: AttendanceSource | None = None
+    override_reason: str | None = None
+
+
+class AttendanceOverviewSummaryResponse(BaseModel):
+    academic_term_id: UUID
+    target_date: date
+    days_school_opened: int
+    present_today_pct: float
+    classes_marked_today: int
+    total_classes: int
+    manual_overrides: int

@@ -1,3 +1,4 @@
+from math import ceil
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -31,6 +32,15 @@ class PageMeta(BaseModel):
     page_size: int
     total: int
     total_pages: int
+
+    @classmethod
+    def build(cls, *, page: int, page_size: int, total: int) -> "PageMeta":
+        return cls(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=ceil(total / page_size) if total else 0,
+        )
 
 
 class Page[T](BaseModel):

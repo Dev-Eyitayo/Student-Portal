@@ -34,6 +34,9 @@ from app.modules.distribution.schemas import (
     NotifyTermResultsResponse,
     QrVerifyResponse,
     ReportAttendanceSummary,
+    ReportCardListItem,
+    ReportCardListResponse,
+    ReportCardListSummary,
     ReportCardRemarksResponse,
     ReportCardRemarksUpdateRequest,
     ReportSchoolInfo,
@@ -523,4 +526,147 @@ async def queue_term_result_notifications(
         academic_term_id=term.id,
         notifications_queued=len(recipients),
         message=f"Queued {len(recipients)} parent result notification(s).",
+    )
+
+
+async def list_report_cards(
+    db: AsyncSession,
+    school_id: UUID,
+    academic_term_id: UUID,
+    class_group_id: UUID,
+    current_user: User,
+    *,
+    promotion_decision: str | None = None,
+) -> ReportCardListResponse:
+    term = (
+        await db.execute(
+            select(AcademicTerm).where(
+                AcademicTerm.id == academic_term_id,
+                AcademicTerm.school_id == school_id,
+                AcademicTerm.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if term is None:
+        raise ResourceNotFoundException("academic term", academic_term_id)
+
+    group = (
+        await db.execute(
+            select(ClassGroup).where(
+                ClassGroup.id == class_group_id,
+                ClassGroup.school_id == school_id,
+                ClassGroup.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if group is None:
+        raise ResourceNotFoundException("class group", class_group_id)
+
+    can_publish = await user_has_permission(
+        db,
+        current_user,
+        "reports:publish",
+        department_id=group.department_id,
+        academic_level_id=group.academic_level_id,
+        class_group_id=group.id,
+    )
+    if not can_publish and group.class_teacher_id != current_user.id:
+        raise InsufficientPermissionException(permission_code="reports:publish")
+
+    config = (
+        await db.execute(
+            select(SchoolConfiguration).where(SchoolConfiguration.school_id == school_id)
+        )
+    ).scalar_one_or_none()
+    thresholds = (
+        config.annual_results_schema.get("promotion_thresholds", {})
+        if config and config.annual_results_schema
+        else {}
+    )
+    pass_mark = Decimal(str(thresholds.get("promoted_min_percentage", "50.00")))
+
+    rows = (
+        await db.execute(
+            select(TermReportCard, Student)
+            .join(StudentEnrollment, StudentEnrollment.id == TermReportCard.student_enrollment_id)
+            .join(Student, Student.id == StudentEnrollment.student_id)
+            .where(
+                TermReportCard.school_id == school_id,
+                TermReportCard.academic_term_id == term.id,
+                StudentEnrollment.class_group_id == group.id,
+                TermReportCard.deleted_at.is_(None),
+            )
+            .order_by(
+                TermReportCard.class_position.asc().nulls_last(),
+                Student.last_name.asc(),
+                Student.first_name.asc(),
+            )
+        )
+    ).all()
+
+    averages = [
+        card.cumulative_average_percentage
+        for card, _ in rows
+        if card.cumulative_average_percentage is not None
+    ]
+    class_average = (
+        str(
+            (sum(averages, Decimal("0.00")) / Decimal(len(averages))).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+        )
+        if averages
+        else None
+    )
+    passing = sum(1 for avg in averages if avg >= pass_mark)
+    pass_rate = (
+        float(
+            ((Decimal(passing) / Decimal(len(averages))) * Decimal("100")).quantize(
+                Decimal("0.1"), rounding=ROUND_HALF_UP
+            )
+        )
+        if averages
+        else None
+    )
+
+    filtered_rows = rows
+    if promotion_decision:
+        dec = promotion_decision.strip().upper()
+        filtered_rows = [(c, s) for c, s in rows if (c.promotion_decision or "").upper() == dec]
+
+    items = [
+        ReportCardListItem(
+            id=card.id,
+            student_enrollment_id=card.student_enrollment_id,
+            student_id=student.id,
+            admission_number=student.admission_number,
+            student_name=f"{student.first_name} {student.last_name}".strip(),
+            cumulative_average_percentage=(
+                str(card.cumulative_average_percentage)
+                if card.cumulative_average_percentage is not None
+                else None
+            ),
+            class_position=card.class_position,
+            promotion_decision=card.promotion_decision,
+            teacher_comment=card.teacher_comment,
+            principal_comment=card.principal_comment,
+            publication_status=card.publication_status,
+        )
+        for card, student in filtered_rows
+    ]
+
+    term_status = (
+        "PUBLISHED"
+        if any(card.publication_status == "PUBLISHED" for card, _ in rows)
+        else ("LOCKED" if term.is_locked_for_scoring else "DRAFT")
+    )
+
+    return ReportCardListResponse(
+        items=items,
+        summary=ReportCardListSummary(
+            students_computed=len(rows),
+            class_average=class_average,
+            pass_rate=pass_rate,
+            term_status=term_status,
+        ),
     )

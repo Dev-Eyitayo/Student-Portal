@@ -4,7 +4,9 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+
+from app.modules.common.schemas import PageMeta
 
 
 class UserRole(StrEnum):
@@ -422,3 +424,74 @@ class OnboardingTemplateResponse(BaseModel):
     configuration_defaults: dict[str, Any]
     structure_template: dict[str, Any]
     custom_domain: CustomDomainStatusResponse
+
+
+class StaffListItemResponse(BaseModel):
+    id: UUID
+    email: str
+    first_name: str
+    last_name: str
+    phone_number: str | None = None
+    role: str
+    is_active: bool
+    employment_status: str
+    staff_id_number: str | None = None
+    specialization: str | None = None
+    last_login_at: datetime | None = None
+    created_at: datetime
+
+
+class StaffDirectorySummary(BaseModel):
+    total: int
+    teachers: int
+    pending_invites: int
+    deactivated: int
+
+
+class StaffDirectoryPageResponse(BaseModel):
+    items: list[StaffListItemResponse]
+    meta: PageMeta
+    summary: StaffDirectorySummary
+
+
+class PermissionCatalogItemResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    code: str
+    name: str
+    description: str | None = None
+    category: str
+
+
+class UserPermissionGrantDetailResponse(BaseModel):
+    id: UUID
+    permission_id: UUID
+    permission_code: str
+    permission_name: str
+    scope_type: str
+    department_id: UUID | None = None
+    academic_level_id: UUID | None = None
+    class_group_id: UUID | None = None
+    created_at: datetime
+
+
+class MeUpdateRequest(BaseModel):
+    first_name: str | None = Field(default=None, min_length=1, max_length=64)
+    last_name: str | None = Field(default=None, min_length=1, max_length=64)
+    phone_number: str | None = Field(default=None, max_length=32)
+
+    @field_validator("first_name", "last_name")
+    @classmethod
+    def validate_non_blank_name(cls, value: str | None) -> str | None:
+        if value is not None:
+            cleaned = value.strip()
+            if not cleaned:
+                raise ValueError("Name cannot be blank.")
+            return cleaned
+        return value
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8, max_length=128)

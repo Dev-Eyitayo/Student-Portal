@@ -112,3 +112,29 @@ class NotifyTermResultsResponse(BaseModel):
     academic_term_id: UUID
     notifications_queued: int
     message: str
+
+
+class ReportCardListItem(BaseModel):
+    id: UUID
+    student_enrollment_id: UUID
+    student_id: UUID
+    admission_number: str
+    student_name: str
+    cumulative_average_percentage: str | None = None
+    class_position: int | None = None
+    promotion_decision: str | None = None
+    teacher_comment: str | None = None
+    principal_comment: str | None = None
+    publication_status: str
+
+
+class ReportCardListSummary(BaseModel):
+    students_computed: int
+    class_average: str | None = None
+    pass_rate: float | None = None
+    term_status: str
+
+
+class ReportCardListResponse(BaseModel):
+    items: list[ReportCardListItem]
+    summary: ReportCardListSummary

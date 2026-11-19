@@ -7,7 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -37,6 +37,7 @@ from app.modules.academic_structure.templates import (
 )
 from app.modules.audit.services import AuditContext, record_audit_log
 from app.modules.common.models import generate_uuid7
+from app.modules.common.schemas import PageMeta
 from app.modules.identity.bulk_import import ParsedStaffRow, StaffBulkImportRow
 from app.modules.identity.models import (
     Permission,
@@ -1361,3 +1362,237 @@ async def get_user_effective_permissions(db: AsyncSession, user: User) -> list[s
     grant_perms = (await db.execute(user_grants_stmt)).scalars().all()
 
     return sorted(list(set(role_perms).union(set(grant_perms))))
+
+
+async def list_school_users(
+    db: AsyncSession,
+    school_id: UUID,
+    *,
+    q: str | None = None,
+    role: str | None = None,
+    employment_status: str | None = None,
+    specialization: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[dict[str, Any]], PageMeta, dict[str, int]]:
+    from sqlalchemy import case
+
+    from app.modules.common.schemas import PageMeta
+    from app.modules.identity.models import StaffProfile
+
+    base_filter = (User.school_id == school_id, User.deleted_at.is_(None))
+    summary_row = (
+        await db.execute(
+            select(
+                func.count(User.id),
+                func.coalesce(
+                    func.sum(
+                        case((and_(User.role == "TEACHER", User.is_active.is_(True)), 1), else_=0)
+                    ),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(case((StaffProfile.employment_status == "INVITED", 1), else_=0)),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                or_(
+                                    User.is_active.is_(False),
+                                    StaffProfile.employment_status == "INACTIVE",
+                                ),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+            )
+            .select_from(User)
+            .outerjoin(StaffProfile, StaffProfile.user_id == User.id)
+            .where(*base_filter)
+        )
+    ).one()
+    summary = {
+        "total": int(summary_row[0] or 0),
+        "teachers": int(summary_row[1] or 0),
+        "pending_invites": int(summary_row[2] or 0),
+        "deactivated": int(summary_row[3] or 0),
+    }
+
+    stmt = (
+        select(User, StaffProfile)
+        .outerjoin(StaffProfile, StaffProfile.user_id == User.id)
+        .where(*base_filter)
+    )
+    if q:
+        pattern = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                User.first_name.ilike(pattern),
+                User.last_name.ilike(pattern),
+                User.email.ilike(pattern),
+                StaffProfile.staff_id_number.ilike(pattern),
+            )
+        )
+    if role:
+        stmt = stmt.where(User.role == role.strip().upper())
+    if employment_status:
+        status_val = employment_status.strip().upper()
+        if status_val == "INACTIVE":
+            stmt = stmt.where(
+                or_(User.is_active.is_(False), StaffProfile.employment_status == "INACTIVE")
+            )
+        elif status_val == "ACTIVE":
+            stmt = stmt.where(
+                User.is_active.is_(True),
+                or_(StaffProfile.id.is_(None), StaffProfile.employment_status == "ACTIVE"),
+            )
+        else:
+            stmt = stmt.where(StaffProfile.employment_status == status_val)
+    if specialization:
+        stmt = stmt.where(StaffProfile.specialization.ilike(f"%{specialization.strip()}%"))
+
+    count_stmt = select(func.count()).select_from(stmt.subquery())
+    total = (await db.execute(count_stmt)).scalar_one()
+
+    offset = (page - 1) * page_size
+    rows = (
+        await db.execute(stmt.order_by(User.created_at.desc()).offset(offset).limit(page_size))
+    ).all()
+
+    items = [
+        {
+            "id": u.id,
+            "email": u.email,
+            "first_name": u.first_name,
+            "last_name": u.last_name,
+            "phone_number": u.phone_number,
+            "role": u.role,
+            "is_active": u.is_active,
+            "employment_status": sp.employment_status
+            if sp
+            else ("ACTIVE" if u.is_active else "INACTIVE"),
+            "staff_id_number": sp.staff_id_number if sp else None,
+            "specialization": sp.specialization if sp else None,
+            "last_login_at": u.last_login_at,
+            "created_at": u.created_at,
+        }
+        for u, sp in rows
+    ]
+    meta = PageMeta.build(page=page, page_size=page_size, total=total)
+    return items, meta, summary
+
+
+async def list_permissions_catalog(db: AsyncSession) -> list[Permission]:
+    result = await db.execute(select(Permission).order_by(Permission.category, Permission.code))
+    return list(result.scalars().all())
+
+
+async def list_user_permission_grants(
+    db: AsyncSession, school_id: UUID, user_id: UUID
+) -> list[dict[str, Any]]:
+    user = (
+        await db.execute(
+            select(User).where(
+                User.id == user_id, User.school_id == school_id, User.deleted_at.is_(None)
+            )
+        )
+    ).scalar_one_or_none()
+    if user is None:
+        raise ResourceNotFoundException("staff member", user_id)
+
+    rows = (
+        await db.execute(
+            select(UserPermissionGrant, Permission)
+            .join(Permission, Permission.id == UserPermissionGrant.permission_id)
+            .where(
+                UserPermissionGrant.school_id == school_id,
+                UserPermissionGrant.user_id == user_id,
+                UserPermissionGrant.deleted_at.is_(None),
+            )
+            .order_by(UserPermissionGrant.created_at.desc())
+        )
+    ).all()
+
+    return [
+        {
+            "id": grant.id,
+            "permission_id": perm.id,
+            "permission_code": perm.code,
+            "permission_name": perm.name,
+            "scope_type": grant.scope_type,
+            "department_id": grant.department_id,
+            "academic_level_id": grant.academic_level_id,
+            "class_group_id": grant.class_group_id,
+            "created_at": grant.created_at,
+        }
+        for grant, perm in rows
+    ]
+
+
+async def update_my_profile(
+    db: AsyncSession,
+    user: User,
+    *,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    phone_number: str | None = None,
+) -> User:
+    db_user = (
+        await db.execute(
+            select(User)
+            .options(selectinload(User.school), selectinload(User.staff_profile))
+            .where(User.id == user.id)
+        )
+    ).scalar_one()
+    if first_name is not None:
+        db_user.first_name = first_name.strip()
+    if last_name is not None:
+        db_user.last_name = last_name.strip()
+    if phone_number is not None:
+        db_user.phone_number = phone_number.strip() or None
+    await db.commit()
+    await db.refresh(db_user)
+    return db_user
+
+
+async def get_assigned_class_groups(
+    db: AsyncSession, school_id: UUID, user_id: UUID
+) -> list[ClassGroup]:
+    return list(
+        (
+            await db.execute(
+                select(ClassGroup)
+                .where(
+                    ClassGroup.school_id == school_id,
+                    ClassGroup.class_teacher_id == user_id,
+                    ClassGroup.deleted_at.is_(None),
+                )
+                .order_by(ClassGroup.display_name.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def change_my_password(
+    db: AsyncSession,
+    user: User,
+    *,
+    current_password: str,
+    new_password: str,
+) -> None:
+    db_user = (await db.execute(select(User).where(User.id == user.id))).scalar_one()
+    valid = await asyncio.to_thread(verify_password, current_password, db_user.password_hash)
+    if not valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Your current password is incorrect. Please check it and try again.",
+        )
+    db_user.password_hash = await asyncio.to_thread(hash_password, new_password)
+    await db.commit()

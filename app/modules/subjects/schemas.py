@@ -69,9 +69,21 @@ class ClassSubjectResponse(BaseModel):
     school_id: UUID
     subject_offering_id: UUID
     class_group_id: UUID
+    subject_name: str | None = None
+    subject_code: str | None = None
+    category: str | None = None
+    class_group_name: str | None = None
+    teacher_names: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
+
+
+class SubjectSummaryResponse(BaseModel):
+    total_subjects: int
+    class_allocations: int
+    without_teacher: int
+    elective_or_trade: int
 
 
 class TeacherAssignmentCreateRequest(BaseModel):

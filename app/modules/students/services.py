@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, or_, select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -137,12 +137,32 @@ def _student_query(
     include_archived: bool,
     status: str | None,
     q: str | None,
+    gender: str | None = None,
+    academic_level_id: UUID | None = None,
+    class_group_id: UUID | None = None,
 ) -> Select[tuple[Student]]:
     stmt = select(Student).where(Student.school_id == school_id)
     if not include_archived:
         stmt = stmt.where(Student.deleted_at.is_(None))
     if status:
         stmt = stmt.where(Student.status == status)
+    if gender:
+        stmt = stmt.where(Student.gender == _normalize_gender(gender))
+    if academic_level_id is not None or class_group_id is not None:
+        enroll_sub = (
+            select(StudentEnrollment.student_id)
+            .join(ClassGroup, ClassGroup.id == StudentEnrollment.class_group_id)
+            .where(
+                StudentEnrollment.school_id == school_id,
+                StudentEnrollment.deleted_at.is_(None),
+                StudentEnrollment.enrollment_status == "ENROLLED",
+            )
+        )
+        if class_group_id is not None:
+            enroll_sub = enroll_sub.where(StudentEnrollment.class_group_id == class_group_id)
+        if academic_level_id is not None:
+            enroll_sub = enroll_sub.where(ClassGroup.academic_level_id == academic_level_id)
+        stmt = stmt.where(Student.id.in_(enroll_sub))
     if q and q.strip():
         pattern = f"%{q.strip()}%"
         stmt = stmt.where(
@@ -240,6 +260,9 @@ async def list_students(
     q: str | None,
     status: str | None,
     include_archived: bool,
+    gender: str | None = None,
+    academic_level_id: UUID | None = None,
+    class_group_id: UUID | None = None,
 ) -> tuple[list[Student], PageMeta]:
     normalized_status = status.strip().upper() if status else None
     stmt = _student_query(
@@ -247,8 +270,122 @@ async def list_students(
         include_archived=include_archived,
         status=normalized_status,
         q=q,
+        gender=gender,
+        academic_level_id=academic_level_id,
+        class_group_id=class_group_id,
     )
-    return await paginate(db, stmt, page=page, page_size=page_size)
+    items, meta = await paginate(db, stmt, page=page, page_size=page_size)
+    if items:
+        student_ids = [s.id for s in items]
+        enroll_rows = (
+            await db.execute(
+                select(
+                    StudentEnrollment.student_id,
+                    ClassGroup.id,
+                    ClassGroup.display_name,
+                    AcademicSession.is_current,
+                )
+                .join(ClassGroup, ClassGroup.id == StudentEnrollment.class_group_id)
+                .join(AcademicSession, AcademicSession.id == StudentEnrollment.academic_session_id)
+                .where(
+                    StudentEnrollment.school_id == school_id,
+                    StudentEnrollment.student_id.in_(student_ids),
+                    StudentEnrollment.enrollment_status == "ENROLLED",
+                    StudentEnrollment.deleted_at.is_(None),
+                )
+                .order_by(
+                    AcademicSession.is_current.desc(),
+                    StudentEnrollment.created_at.desc(),
+                )
+            )
+        ).all()
+        class_map: dict[UUID, tuple[UUID, str]] = {}
+        for sid, cg_id, cg_name, _ in enroll_rows:
+            if sid not in class_map:
+                class_map[sid] = (cg_id, cg_name)
+        for s in items:
+            match = class_map.get(s.id)
+            s.current_class_group_id = match[0] if match else None
+            s.current_class_name = match[1] if match else None
+    return items, meta
+
+
+async def get_students_summary(db: AsyncSession, school_id: UUID) -> dict[str, int]:
+    from sqlalchemy import case
+
+    summary_row = (
+        await db.execute(
+            select(
+                func.count(Student.id),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                Student.status.in_(("WITHDRAWN", "GRADUATED", "TRANSFERRED")),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (Student.status.in_(("ACTIVE", "ADMITTED")), 1),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+            ).where(
+                Student.school_id == school_id,
+                Student.deleted_at.is_(None),
+            )
+        )
+    ).one()
+
+    total = int(summary_row[0] or 0)
+    withdrawn_or_graduated = int(summary_row[1] or 0)
+    active_or_admitted = int(summary_row[2] or 0)
+
+    current_session_id = (
+        await db.execute(
+            select(AcademicSession.id).where(
+                AcademicSession.school_id == school_id,
+                AcademicSession.is_current.is_(True),
+                AcademicSession.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+
+    enrolled_current = 0
+    if current_session_id is not None:
+        enrolled_current = int(
+            (
+                await db.execute(
+                    select(func.count(func.distinct(StudentEnrollment.student_id)))
+                    .join(Student, Student.id == StudentEnrollment.student_id)
+                    .where(
+                        StudentEnrollment.school_id == school_id,
+                        StudentEnrollment.academic_session_id == current_session_id,
+                        StudentEnrollment.enrollment_status == "ENROLLED",
+                        StudentEnrollment.deleted_at.is_(None),
+                        Student.deleted_at.is_(None),
+                        Student.status.in_(("ACTIVE", "ADMITTED")),
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+
+    unenrolled = max(0, active_or_admitted - enrolled_current)
+    return {
+        "total": total,
+        "enrolled_current_session": enrolled_current,
+        "unenrolled": unenrolled,
+        "withdrawn_or_graduated": withdrawn_or_graduated,
+    }
 
 
 async def create_student(
