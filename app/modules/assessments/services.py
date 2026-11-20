@@ -290,7 +290,14 @@ async def list_definitions(
     page_size: int,
 ) -> tuple[list[AssessmentDefinition], PageMeta]:
     scope = await get_permission_scope(db, current_user, "subjects:manage")
-    if not scope.has_any_access:
+    approve_scope = await get_permission_scope(db, current_user, "scores:approve")
+    enter_scope = await get_permission_scope(db, current_user, "scores:enter")
+
+    if (
+        not scope.has_any_access
+        and not approve_scope.has_any_access
+        and not enter_scope.has_any_access
+    ):
         raise InsufficientPermissionException(permission_code="subjects:manage")
 
     stmt: Select[tuple[AssessmentDefinition]] = select(AssessmentDefinition).where(
@@ -300,19 +307,32 @@ async def list_definitions(
         stmt = stmt.where(AssessmentDefinition.academic_term_id == academic_term_id)
     if class_subject_id is not None:
         stmt = stmt.where(AssessmentDefinition.class_subject_id == class_subject_id)
-    if not scope.unscoped:
-        stmt = (
-            stmt.join(ClassSubject, ClassSubject.id == AssessmentDefinition.class_subject_id)
-            .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
-            .where(
-                build_scope_filter(
-                    scope,
-                    department_column=ClassGroup.department_id,
-                    academic_level_column=ClassGroup.academic_level_id,
-                    class_group_column=ClassGroup.id,
+
+    effective_scope = scope if scope.has_any_access else approve_scope
+    if effective_scope.has_any_access:
+        if not effective_scope.unscoped:
+            stmt = (
+                stmt.join(ClassSubject, ClassSubject.id == AssessmentDefinition.class_subject_id)
+                .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+                .where(
+                    build_scope_filter(
+                        effective_scope,
+                        department_column=ClassGroup.department_id,
+                        academic_level_column=ClassGroup.academic_level_id,
+                        class_group_column=ClassGroup.id,
+                    )
                 )
             )
+    else:
+        from app.modules.subjects.models import TeacherAssignment
+
+        assigned_sub = select(TeacherAssignment.class_subject_id).where(
+            TeacherAssignment.school_id == school_id,
+            TeacherAssignment.teacher_id == current_user.id,
+            TeacherAssignment.is_active.is_(True),
+            TeacherAssignment.deleted_at.is_(None),
         )
+        stmt = stmt.where(AssessmentDefinition.class_subject_id.in_(assigned_sub))
     stmt = stmt.order_by(AssessmentDefinition.sequence_order.asc())
     return await paginate(db, stmt, page=page, page_size=page_size)
 
@@ -859,7 +879,7 @@ async def list_score_sheets_overview(
                 )
             )
     if enter_scope.has_any_access and not (approve_scope.has_any_access and approve_scope.unscoped):
-        if enter_scope.unscoped:
+        if enter_scope.unscoped and current_user.role != "TEACHER":
             access_clauses = []
         else:
             assigned_sub = select(TeacherAssignment.class_subject_id).where(

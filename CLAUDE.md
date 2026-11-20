@@ -1,4 +1,0 @@
-# Claude Agent Guidelines
-Please refer to the comprehensive developer and agent manual in [AGENTS.md](./AGENTS.md) and the system architecture in [ARCHITECTURE.md](./ARCHITECTURE.md).
-
-All architectural invariants, multi-tenant rules, FastAPI/SQLAlchemy standards, and domain models specified in those files must be strictly respected.

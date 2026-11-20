@@ -130,61 +130,6 @@ async def get_subjects_summary(
     )
 
 
-@router.get(
-    "/{subject_id}",
-    response_model=SuccessResponse[SubjectResponse],
-    dependencies=[Depends(require_permission("subjects:manage"))],
-)
-async def get_subject(
-    subject_id: UUID,
-    current_user: User = Depends(get_current_authenticated_user),
-    db: AsyncSession = Depends(get_tenant_db),
-):
-    subject = await services.get_subject(db, _school_id(current_user), subject_id)
-    return SuccessResponse[SubjectResponse](data=SubjectResponse.model_validate(subject))
-
-
-@router.patch(
-    "/{subject_id}",
-    response_model=SuccessResponse[SubjectResponse],
-    dependencies=[Depends(require_permission("subjects:manage"))],
-)
-async def update_subject(
-    subject_id: UUID,
-    req: SubjectUpdateRequest,
-    request: Request,
-    current_user: User = Depends(get_current_authenticated_user),
-    db: AsyncSession = Depends(get_tenant_db),
-):
-    subject = await services.update_subject(
-        db, _school_id(current_user), subject_id, req, _audit_context(request, current_user)
-    )
-    return SuccessResponse[SubjectResponse](data=SubjectResponse.model_validate(subject))
-
-
-@router.delete(
-    "/{subject_id}",
-    response_model=SuccessResponse[MessageResponse],
-    dependencies=[Depends(require_permission("subjects:manage"))],
-)
-async def retire_subject(
-    subject_id: UUID,
-    request: Request,
-    current_user: User = Depends(get_current_authenticated_user),
-    db: AsyncSession = Depends(get_tenant_db),
-):
-    await services.retire_subject(
-        db, _school_id(current_user), subject_id, _audit_context(request, current_user)
-    )
-    return SuccessResponse[MessageResponse](
-        data=MessageResponse(
-            message="The subject has been retired. Existing offerings remain available."
-        )
-    )
-
-
-# --------------------------------------------------------------------------
-# Subject offerings
 # --------------------------------------------------------------------------
 
 
@@ -284,6 +229,61 @@ async def retire_offering(
     )
 
 
+@router.get(
+    "/{subject_id}",
+    response_model=SuccessResponse[SubjectResponse],
+    dependencies=[Depends(require_permission("subjects:manage"))],
+)
+async def get_subject(
+    subject_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    subject = await services.get_subject(db, _school_id(current_user), subject_id)
+    return SuccessResponse[SubjectResponse](data=SubjectResponse.model_validate(subject))
+
+
+@router.patch(
+    "/{subject_id}",
+    response_model=SuccessResponse[SubjectResponse],
+    dependencies=[Depends(require_permission("subjects:manage"))],
+)
+async def update_subject(
+    subject_id: UUID,
+    req: SubjectUpdateRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    subject = await services.update_subject(
+        db, _school_id(current_user), subject_id, req, _audit_context(request, current_user)
+    )
+    return SuccessResponse[SubjectResponse](data=SubjectResponse.model_validate(subject))
+
+
+@router.delete(
+    "/{subject_id}",
+    response_model=SuccessResponse[MessageResponse],
+    dependencies=[Depends(require_permission("subjects:manage"))],
+)
+async def retire_subject(
+    subject_id: UUID,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    await services.retire_subject(
+        db, _school_id(current_user), subject_id, _audit_context(request, current_user)
+    )
+    return SuccessResponse[MessageResponse](
+        data=MessageResponse(
+            message="The subject has been retired. Existing offerings remain available."
+        )
+    )
+
+
+# --------------------------------------------------------------------------
+# Subject offerings
 # --------------------------------------------------------------------------
 # Class subjects
 # --------------------------------------------------------------------------

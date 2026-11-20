@@ -88,6 +88,7 @@ class TermResponse(BaseModel):
     end_date: date
     is_current: bool
     is_locked_for_scoring: bool
+    status: str = "DRAFT"
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
@@ -168,8 +169,6 @@ class ClassGroupCreateRequest(BaseModel):
     department_id: UUID | None = None
     class_arm_id: UUID
     class_teacher_id: UUID | None = None
-    class_teacher_name: str | None = None
-    student_count: int = 0
     display_name: str | None = Field(None, min_length=1, max_length=128)
 
 
@@ -233,6 +232,10 @@ class ClassGroupResponse(BaseModel):
     class_teacher_id: UUID | None = None
     class_teacher_name: str | None = None
     student_count: int = 0
+    academic_session_name: str | None = None
+    academic_level_name: str | None = None
+    department_name: str | None = None
+    class_arm_name: str | None = None
     display_name: str
     created_at: datetime
     updated_at: datetime
@@ -291,6 +294,7 @@ class DashboardIssuesPageResponse(BaseModel):
 class TeacherClassSummary(BaseModel):
     class_group_id: UUID
     display_name: str
+    department_name: str | None = None
     student_count: int
     today_attendance_marked: bool
     marked_count: int
@@ -300,6 +304,7 @@ class TeacherSubjectSummary(BaseModel):
     class_subject_id: UUID
     class_group_id: UUID
     class_group_name: str
+    department_name: str | None = None
     subject_id: UUID
     subject_name: str
     subject_code: str

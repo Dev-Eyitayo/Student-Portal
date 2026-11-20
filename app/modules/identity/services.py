@@ -1563,12 +1563,26 @@ async def update_my_profile(
 async def get_assigned_class_groups(
     db: AsyncSession, school_id: UUID, user_id: UUID
 ) -> list[ClassGroup]:
+    active_session_id = (
+        await db.execute(
+            select(AcademicSession.id)
+            .where(
+                AcademicSession.school_id == school_id,
+                AcademicSession.is_current.is_(True),
+                AcademicSession.deleted_at.is_(None),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if active_session_id is None:
+        return []
     return list(
         (
             await db.execute(
                 select(ClassGroup)
                 .where(
                     ClassGroup.school_id == school_id,
+                    ClassGroup.academic_session_id == active_session_id,
                     ClassGroup.class_teacher_id == user_id,
                     ClassGroup.deleted_at.is_(None),
                 )
@@ -1596,3 +1610,86 @@ async def change_my_password(
         )
     db_user.password_hash = await asyncio.to_thread(hash_password, new_password)
     await db.commit()
+
+
+async def update_school_user(
+    db: AsyncSession,
+    school_id: UUID,
+    target_user_id: UUID,
+    *,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    phone_number: str | None = None,
+    role: str | None = None,
+    staff_id_number: str | None = None,
+    specialization: str | None = None,
+    actor_id: UUID,
+    actor_ip: str,
+) -> dict[str, Any]:
+    target = (
+        await db.execute(
+            select(User)
+            .options(selectinload(User.staff_profile))
+            .where(
+                User.id == target_user_id,
+                User.school_id == school_id,
+                User.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise ResourceNotFoundException("staff member", target_user_id)
+
+    if first_name is not None:
+        target.first_name = first_name
+    if last_name is not None:
+        target.last_name = last_name
+    if phone_number is not None:
+        target.phone_number = phone_number.strip() or None
+    if role is not None:
+        target.role = role
+
+    sp = target.staff_profile
+    if sp is not None:
+        if staff_id_number is not None:
+            sp.staff_id_number = staff_id_number
+        if specialization is not None:
+            sp.specialization = specialization.strip() or None
+
+    await db.flush()
+    record_audit_log(
+        db,
+        AuditContext(school_id=school_id, actor_id=actor_id, actor_ip=actor_ip),
+        action="STAFF_UPDATED",
+        resource_type="User",
+        resource_id=target.id,
+        diff_payload={"role": target.role},
+    )
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ConflictException(
+            message="That staff ID number is already assigned to another staff member in your school.",
+            code="STAFF_ID_CONFLICT",
+        ) from exc
+
+    await db.refresh(target)
+    if sp is not None:
+        await db.refresh(sp)
+    return {
+        "id": target.id,
+        "email": target.email,
+        "first_name": target.first_name,
+        "last_name": target.last_name,
+        "phone_number": target.phone_number,
+        "role": target.role,
+        "is_active": target.is_active,
+        "employment_status": sp.employment_status
+        if sp
+        else ("ACTIVE" if target.is_active else "INACTIVE"),
+        "staff_id_number": sp.staff_id_number if sp else None,
+        "specialization": sp.specialization if sp else None,
+        "last_login_at": target.last_login_at,
+        "created_at": target.created_at,
+    }

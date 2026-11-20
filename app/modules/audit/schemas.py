@@ -15,5 +15,6 @@ class AuditLogResponse(BaseModel):
     action: str
     resource_type: str
     resource_id: UUID
+    resource_summary: str
     diff_payload: dict[str, Any]
     timestamp: datetime

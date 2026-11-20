@@ -139,6 +139,7 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, list[str]] = {
         "subjects:manage",
         "teachers:assign",
         "users:manage",
+        "audit:view",
     ],
 }
 

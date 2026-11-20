@@ -67,6 +67,7 @@ from app.modules.identity.schemas import (
     StaffInviteRequest,
     StaffInviteResponse,
     StaffListItemResponse,
+    StaffUpdateRequest,
     StaffVerifyInviteResponse,
     TokenResponse,
     UserPermissionGrantDetailResponse,
@@ -351,6 +352,11 @@ async def logout(
 async def _build_me_response(db: AsyncSession, current_user: User) -> MeResponse:
     permissions = await services.get_user_effective_permissions(db, current_user)
     school_name = current_user.school.name if current_user.school else None
+    school_type = (
+        current_user.school.school_type.value
+        if current_user.school and hasattr(current_user.school.school_type, "value")
+        else (current_user.school.school_type if current_user.school else None)
+    )
     assigned_class_groups: list[AssignedClassGroupSummary] = []
     if current_user.school_id is not None:
         groups = await services.get_assigned_class_groups(
@@ -364,6 +370,7 @@ async def _build_me_response(db: AsyncSession, current_user: User) -> MeResponse
         id=current_user.id,
         school_id=current_user.school_id,
         school_name=school_name,
+        school_type=school_type,
         email=current_user.email,
         first_name=current_user.first_name,
         last_name=current_user.last_name,
@@ -742,6 +749,36 @@ async def list_school_users(
             meta=meta,
             summary=StaffDirectorySummary.model_validate(summary),
         )
+    )
+
+
+@router.patch(
+    "/users/{user_id}",
+    response_model=SuccessResponse[StaffListItemResponse],
+    dependencies=[Depends(require_permission("users:manage"))],
+)
+async def update_school_user(
+    user_id: UUID,
+    req: StaffUpdateRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    updated = await services.update_school_user(
+        db,
+        require_school_id(current_user),
+        user_id,
+        first_name=req.first_name,
+        last_name=req.last_name,
+        phone_number=req.phone_number,
+        role=req.role.value if req.role is not None else None,
+        staff_id_number=req.staff_id_number,
+        specialization=req.specialization,
+        actor_id=current_user.id,
+        actor_ip=_client_ip(request),
+    )
+    return SuccessResponse[StaffListItemResponse](
+        data=StaffListItemResponse.model_validate(updated)
     )
 
 

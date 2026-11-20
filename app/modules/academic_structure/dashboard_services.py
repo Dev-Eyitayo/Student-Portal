@@ -7,7 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import InsufficientPermissionException
 from app.core.permissions import user_has_permission
-from app.modules.academic_structure.models import AcademicSession, AcademicTerm, ClassGroup
+from app.modules.academic_structure.models import (
+    AcademicSession,
+    AcademicTerm,
+    ClassGroup,
+    Department,
+)
 from app.modules.assessments.models import ScoreSheetStatus
 from app.modules.audit.models import AuditLog
 from app.modules.common.schemas import PageMeta
@@ -417,6 +422,16 @@ async def get_teacher_dashboard(
 
     my_classes: list[dict[str, object]] = []
     if my_groups:
+        dept_ids = list({cg.department_id for cg in my_groups if cg.department_id is not None})
+        dept_map: dict[UUID, str] = {}
+        if dept_ids:
+            dept_map = dict(
+                (
+                    await db.execute(
+                        select(Department.id, Department.name).where(Department.id.in_(dept_ids))
+                    )
+                ).all()
+            )
         cg_ids = [cg.id for cg in my_groups]
         enroll_rows = (
             await db.execute(
@@ -459,6 +474,7 @@ async def get_teacher_dashboard(
                 {
                     "class_group_id": cg.id,
                     "display_name": cg.display_name,
+                    "department_name": dept_map.get(cg.department_id) if cg.department_id else None,
                     "student_count": len(cg_eids),
                     "today_attendance_marked": marked_count > 0,
                     "marked_count": marked_count,
@@ -470,6 +486,7 @@ async def get_teacher_dashboard(
             ClassSubject.id,
             ClassGroup.id,
             ClassGroup.display_name,
+            Department.name,
             Subject.id,
             Subject.name,
             Subject.code,
@@ -477,6 +494,7 @@ async def get_teacher_dashboard(
         .select_from(TeacherAssignment)
         .join(ClassSubject, ClassSubject.id == TeacherAssignment.class_subject_id)
         .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+        .outerjoin(Department, Department.id == ClassGroup.department_id)
         .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
         .join(Subject, Subject.id == SubjectOffering.subject_id)
         .where(
@@ -509,7 +527,7 @@ async def get_teacher_dashboard(
         status_map = {cs_id: st for cs_id, st in st_rows}
 
     teaching_subjects = []
-    for cs_id, cg_id, cg_name, s_id, s_name, s_code in ta_rows:
+    for cs_id, cg_id, cg_name, dept_name, s_id, s_name, s_code in ta_rows:
         st = status_map.get(cs_id, "DRAFT")
         term_q = f"&term_id={term.id}" if term else ""
         teaching_subjects.append(
@@ -517,6 +535,7 @@ async def get_teacher_dashboard(
                 "class_subject_id": cs_id,
                 "class_group_id": cg_id,
                 "class_group_name": cg_name,
+                "department_name": dept_name,
                 "subject_id": s_id,
                 "subject_name": s_name,
                 "subject_code": s_code,

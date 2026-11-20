@@ -76,6 +76,10 @@ class PublishTermRequest(BaseModel):
 
 class ResultLinkResponse(BaseModel):
     student_enrollment_id: UUID
+    student_name: str | None = None
+    admission_number: str | None = None
+    class_group_name: str | None = None
+    guardian_email: str | None = None
     token: str
     expires_at: datetime
 

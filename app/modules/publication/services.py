@@ -122,6 +122,32 @@ async def publish_term(
         result.frozen_config_snapshot = snapshot
         result.status = "PUBLISHED"
 
+    from app.modules.academic_structure.models import ClassGroup
+    from app.modules.students.models import Student, StudentEnrollment
+
+    enrollment_ids = [card.student_enrollment_id for card in cards]
+    student_meta_map: dict[UUID, tuple[str, str, str, str | None]] = {}
+    if enrollment_ids:
+        meta_rows = (
+            await db.execute(
+                select(
+                    StudentEnrollment.id,
+                    Student.first_name,
+                    Student.last_name,
+                    Student.admission_number,
+                    ClassGroup.display_name,
+                    Student.guardian_email,
+                )
+                .join(Student, Student.id == StudentEnrollment.student_id)
+                .join(ClassGroup, ClassGroup.id == StudentEnrollment.class_group_id)
+                .where(StudentEnrollment.id.in_(enrollment_ids))
+            )
+        ).all()
+        student_meta_map = {
+            eid: (f"{fn} {ln}".strip(), adm, cg_name, g_email)
+            for eid, fn, ln, adm, cg_name, g_email in meta_rows
+        }
+
     for card in cards:
         card.frozen_config_snapshot = snapshot
         card.publication_status = "PUBLISHED"
@@ -134,9 +160,14 @@ async def publish_term(
             expires_at=expires_at,
         )
         db.add(token)
+        s_meta = student_meta_map.get(card.student_enrollment_id)
         result_links.append(
             ResultLinkResponse(
                 student_enrollment_id=card.student_enrollment_id,
+                student_name=s_meta[0] if s_meta else None,
+                admission_number=s_meta[1] if s_meta else None,
+                class_group_name=s_meta[2] if s_meta else None,
+                guardian_email=s_meta[3] if s_meta else None,
                 token=plain_token,
                 expires_at=expires_at,
             )
