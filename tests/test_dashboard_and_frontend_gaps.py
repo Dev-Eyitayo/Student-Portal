@@ -282,6 +282,132 @@ async def test_dashboard_staff_filters_attendance_sheets_and_report_cards(
         audit_resp = await client.get("/api/v1/audit/logs", headers=headers)
         assert audit_resp.status_code == 200, audit_resp.text
         assert audit_resp.json()["data"]["meta"]["total"] > 0
+        assert audit_resp.json()["data"]["items"][0]["resource_summary"]
+
+        # Verify single-record enrichments & offerings
+        cg_detail = await client.get(f"/api/v1/structure/class-groups/{cg_id}", headers=headers)
+        assert cg_detail.status_code == 200, cg_detail.text
+        assert cg_detail.json()["data"]["class_teacher_name"] == "TundeUpdated Balogun"
+        assert cg_detail.json()["data"]["student_count"] == 1
+        assert cg_detail.json()["data"]["academic_level_name"]
+
+        stu_detail = await client.get(f"/api/v1/students/{student_id}", headers=headers)
+        assert stu_detail.status_code == 200, stu_detail.text
+        assert stu_detail.json()["data"]["current_class_name"] == "Basic 1 A"
+
+        offerings_resp = await client.get("/api/v1/subjects/offerings", headers=headers)
+        assert offerings_resp.status_code == 200, offerings_resp.text
+        assert offerings_resp.json()["data"]["items"][0]["subject_name"]
+
+        # Invite a TEACHER, accept invite, edit via PATCH /users/{id}, and verify Class Teacher routes
+        teacher_email = f"teacher.{suffix}@olivet-test.edu.ng"
+        inv_resp = await client.post(
+            "/api/v1/identity/staff/invite",
+            json={
+                "email": teacher_email,
+                "first_name": "Grace",
+                "last_name": "Ojo",
+                "role": "TEACHER",
+                "staff_id_number": f"TCH-{suffix.upper()}",
+            },
+            headers=headers,
+        )
+        assert inv_resp.status_code == 201, inv_resp.text
+        inv_token = inv_resp.json()["data"]["invitation_token"]
+
+        acc_resp = await client.post(
+            "/api/v1/identity/staff/accept-invitation",
+            json={
+                "invitation_token": inv_token,
+                "password": "TeacherPassword123!",
+                "confirm_password": "TeacherPassword123!",
+            },
+        )
+        assert acc_resp.status_code == 200, acc_resp.text
+        t_headers = {"Authorization": f"Bearer {acc_resp.json()['data']['access_token']}"}
+        t_me = await client.get("/api/v1/identity/me", headers=t_headers)
+        assert t_me.json()["data"]["school_type"] == "PRIMARY"
+        teacher_id = t_me.json()["data"]["id"]
+
+        # Admin edits teacher via PATCH /users/{user_id}
+        edit_staff = await client.patch(
+            f"/api/v1/identity/users/{teacher_id}",
+            json={"specialization": "Mathematics"},
+            headers=headers,
+        )
+        assert edit_staff.status_code == 200, edit_staff.text
+        assert edit_staff.json()["data"]["specialization"] == "Mathematics"
+
+        # Assign teacher as Class Teacher of cg_id and Subject Teacher of cs_id
+        await client.patch(
+            f"/api/v1/structure/class-groups/{cg_id}",
+            json={"class_teacher_id": teacher_id},
+            headers=headers,
+        )
+        await client.post(
+            f"/api/v1/class-subjects/{cs_id}/teacher-assignments",
+            json={"teacher_id": teacher_id},
+            headers=headers,
+        )
+
+        # Teacher (no structure:manage or subjects:manage) must NOT get 403 on their routes
+        assert (
+            await client.get("/api/v1/structure/sessions", headers=t_headers)
+        ).status_code == 200
+        assert (
+            await client.get(f"/api/v1/structure/sessions/{session_id}/terms", headers=t_headers)
+        ).status_code == 200
+        assert (
+            await client.get(f"/api/v1/structure/class-groups/{cg_id}", headers=t_headers)
+        ).status_code == 200
+        assert (
+            await client.get(f"/api/v1/structure/class-groups/{cg_id}/subjects", headers=t_headers)
+        ).status_code == 200
+        assert (
+            await client.get(
+                f"/api/v1/structure/attendance/summary?academic_term_id={term_id}",
+                headers=t_headers,
+            )
+        ).status_code == 403
+        admin_att_summary = await client.get(
+            f"/api/v1/structure/attendance/summary?academic_term_id={term_id}",
+            headers=headers,
+        )
+        assert admin_att_summary.status_code == 200, admin_att_summary.text
+        assert len(admin_att_summary.json()["data"]["classes"]) >= 1
+        assert any(
+            c["class_group_id"] == cg_id and c["marked"] is True
+            for c in admin_att_summary.json()["data"]["classes"]
+        )
+        t_att = await client.get(
+            f"/api/v1/structure/class-groups/{cg_id}/attendance?academic_term_id={term_id}",
+            headers=t_headers,
+        )
+        assert t_att.status_code == 200, t_att.text
+        assert t_att.json()["data"]["term_status"] == "DRAFT"
+        assert (
+            await client.post(
+                f"/api/v1/structure/class-groups/{cg_id}/attendance",
+                json={
+                    "academic_term_id": term_id,
+                    "attendance_date": today.isoformat(),
+                    "records": [{"student_enrollment_id": enrollment_id, "status": "LATE"}],
+                },
+                headers=t_headers,
+            )
+        ).status_code == 200
+        assert (
+            await client.get(
+                f"/api/v1/assessments/definitions?academic_term_id={term_id}&class_subject_id={cs_id}",
+                headers=t_headers,
+            )
+        ).status_code == 200
+        t_sheets = await client.get(
+            f"/api/v1/assessments/sheets?academic_term_id={term_id}",
+            headers=t_headers,
+        )
+        assert t_sheets.status_code == 200, t_sheets.text
+        assert t_sheets.json()["data"]["summary"]["total"] == 1
 
         # Report cards list (empty before compute, returns 200 with summary)
         rc_resp = await client.get(
@@ -290,3 +416,28 @@ async def test_dashboard_staff_filters_attendance_sheets_and_report_cards(
         )
         assert rc_resp.status_code == 200, rc_resp.text
         assert rc_resp.json()["data"]["summary"]["students_computed"] == 0
+
+        # 1 class teacher per class arm per session (application-level):
+        # Re-saving the same class group with the same teacher succeeds
+        same_cg = await client.patch(
+            f"/api/v1/structure/class-groups/{cg_id}",
+            json={"class_teacher_id": teacher_id},
+            headers=headers,
+        )
+        assert same_cg.status_code == 200, same_cg.text
+
+        # Assigning the same teacher to a different class group in the same session returns 409
+        other_cgs = await client.get(
+            f"/api/v1/structure/class-groups?session_id={session_id}&page_size=50",
+            headers=headers,
+        )
+        other_cg_id = next(
+            item["id"] for item in other_cgs.json()["data"]["items"] if item["id"] != cg_id
+        )
+        dup_cg = await client.patch(
+            f"/api/v1/structure/class-groups/{other_cg_id}",
+            json={"class_teacher_id": teacher_id},
+            headers=headers,
+        )
+        assert dup_cg.status_code == 409, dup_cg.text
+        assert dup_cg.json()["error"]["code"] == "CLASS_TEACHER_SESSION_CONFLICT"

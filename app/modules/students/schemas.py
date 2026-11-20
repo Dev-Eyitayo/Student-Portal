@@ -291,6 +291,10 @@ class ClassAttendanceRosterResponse(BaseModel):
     class_group_id: UUID
     academic_term_id: UUID
     attendance_date: date
+    is_locked_for_scoring: bool = False
+    term_status: str = "DRAFT"
+    term_start_date: date | None = None
+    term_end_date: date | None = None
     items: list[ClassAttendanceRosterItem]
 
 
@@ -306,6 +310,17 @@ class ClassAttendanceSummaryRow(BaseModel):
     override_reason: str | None = None
 
 
+class ClassAttendanceOverviewItem(BaseModel):
+    class_group_id: UUID
+    display_name: str
+    department_name: str | None = None
+    class_teacher_name: str | None = None
+    student_count: int
+    marked: bool
+    present_count: int
+    present_pct: float
+
+
 class AttendanceOverviewSummaryResponse(BaseModel):
     academic_term_id: UUID
     target_date: date
@@ -314,3 +329,4 @@ class AttendanceOverviewSummaryResponse(BaseModel):
     classes_marked_today: int
     total_classes: int
     manual_overrides: int
+    classes: list[ClassAttendanceOverviewItem] = Field(default_factory=list)

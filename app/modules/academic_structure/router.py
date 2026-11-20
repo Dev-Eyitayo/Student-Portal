@@ -56,7 +56,6 @@ from app.modules.subjects.schemas import ClassGroupSubjectItem
 router = APIRouter(
     prefix="/structure",
     tags=["Academic Structure"],
-    dependencies=[Depends(require_permission("structure:manage"))],
 )
 
 # No blanket dependency: class-group auth is resource-scoped in the service layer.
@@ -95,6 +94,7 @@ async def list_sessions(
     "/sessions",
     response_model=SuccessResponse[SessionResponse],
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("structure:manage"))],
 )
 async def create_session(
     req: SessionCreateRequest,
@@ -121,7 +121,11 @@ async def get_session(
     return SuccessResponse[SessionResponse](data=SessionResponse.model_validate(session))
 
 
-@router.patch("/sessions/{session_id}", response_model=SuccessResponse[SessionResponse])
+@router.patch(
+    "/sessions/{session_id}",
+    response_model=SuccessResponse[SessionResponse],
+    dependencies=[Depends(require_permission("structure:manage"))],
+)
 async def update_session(
     session_id: UUID,
     req: SessionUpdateRequest,
@@ -139,7 +143,11 @@ async def update_session(
     return SuccessResponse[SessionResponse](data=SessionResponse.model_validate(session))
 
 
-@router.delete("/sessions/{session_id}", response_model=SuccessResponse[MessageResponse])
+@router.delete(
+    "/sessions/{session_id}",
+    response_model=SuccessResponse[MessageResponse],
+    dependencies=[Depends(require_permission("structure:manage"))],
+)
 async def retire_session(
     session_id: UUID,
     request: Request,
@@ -189,6 +197,7 @@ async def list_terms(
     "/sessions/{session_id}/terms",
     response_model=SuccessResponse[TermResponse],
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("structure:manage"))],
 )
 async def create_term(
     session_id: UUID,
@@ -217,7 +226,11 @@ async def get_term(
     return SuccessResponse[TermResponse](data=TermResponse.model_validate(term))
 
 
-@router.patch("/terms/{term_id}", response_model=SuccessResponse[TermResponse])
+@router.patch(
+    "/terms/{term_id}",
+    response_model=SuccessResponse[TermResponse],
+    dependencies=[Depends(require_permission("structure:manage"))],
+)
 async def update_term(
     term_id: UUID,
     req: TermUpdateRequest,
@@ -235,7 +248,11 @@ async def update_term(
     return SuccessResponse[TermResponse](data=TermResponse.model_validate(term))
 
 
-@router.delete("/terms/{term_id}", response_model=SuccessResponse[MessageResponse])
+@router.delete(
+    "/terms/{term_id}",
+    response_model=SuccessResponse[MessageResponse],
+    dependencies=[Depends(require_permission("structure:manage"))],
+)
 async def retire_term(
     term_id: UUID,
     request: Request,
@@ -280,6 +297,7 @@ async def list_levels(
     "/levels",
     response_model=SuccessResponse[LevelResponse],
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("structure:manage"))],
 )
 async def create_level(
     req: LevelCreateRequest,
@@ -306,7 +324,11 @@ async def get_level(
     return SuccessResponse[LevelResponse](data=LevelResponse.model_validate(level))
 
 
-@router.patch("/levels/{level_id}", response_model=SuccessResponse[LevelResponse])
+@router.patch(
+    "/levels/{level_id}",
+    response_model=SuccessResponse[LevelResponse],
+    dependencies=[Depends(require_permission("structure:manage"))],
+)
 async def update_level(
     level_id: UUID,
     req: LevelUpdateRequest,
@@ -324,7 +346,11 @@ async def update_level(
     return SuccessResponse[LevelResponse](data=LevelResponse.model_validate(level))
 
 
-@router.delete("/levels/{level_id}", response_model=SuccessResponse[MessageResponse])
+@router.delete(
+    "/levels/{level_id}",
+    response_model=SuccessResponse[MessageResponse],
+    dependencies=[Depends(require_permission("structure:manage"))],
+)
 async def retire_level(
     level_id: UUID,
     request: Request,
@@ -371,6 +397,7 @@ async def list_departments(
     "/departments",
     response_model=SuccessResponse[DepartmentResponse],
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("structure:manage"))],
 )
 async def create_department(
     req: DepartmentCreateRequest,
@@ -403,6 +430,7 @@ async def get_department(
 @router.patch(
     "/departments/{department_id}",
     response_model=SuccessResponse[DepartmentResponse],
+    dependencies=[Depends(require_permission("structure:manage"))],
 )
 async def update_department(
     department_id: UUID,
@@ -424,6 +452,7 @@ async def update_department(
 @router.delete(
     "/departments/{department_id}",
     response_model=SuccessResponse[MessageResponse],
+    dependencies=[Depends(require_permission("structure:manage"))],
 )
 async def retire_department(
     department_id: UUID,
@@ -469,6 +498,7 @@ async def list_arms(
     "/arms",
     response_model=SuccessResponse[ArmResponse],
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("structure:manage"))],
 )
 async def create_arm(
     req: ArmCreateRequest,
@@ -495,7 +525,11 @@ async def get_arm(
     return SuccessResponse[ArmResponse](data=ArmResponse.model_validate(arm))
 
 
-@router.patch("/arms/{arm_id}", response_model=SuccessResponse[ArmResponse])
+@router.patch(
+    "/arms/{arm_id}",
+    response_model=SuccessResponse[ArmResponse],
+    dependencies=[Depends(require_permission("structure:manage"))],
+)
 async def update_arm(
     arm_id: UUID,
     req: ArmUpdateRequest,
@@ -513,7 +547,11 @@ async def update_arm(
     return SuccessResponse[ArmResponse](data=ArmResponse.model_validate(arm))
 
 
-@router.delete("/arms/{arm_id}", response_model=SuccessResponse[MessageResponse])
+@router.delete(
+    "/arms/{arm_id}",
+    response_model=SuccessResponse[MessageResponse],
+    dependencies=[Depends(require_permission("structure:manage"))],
+)
 async def retire_arm(
     arm_id: UUID,
     request: Request,
@@ -657,6 +695,7 @@ async def retire_class_group(
     "/templates/apply",
     response_model=SuccessResponse[StructureTemplateApplyResponse],
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("structure:manage"))],
 )
 async def apply_structure_template(
     req: StructureTemplateApplyRequest,
@@ -704,6 +743,7 @@ async def get_class_attendance(
 async def get_class_attendance_summary(
     class_group_id: UUID,
     academic_term_id: UUID = Query(...),
+    source: str | None = Query(None, max_length=16),
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
@@ -713,6 +753,7 @@ async def get_class_attendance_summary(
         class_group_id,
         academic_term_id,
         current_user,
+        source=source,
     )
     return SuccessResponse[list[ClassAttendanceSummaryRow]](
         data=[ClassAttendanceSummaryRow.model_validate(row) for row in rows]
@@ -727,6 +768,7 @@ async def get_attendance_overview_summary(
     academic_term_id: UUID = Query(...),
     target_date: date | None = Query(None),
     current_user: User = Depends(get_current_authenticated_user),
+    _: bool = Depends(require_permission("structure:manage")),
     db: AsyncSession = Depends(get_tenant_db),
 ):
     summary = await attendance_services.get_attendance_overview_summary(
@@ -740,8 +782,8 @@ async def get_attendance_overview_summary(
     )
 
 
-@router.post(
-    "/class-groups/{class_group_id}/attendance",
+@class_groups_router.post(
+    "/{class_group_id}/attendance",
     response_model=SuccessResponse[ClassAttendanceMarkResponse],
 )
 async def mark_class_attendance(
@@ -762,8 +804,8 @@ async def mark_class_attendance(
     return SuccessResponse[ClassAttendanceMarkResponse](data=result)
 
 
-@router.patch(
-    "/class-groups/{class_group_id}/attendance-summary",
+@class_groups_router.patch(
+    "/{class_group_id}/attendance-summary",
     response_model=SuccessResponse[list[AttendanceSummaryResponse]],
 )
 async def update_class_attendance_summary(
@@ -786,8 +828,8 @@ async def update_class_attendance_summary(
     )
 
 
-@router.get(
-    "/class-groups/{class_group_id}/subjects",
+@class_groups_router.get(
+    "/{class_group_id}/subjects",
     response_model=SuccessResponse[list[ClassGroupSubjectItem]],
 )
 async def list_class_group_subjects(

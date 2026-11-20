@@ -95,6 +95,7 @@ async def list_audit_logs(
             action=log.action,
             resource_type=log.resource_type,
             resource_id=log.resource_id,
+            resource_summary=f"{log.action.replace('_', ' ').title()} ({log.resource_type})",
             diff_payload=log.diff_payload,
             timestamp=log.timestamp,
         )

@@ -390,7 +390,45 @@ async def list_offerings(
                 academic_level_column=SubjectOffering.academic_level_id,
             )
         )
-    return await paginate(db, stmt, page=page, page_size=page_size)
+    items, meta = await paginate(db, stmt, page=page, page_size=page_size)
+    if items:
+        subj_ids = list({o.subject_id for o in items})
+        level_ids = list({o.academic_level_id for o in items})
+        dept_ids = list({o.department_id for o in items if o.department_id is not None})
+
+        subj_map = {
+            sid: (name, code)
+            for sid, name, code in (
+                await db.execute(
+                    select(Subject.id, Subject.name, Subject.code).where(Subject.id.in_(subj_ids))
+                )
+            ).all()
+        }
+        level_map = dict(
+            (
+                await db.execute(
+                    select(AcademicLevel.id, AcademicLevel.name).where(
+                        AcademicLevel.id.in_(level_ids)
+                    )
+                )
+            ).all()
+        )
+        dept_map: dict[UUID, str] = {}
+        if dept_ids:
+            dept_map = dict(
+                (
+                    await db.execute(
+                        select(Department.id, Department.name).where(Department.id.in_(dept_ids))
+                    )
+                ).all()
+            )
+        for o in items:
+            s_info = subj_map.get(o.subject_id)
+            if s_info:
+                o.subject_name, o.subject_code = s_info
+            o.academic_level_name = level_map.get(o.academic_level_id)
+            o.department_name = dept_map.get(o.department_id) if o.department_id else None
+    return items, meta
 
 
 async def _validate_offering_department(

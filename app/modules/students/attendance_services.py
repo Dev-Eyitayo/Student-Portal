@@ -12,7 +12,7 @@ from app.core.exceptions import (
     ValidationException,
 )
 from app.core.permissions import require_scoped_permission
-from app.modules.academic_structure.models import AcademicTerm, ClassGroup
+from app.modules.academic_structure.models import AcademicTerm, ClassGroup, Department
 from app.modules.audit.services import AuditContext, record_audit_log
 from app.modules.common.pagination import paginate
 from app.modules.common.schemas import PageMeta
@@ -669,10 +669,33 @@ async def get_class_attendance(
             }
         )
 
+    from app.modules.computation.models import TermReportCard
+
+    published_exists = (
+        await db.execute(
+            select(TermReportCard.id)
+            .where(
+                TermReportCard.school_id == school_id,
+                TermReportCard.academic_term_id == term.id,
+                TermReportCard.publication_status == "PUBLISHED",
+                TermReportCard.deleted_at.is_(None),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none() is not None
+
+    term_status = (
+        "PUBLISHED" if published_exists else ("LOCKED" if term.is_locked_for_scoring else "DRAFT")
+    )
+
     return {
         "class_group_id": group.id,
         "academic_term_id": term.id,
         "attendance_date": target_date,
+        "is_locked_for_scoring": term.is_locked_for_scoring or published_exists,
+        "term_status": term_status,
+        "term_start_date": term.start_date,
+        "term_end_date": term.end_date,
         "items": items,
     }
 
@@ -683,6 +706,8 @@ async def get_class_attendance_summary(
     class_group_id: UUID,
     academic_term_id: UUID,
     current_user: User,
+    *,
+    source: str | None = None,
 ) -> list[dict[str, object]]:
     group = await _get_class_group(db, school_id, class_group_id)
     await _require_attendance_access(db, current_user, group)
@@ -729,7 +754,7 @@ async def get_class_attendance_summary(
         )
         summary_map = {s.student_enrollment_id: s for s in summaries}
 
-    return [
+    rows = [
         {
             "student_enrollment_id": enrollment_id,
             "student_id": student_id,
@@ -751,6 +776,10 @@ async def get_class_attendance_summary(
         }
         for enrollment_id, student_id, adm_no, first_name, last_name in enroll_rows
     ]
+    if source:
+        src = source.strip().upper()
+        rows = [r for r in rows if (r["source"] or "").upper() == src]
+    return rows
 
 
 async def get_attendance_overview_summary(
@@ -801,17 +830,75 @@ async def get_attendance_overview_summary(
     )
     classes_marked_today = len({cg_id for _, cg_id in today_records})
 
-    total_classes = (
+    class_rows = (
         await db.execute(
-            select(func.count())
-            .select_from(ClassGroup)
+            select(
+                ClassGroup.id,
+                ClassGroup.display_name,
+                Department.name,
+                User.first_name,
+                User.last_name,
+            )
+            .outerjoin(Department, Department.id == ClassGroup.department_id)
+            .outerjoin(User, User.id == ClassGroup.class_teacher_id)
             .where(
                 ClassGroup.school_id == school_id,
                 ClassGroup.academic_session_id == term.academic_session_id,
                 ClassGroup.deleted_at.is_(None),
             )
+            .order_by(ClassGroup.display_name.asc())
         )
-    ).scalar_one()
+    ).all()
+    total_classes = len(class_rows)
+
+    enrollment_counts = dict(
+        (
+            await db.execute(
+                select(StudentEnrollment.class_group_id, func.count())
+                .where(
+                    StudentEnrollment.school_id == school_id,
+                    StudentEnrollment.academic_session_id == term.academic_session_id,
+                    StudentEnrollment.enrollment_status == "ENROLLED",
+                    StudentEnrollment.deleted_at.is_(None),
+                )
+                .group_by(StudentEnrollment.class_group_id)
+            )
+        ).all()
+    )
+
+    per_class_totals: dict[UUID, int] = {}
+    per_class_present: dict[UUID, int] = {}
+    for st, cg_id in today_records:
+        per_class_totals[cg_id] = per_class_totals.get(cg_id, 0) + 1
+        if st in ("PRESENT", "LATE"):
+            per_class_present[cg_id] = per_class_present.get(cg_id, 0) + 1
+
+    classes = []
+    for cg_id, display_name, dept_name, t_first, t_last in class_rows:
+        marked_total = per_class_totals.get(cg_id, 0)
+        marked_present = per_class_present.get(cg_id, 0)
+        pct = (
+            float(
+                ((Decimal(marked_present) / Decimal(marked_total)) * Decimal("100")).quantize(
+                    Decimal("0.1"), rounding=ROUND_HALF_UP
+                )
+            )
+            if marked_total
+            else 0.0
+        )
+        teacher_name = f"{t_first} {t_last}".strip() if t_first or t_last else None
+        classes.append(
+            {
+                "class_group_id": cg_id,
+                "display_name": display_name,
+                "department_name": dept_name,
+                "class_teacher_name": teacher_name,
+                "student_count": enrollment_counts.get(cg_id, 0),
+                "marked": marked_total > 0,
+                "present_count": marked_present,
+                "present_pct": pct,
+            }
+        )
 
     manual_overrides = (
         await db.execute(
@@ -834,4 +921,5 @@ async def get_attendance_overview_summary(
         "classes_marked_today": classes_marked_today,
         "total_classes": total_classes,
         "manual_overrides": manual_overrides,
+        "classes": classes,
     }

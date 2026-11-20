@@ -57,7 +57,7 @@ Semantic status pills (soft fill + dark text, no neon gradients):
 #### Page 1: Sign In & Accept Invite (`/login`, `/accept-invite`)
 - **Layout:** Clean two-column split screen. Left side: calm Olivet institutional panel (school crest/emblem + concise 2-line value statement). Right side: focused form.
 - **Sign In (`/login`):** Email, Password (show/hide toggle), `Sign in` button, inline human-friendly error banner.
-- **Accept Invite (`/accept-invite`):** Reads invite token from URL, displays invited email + assigned role badge, asks for Full Name / Phone (if needed) and New Password, `Activate account` CTA.
+- **Accept Invite (`/accept-invite`):** Reads invite token from URL, displays invited school, Full Name, email, and assigned role badge (from `verify-invite`), asks for New Password + Confirm Password, `Activate account` CTA.
 - **Endpoints:** `POST /api/v1/identity/login`, `GET /api/v1/identity/staff/verify-invite`, `POST /api/v1/identity/staff/accept-invitation`.
 
 #### Page 2: School Registration (`/onboarding`)
@@ -150,7 +150,7 @@ Semantic status pills (soft fill + dark text, no neon gradients):
 #### Page 10: Attendance (`/attendance`)
 - **Tabs:** `Daily Roll Call` | `Term Attendance Summary`
 - **Metric Cards (4):** `Days School Opened`, `Present Today (%)`, `Classes Marked Today`, `Manual Summary Overrides`.
-- **Dropdown Filters:** `Term`, `Class Arm` *(pre-selected for a Class Teacher)*, `Date Picker`, `Source` (`Daily Roll Call`, `Manual Total`).
+- **Dropdown Filters:** `Term`, `Class Arm` *(pre-selected for a Class Teacher)*, `Date Picker` *(Daily Roll Call)*, `Source` (`Daily Roll Call`, `Manual Total` — *Term Attendance Summary tab*).
 - **Daily Roll Call Tab:** Student list with fast `Present` / `Absent` segmented toggle per student + `Backdate Reason` field (appears automatically when marking a past date) + `Save Roll Call`.
 - **Term Attendance Summary Tab:** Shows `Times School Opened`, `Times Present`, `Times Absent` per student with `Edit Manual Total` drawer.
 - **Endpoints:** `GET /api/v1/structure/attendance/summary`, `GET/POST /api/v1/structure/class-groups/{id}/attendance`, `GET/PATCH /api/v1/structure/class-groups/{id}/attendance-summary`, `PATCH /api/v1/enrollments/{id}/attendance-summary`.
@@ -166,7 +166,7 @@ Semantic status pills (soft fill + dark text, no neon gradients):
 #### Page 12: Results & Broadsheets (`/results`)
 - **Tabs:** `Class Broadsheet` | `Report Card Remarks` | `Publish & Send Results`
 - **Metric Cards (4):** `Students Computed`, `Class Average (%)`, `Pass Rate (%)`, `Result Status` (`Draft` / `Published`).
-- **Dropdown Filters:** `Term`, `Class Arm`, `Promotion Status` (`Promoted`, `Repeat`, `Pending`).
+- **Dropdown Filters:** `Term`, `Class Arm`, `Promotion Status` (`Promoted`, `Promoted on Trial`, `Repeating`).
 - **Class Broadsheet Tab:** `Compute Term Results` button + horizontal master score matrix (students as rows, subjects as columns, total, average, position) + `View Cumulative`.
 - **Report Card Remarks Tab:** Table of students in the selected class with inline/drawer inputs for **Class Teacher's Remark** and **Principal's / Head Teacher's Remark** (`Save Remarks`). Automatically shows a read-only lock banner once the term is published.
 - **Publish & Send Results Tab:** `Publish Term Results` button → displays one-time parent result link table + `Download Links CSV` + `Send Results via Email` button (triggers Senviok email delivery).
@@ -174,14 +174,14 @@ Semantic status pills (soft fill + dark text, no neon gradients):
 
 #### Page 13: School & Account Settings (`/settings`)
 - **Tabs:** `School Profile & Branding` | `Grading & Result Rules` | `My Account & Security`
-- **Content:** Logo & signature uploader, grading bands (`A 70–100`, `B 60–69`, etc.), pass mark, ranking & promotion toggles, profile update, and password change.
-- **Endpoints:** `GET/PATCH /api/v1/identity/schools/{id}/configuration`, `POST /api/v1/identity/schools/{id}/branding/uploads?asset_type=...`, `GET/PATCH /api/v1/identity/me`, `POST /api/v1/identity/change-password`.
+- **Content:** Logo & signature uploader, grading bands (`A 70–100`, `B 60–69`, etc.), pass mark, annual promotion thresholds (`promoted_min_percentage`, `trial_min_percentage`), profile update, and password change.
+- **Endpoints:** `GET/PATCH /api/v1/identity/schools/{id}/setup`, `GET/PATCH /api/v1/identity/schools/{id}/configuration`, `POST /api/v1/identity/schools/{id}/branding/uploads?asset_type=...`, `GET/PATCH /api/v1/identity/me`, `POST /api/v1/identity/change-password`.
 
 ---
 
-## 3. Batched Figma Make Prompts (3 Prompts Total — Full Design Freedom)
+## 3. Batched Figma Make Prompts (6 Prompts Total — Full Design Freedom)
 
-To conserve free-plan prompts and let Figma Make do its best creative work, the 13 pages are grouped into **3 consolidated prompts**. Each prompt instructs Figma Make to **act as a Senior Product Designer** with **full layout freedom** on every page—specifying the design tokens, Nigerian school terminology, anti-AI-slop guardrails, and required capabilities/data without dictating rigid layouts.
+To conserve free-plan prompts and let Figma Make do its best creative work, the pages, modals, and polish passes are grouped into **5 consolidated prompts**. Each prompt instructs Figma Make to **act as a Senior Product Designer** with **full layout freedom** on every page—specifying the design tokens, Nigerian school terminology, anti-AI-slop guardrails, and required capabilities/data without dictating rigid layouts.
 
 ### Prompt 1: Design System, App Shell, Dashboards & Public Auth (5 Views)
 > **Role & Creative Direction:** Act as a Senior Product Designer at a top design studio designing **Olivet**, a multi-tenant academic records, attendance, grading, and report card platform for Nigerian primary and secondary schools. You have **full design and layout freedom** across every page—make intentional, high-craft layout decisions rather than falling back to generic templates.
@@ -197,7 +197,7 @@ To conserve free-plan prompts and let Figma Make do its best creative work, the 
 > 3. **Teacher Dashboard (`/dashboard` — Teacher view):** Metric cards (`My Class: SS1 O`, `Subjects I Teach: 4`, `Pending Score Sheets: 2`), a clear focus on the teacher's single assigned class arm (`SS1 O (Science)`, `42 Students`, today's attendance status, quick actions: `Mark Attendance` → `/attendance`, `View Class Subjects` → `/structure/classes/ss1-o`, `Write Class Teacher Remarks` → `/results?tab=remarks`), plus their **Subjects I Teach** list (`Chemistry — SS1 O`, `Chemistry — SS1 L`, `Basic Science — JSS2 O`) with score status pills and `Enter Scores` → `/assessments?tab=enter-scores`.
 > 4. **Staff Sign In & Accept Invite (`/login` & `/accept-invite` — public, no sidebar):**
 >    - `/login`: Email, Password (visibility toggle), Keep me signed in, `Sign in` → `/dashboard`, link to `/onboarding`.
->    - `/accept-invite`: Shows invited school (`Olivet Baptist High School, Oyo`), email (`tunde.balogun@olivet.edu.ng`), assigned role (`Teacher`), Full Name, Phone Number, Create Password + strength indicator, and `Activate account`.
+>    - `/accept-invite`: Shows invited school (`Olivet Baptist High School, Oyo`), Full Name, email (`tunde.balogun@olivet.edu.ng`), and assigned role (`Teacher`) read-only from invite verification, plus Create Password, Confirm Password + strength indicator, and `Activate account`.
 > 5. **School Registration (`/onboarding` — public, no sidebar):** 2-step school signup (`Step 1: School Profile` with clear selection between **Nigerian Primary (Basic 1–6 • Arms A–D)** and **Nigerian Secondary (JSS1–SS3 • Science/Arts/Commercial • Arms O–L–I–V–E–T)**, School Name, Official Code, State, City, Address; `Step 2: Principal / Admin Account`, `Create school account`).
 
 ---
@@ -207,7 +207,7 @@ To conserve free-plan prompts and let Figma Make do its best creative work, the 
 >
 > 1. **Term Readiness & Issues (`/dashboard/issues`):** Dedicated page opened when clicking `View all term issues` on the Admin Dashboard. Filterable by Issue Type (`Missing Class Teacher`, `Unassigned Subject`, `Scores Awaiting Approval`, `Pending Score Entry`) and Class Arm, with a direct action button on each row (`Assign Class Teacher` → `/structure/classes/:id`, `Review Scores` → `/assessments?tab=approvals`, etc.).
 > 2. **Guided Setup Wizard (`/setup`):** Multi-step onboarding wizard (`School Profile & Logo`, `CA & Grading Rules`, `Create Classes from Template`, `Review & Finish`), showcasing the template selection step for **Nigerian Secondary (JSS1–SS3, Science/Arts/Commercial, Arms O-L-I-V-E-T)** and **Nigerian Primary (Basic 1–6, Arms A–D)**.
-> 3. **School Settings (`/settings`):** Tabbed settings (`School Profile & Branding` | `Grading & Result Rules` | `My Account & Security`), showing grading scale rows (`A: 70–100` down to `F: 0–39`), Pass Mark (`50%`), toggles for class position & auto-promotion, logo/signature uploads, and `Save changes`.
+> 3. **School Settings (`/settings`):** Tabbed settings (`School Profile & Branding` | `Grading & Result Rules` | `My Account & Security`), showing grading scale rows (`A: 70–100` down to `F: 0–39`), Pass Mark (`50%`), annual promotion thresholds (`Promoted Min %`, `Trial Min %`), logo/signature uploads, and `Save changes`.
 > 4. **Staff & Roles (`/staff`):** Tabbed view (`All Staff` | `Roles & Permissions`), metric cards (`Total Staff: 54`, `Teachers: 46`, `Pending Invites: 3`, `Deactivated: 2`), search + dropdown filters (`Role`, `Status`, `Department`), `Invite Staff` action, staff directory, and a way to assign scoped permissions (`Whole School`, `Department`, `Level`, or `Specific Class Arm`).
 > 5. **Classes & Terms (`/structure` + `/structure/classes/:id`):**
 >    - `/structure`: Tabbed view (`Sessions & Terms` | `Levels & Departments` | `Class Arms & Class Teachers`), metric cards (`Active Session: 2026/2027`, `Current Term: First Term`, `Total Class Arms: 24`, `Without Class Teacher: 2`), dropdown filters (`Session`, `Level`, `Department`, `Class Teacher`), and class arms list (`SS1 O`, `SS1 L`, `JSS1 O`) linking to `/structure/classes/:id`.
@@ -225,3 +225,77 @@ To conserve free-plan prompts and let Figma Make do its best creative work, the 
 > 4. **Results, Broadsheets & Public Report Card (`/results` + `/results/verify/:token`):**
 >    - `/results`: Tabbed view (`Class Broadsheet` | `Report Card Remarks` | `Publish & Send Results`), metric cards (`Students Computed: 42`, `Class Average: 68.4%`, `Pass Rate: 90.5%`, `Term Status: Draft`), dropdown filters (`Term`, `Class Arm: SS1 O`, `Promotion Status`), horizontal Class Broadsheet matrix (`Student`, `ENG`, `MTH`, `CHM`, `PHY`, `BIO`, `Total`, `Avg %`, `Pos`), `Compute Results` action, and a preview link to `/results/verify/demo`.
 >    - `/results/verify/:token` (public view, no sidebar): An authentic, print-ready **Official Nigerian Terminal Report Card** (`Olivet Baptist High School, Oyo`, `"FIRST TERM REPORT CARD • 2026/2027"`, Student Bio & Attendance `Opened: 60 • Present: 58 • Absent: 2`, Subject Breakdown `CA /30`, `Exam /70`, `Total /100`, `Grade`, `Position`, `Remark`, `Class Teacher's Remark`, `Principal's Remark`, Principal Signature, QR Authenticity Verification badge, and `Print / Save PDF` button).
+
+---
+
+### Prompt 4: Modals, Drawers, Edit Flows, Lock States & Mobile Views
+> **Keep all existing pages, routes, navigation, and Deep Petrol (`#0F4C5C`) / Warm Paper (`#FAF9F6`) design system intact—do NOT overwrite or remove any existing pages. Continue acting as a Senior Product Designer and wire all interactive kebab menus, modals, slide-over drawers, confirmation dialogs, workflow states, and responsive mobile views across the existing pages:**
+>
+> 0. **Make Every `⋮` Kebab Row Menu Interactive (DropdownMenu with click-outside close):** Every `⋮` button in data tables must open a working dropdown menu with real actions wired to the modals/drawers below:
+>    - `/staff`: `Edit Staff`, `Manage Permissions`, `Deactivate Account`.
+>    - `/structure` (Sessions, Terms, Levels, Departments, Arms, Class Arms): `Edit`, `Set as Current` (sessions/terms), `Lock / Unlock Scoring` (terms), `Assign Class Teacher` (class arms), `View Class Detail`, `Retire`.
+>    - `/structure/classes/:id`: `Assign / Change Subject Teacher`, `Bulk Register Electives`, `Remove Subject from Class`.
+>    - `/students`: `View Profile`, `Edit Student`, `Enroll in Class Arm`, `Change Status`.
+>    - `/subjects`: `Edit Subject`, `Assign Teacher`, `Bulk Assign Across Arms`, `Retire`.
+>    - `/assessments` (Approvals queue): `Open Score Grid`, `Approve Scores`, `Unlock Sheet (with Reason)`.
+>    - `/results`: `Edit Remarks`, `Preview Report Card` (`/results/verify/demo`), `Copy Result Link` (when published).
+>
+> 1. **Staff, Permissions & Account (`/staff`, `/settings`):**
+>    - `/staff`: `Invite Staff` drawer (`email`, `first_name`, `last_name`, `phone_number`, `role`, `staff_id_number`, `specialization`) + `Bulk Upload Staff` tab/drawer (client-side template download + CSV/Excel dropzone + job polling progress + row error table).
+>    - `Deactivate Staff` confirmation dialog (warns that active sessions, Class Teacher, and Subject Teacher assignments will be revoked immediately).
+>    - Inside `Manage Permissions` drawer: display **existing scoped grants with a Revoke button** alongside the form to add a new grant (`Whole School`, `Department`, `Level`, or `Specific Class Arm`).
+>    - `/settings`: Complete `School Profile & Branding` (Logo, **Official School Stamp**, and Principal/Head Teacher Signature uploads) + `My Account & Security` tab (`Edit Profile` form + `Change Password` form).
+> 2. **Classes & Terms (`/structure` & `/structure/classes/:id`):**
+>    - Create/Edit drawers + Retire confirmation dialogs for **Sessions** (`Set as Current`), **Terms** (dates, `Set as Current`, and **`Lock / Unlock Scoring`** toggle), **Levels**, **Departments**, **Arm Letters** (`O, L, I, V` / `A–D`), and **Class Arms / Cohorts** (`SS1 O`, `Basic 1 A`).
+>    - `Assign / Change Class Teacher` modal on both `/structure` and `/structure/classes/:id`, plus `Add Subject to Class`, `Remove / Retire Subject from Class`, `Bulk Register Students into Elective`, and `Assign / Unassign Subject Teacher` drawers on `/structure/classes/:id`.
+> 3. **Students (`/students` & `/students/:id`):**
+>    - `Add / Edit Student` drawer (including Parent/Guardian info), `Enroll into Class Arm` modal, `Promote / Transfer / Withdraw Enrollment` modal, and `Change Student Status` confirm modal.
+>    - `Bulk Upload (Excel)` tab: client-side `Download Sample Template` button, dropzone, job polling progress, and row-level error summary.
+>    - On `/students/:id`: `Manage Elective / Trade Subjects` drawer (add/drop electives for Senior Secondary) + **Student Daily Attendance History** tab/list (`Present` / `Absent` / `Late` log).
+> 4. **Subjects (`/subjects`):**
+>    - `Add / Edit / Retire Subject` modal (`Core` / `Elective` / `Trade`), `Add / Edit / Retire Level Offering` modal, and `Bulk Assign Teacher Across Arms` modal (assign one teacher to multiple arms at once).
+> 5. **Attendance, Scores & Results Workflows (`/attendance`, `/assessments`, `/results`):**
+>    - `/attendance`: Support `Present` / `Absent` / **`Late`** segmented options + auto-reveal `Backdate Reason` input when selected date is in the past + `Manual Attendance Override` modal (`Times Opened`, `Present`, `Absent`, required `Override Reason`, live `Present + Absent = Opened` check).
+>    - `/assessments`: `Add / Edit CA & Exam Component` modal, `Unlock Score Sheet` modal (with required `Reason`), `Submit / Approve` confirm dialogs, and an error modal/banner listing missing students if submission fails.
+>    - `/results`: `Publish Term` confirmation modal (warns of irreversible freeze) + **One-Time Result Links warning banner** (`Download CSV now` before leaving) + `Send Result Emails` confirmation modal + **Published / Locked Read-Only banner** on `/assessments`, `/attendance`, and `/results?tab=remarks`.
+> 6. **Public QR Verify & Mobile Responsive Views (390px):** Add `/results/verify-qr` (public QR authenticity lookup page verifying HMAC payload) and ensure clean 390px mobile layouts for **Parent Report Card (`/results/verify/:token`)** (DOB gate + responsive printable card) and **Daily Attendance Roll Call (`/attendance`)**.
+
+---
+
+### Prompt 5: Routing Fixes, Login Illustration, Grouped Sidebar, Attendance Date UX & Activity Log
+> **Keep all existing pages, modals, kebab menus, and Deep Petrol (`#0F4C5C`) / Warm Paper (`#FAF9F6`) styles intact—do NOT overwrite or remove any existing pages. Fix these navigation, UX, and visual gaps across the app:**
+>
+> 1. **Root Route (`/` → `/login`):** Make `/` render the Sign In page (`/login`) by default (when unauthenticated) since there is no public landing page yet.
+> 2. **Login Page Illustration (`/login`):** On the `#0F4C5C` right-hand panel, right above the quote *"Olivet gives us one reliable record for every score, attendance mark, and result."* (`Mrs. Grace Oladipo`), add a crisp, bespoke **inline SVG illustration** (warm paper `#FAF9F6` and soft ochre `#FEF3C7` line-art) depicting Nigerian school academic records—a report card sheet, attendance checklist, and academic seal—so the upper half of the panel feels balanced and intentional.
+> 3. **Grouped Left Sidebar Navigation:** Reorganize the sidebar into 4 clean groups with subtle section labels:
+>    - **Overview:** `Home` (`/dashboard`), `Term Issues` (`/dashboard/issues`)
+>    - **Academics:** `Classes & Terms` (`/structure`), `Students` (`/students`), `Subjects` (`/subjects`)
+>    - **Term Operations:** `Attendance` (`/attendance`), `Scores & CA` (`/assessments`), `Results & Broadsheets` (`/results`)
+>    - **Administration:** `Staff & Roles` (`/staff`), `Setup Wizard` (`/setup`), `Activity Log` (`/audit-logs`), `School Settings` (`/settings`)
+> 4. **Fix Dead Dashboard & Setup Links:**
+>    - On **Admin Dashboard (`/dashboard`)**: wire **`View term setup`** → `/setup` (or `/structure?tab=sessions-terms`), wire **`View all term issues`** → `/dashboard/issues`, and wire **`View activity log`** → new **`/audit-logs`** page.
+>    - Add **`/audit-logs` (Activity Log Page):** Filterable by `Action` and `Resource Type`, showing timestamp, actor name, action badge, resource summary, and details drawer (backed by `GET /api/v1/audit/logs`).
+>    - On **Guided Setup Wizard (`/setup`)**: fix the **School Template `Edit` button** so it opens **Step 3 (`Create Classes from Template`)** / the structure template selector instead of wrongly routing to `CA & Grading Rules`.
+> 5. **Upgrade Attendance Date UX (`/attendance`):**
+>    - Display a clear, prominent **Date Context Bar** at the top of `Daily Roll Call` showing the exact date being marked (e.g., `"Taking attendance for: Thursday, 19 Nov 2026 (Today)"`) with a native calendar date picker, `Today` / `Yesterday` quick chips, and `< Prev` / `Next >` day buttons (disable future dates).
+>    - Whenever a **past date** is selected, automatically show an amber **Backdated Attendance** banner with the required `Backdate Reason` input right above `Save Roll Call`.
+
+---
+
+### Prompt 6: Modern Metric Cards Upgrade & Role-Correct Attendance UX
+> **Keep all existing pages, routes, modals, and Deep Petrol (`#0F4C5C`) / Warm Paper (`#FAF9F6`) design system intact. Upgrade these 2 areas across the app:**
+>
+> 1. **Upgrade All Metric / KPI Cards (Dashboards & Operational Pages):**
+>    - Replace the plain flat white boxes with **modern, high-craft SaaS metric cards** (clean `rounded-xl`, `20px` padding, `1px solid #E2E8F0` border, subtle `#0F4C5C/40` hover border on clickable cards—no hover lift/translate, zero heavy shadows or neon gradients):
+>      - Give every metric card a **tinted `36px` icon badge** in the top corner (`#0F4C5C/10` for general metrics, `#FEF3C7` amber for pending/action items, `#DCFCE7` green for completed/approved).
+>      - Where a metric represents a ratio or percentage (e.g., `Score Sheets Approved: 28 / 36`, `Classes Marked Today: 21 / 24`, `Present Today: 94.2%`), include a **compact status/breakdown pill** inside the card (no progress bars).
+>      - On **Teacher Dashboard**, elevate the **`My Class: SS1 O`** card into a distinctive featured card (subtle `#F0F7F8` surface or `#0F4C5C` accent) showing `Science • 42 Students`, a live `Today's Attendance: Not Marked` status pill, and quick-action buttons (`Mark Attendance`, `Write Remarks`).
+>
+> 2. **Fix Attendance Role Separation & Manual Override UX (`/attendance`):**
+>    - **Role Separation (Admin vs. Class Teacher):**
+>      - **Admin view** does **NOT** take daily roll call for classes. In Admin view, `/attendance` should show a **School Attendance Overview** (which classes have marked today vs pending, school-wide attendance %, and read-only class summaries)—hide the `Daily Roll Call` marking form in Admin view.
+>      - **Teacher view (Class Teacher):** Since a Class Teacher is assigned to **one single class arm** (`SS1 O`), remove the `Class Arm` dropdown in Teacher view and lock the header directly to their assigned class (`SS1 O • 42 Students`).
+>    - **Fix `Manual override` Placement:**
+>      - **Remove** the `Manual override` link from the `Daily Roll Call` tab (Daily Roll Call is strictly for `Present` / `Late` / `Absent` + `Mark all present` + `Save Roll Call`).
+>      - Move `Edit Term Totals (Manual Override)` exclusively to the **`Term Attendance Summary` tab** inside each student row's `⋮` kebab menu.
+>      - In the `Edit Term Totals` modal, clearly display **which student is being updated** (e.g., `"Correct Term Totals — Chinedu Okafor (OBH/2024/018)"`), with `Times School Opened`, `Times Present`, `Times Absent`, live `Present + Absent = Opened` validation, and `Override Reason`.

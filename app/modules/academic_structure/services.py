@@ -387,6 +387,9 @@ async def _validate_class_teacher(
     db: AsyncSession,
     school_id: UUID,
     teacher_id: UUID,
+    *,
+    session_id: UUID | None = None,
+    exclude_class_group_id: UUID | None = None,
 ) -> User:
     stmt = select(User).where(
         User.id == teacher_id,
@@ -404,6 +407,26 @@ async def _validate_class_teacher(
             "This staff member cannot be assigned as a class teacher. Please choose a teacher, "
             "academic officer, or school administrator."
         )
+    if session_id is not None:
+        conflict_stmt = select(ClassGroup.display_name).where(
+            ClassGroup.school_id == school_id,
+            ClassGroup.academic_session_id == session_id,
+            ClassGroup.class_teacher_id == teacher_id,
+            ClassGroup.deleted_at.is_(None),
+        )
+        if exclude_class_group_id is not None:
+            conflict_stmt = conflict_stmt.where(ClassGroup.id != exclude_class_group_id)
+        existing_arm_name = (await db.execute(conflict_stmt.limit(1))).scalar_one_or_none()
+        if existing_arm_name is not None:
+            teacher_name = f"{teacher.first_name} {teacher.last_name}".strip()
+            raise ConflictException(
+                message=(
+                    f"{teacher_name} is already assigned as the class teacher for "
+                    f"{existing_arm_name} in this academic session. A teacher can only be "
+                    "assigned to one class arm per session."
+                ),
+                code="CLASS_TEACHER_SESSION_CONFLICT",
+            )
     return teacher
 
 
@@ -644,6 +667,37 @@ async def retire_session(
     return session
 
 
+async def _attach_term_status(db: AsyncSession, school_id: UUID, terms: list[AcademicTerm]) -> None:
+    if not terms:
+        return
+    from app.modules.computation.models import TermReportCard
+
+    term_ids = [t.id for t in terms]
+    published_ids = set(
+        (
+            await db.execute(
+                select(TermReportCard.academic_term_id)
+                .where(
+                    TermReportCard.school_id == school_id,
+                    TermReportCard.academic_term_id.in_(term_ids),
+                    TermReportCard.publication_status == "PUBLISHED",
+                    TermReportCard.deleted_at.is_(None),
+                )
+                .distinct()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for t in terms:
+        if t.id in published_ids:
+            t.status = "PUBLISHED"
+        elif t.is_locked_for_scoring:
+            t.status = "LOCKED"
+        else:
+            t.status = "DRAFT"
+
+
 async def list_terms(
     db: AsyncSession,
     school_id: UUID,
@@ -661,7 +715,9 @@ async def list_terms(
     if not include_retired:
         stmt = stmt.where(AcademicTerm.deleted_at.is_(None))
     stmt = stmt.order_by(AcademicTerm.term_order.asc())
-    return await paginate(db, stmt, page=page, page_size=page_size)
+    items, meta = await paginate(db, stmt, page=page, page_size=page_size)
+    await _attach_term_status(db, school_id, items)
+    return items, meta
 
 
 async def create_term(
@@ -720,7 +776,9 @@ async def create_term(
 
 
 async def get_term(db: AsyncSession, school_id: UUID, term_id: UUID) -> AcademicTerm:
-    return await _get_term(db, school_id, term_id)
+    term = await _get_term(db, school_id, term_id)
+    await _attach_term_status(db, school_id, [term])
+    return term
 
 
 async def update_term(
@@ -1248,6 +1306,81 @@ def _class_group_query(
     return stmt.order_by(ClassGroup.display_name.asc())
 
 
+async def _enrich_class_groups(db: AsyncSession, school_id: UUID, items: list[ClassGroup]) -> None:
+    if not items:
+        return
+    from app.modules.students.models import StudentEnrollment
+
+    cg_ids = [cg.id for cg in items]
+    teacher_ids = [cg.class_teacher_id for cg in items if cg.class_teacher_id is not None]
+    session_ids = list({cg.academic_session_id for cg in items})
+    level_ids = list({cg.academic_level_id for cg in items})
+    dept_ids = list({cg.department_id for cg in items if cg.department_id is not None})
+    arm_ids = list({cg.class_arm_id for cg in items})
+
+    teacher_map: dict[UUID, str] = {}
+    if teacher_ids:
+        teacher_rows = (
+            await db.execute(
+                select(User.id, User.first_name, User.last_name).where(User.id.in_(teacher_ids))
+            )
+        ).all()
+        teacher_map = {uid: f"{fname} {lname}".strip() for uid, fname, lname in teacher_rows}
+
+    session_map = dict(
+        (
+            await db.execute(
+                select(AcademicSession.id, AcademicSession.name).where(
+                    AcademicSession.id.in_(session_ids)
+                )
+            )
+        ).all()
+    )
+    level_map = dict(
+        (
+            await db.execute(
+                select(AcademicLevel.id, AcademicLevel.name).where(AcademicLevel.id.in_(level_ids))
+            )
+        ).all()
+    )
+    dept_map: dict[UUID, str] = {}
+    if dept_ids:
+        dept_map = dict(
+            (
+                await db.execute(
+                    select(Department.id, Department.name).where(Department.id.in_(dept_ids))
+                )
+            ).all()
+        )
+    arm_map = dict(
+        (await db.execute(select(ClassArm.id, ClassArm.name).where(ClassArm.id.in_(arm_ids)))).all()
+    )
+
+    count_rows = (
+        await db.execute(
+            select(StudentEnrollment.class_group_id, func.count())
+            .where(
+                StudentEnrollment.school_id == school_id,
+                StudentEnrollment.class_group_id.in_(cg_ids),
+                StudentEnrollment.enrollment_status == "ENROLLED",
+                StudentEnrollment.deleted_at.is_(None),
+            )
+            .group_by(StudentEnrollment.class_group_id)
+        )
+    ).all()
+    count_map = {cg_id: cnt for cg_id, cnt in count_rows}
+
+    for cg in items:
+        cg.class_teacher_name = (
+            teacher_map.get(cg.class_teacher_id) if cg.class_teacher_id else None
+        )
+        cg.student_count = count_map.get(cg.id, 0)
+        cg.academic_session_name = session_map.get(cg.academic_session_id)
+        cg.academic_level_name = level_map.get(cg.academic_level_id)
+        cg.department_name = dept_map.get(cg.department_id) if cg.department_id else None
+        cg.class_arm_name = arm_map.get(cg.class_arm_id)
+
+
 async def list_class_groups(
     db: AsyncSession,
     school_id: UUID,
@@ -1261,10 +1394,10 @@ async def list_class_groups(
     include_retired: bool,
     has_class_teacher: bool | None = None,
 ) -> tuple[list[ClassGroup], PageMeta]:
-    scope = await get_permission_scope(db, current_user, "structure:manage")
-    if not scope.has_any_access:
-        raise InsufficientPermissionException(permission_code="structure:manage")
 
+    from app.modules.subjects.models import ClassSubject, TeacherAssignment
+
+    scope = await get_permission_scope(db, current_user, "structure:manage")
     stmt = _class_group_query(
         school_id,
         session_id=session_id,
@@ -1273,50 +1406,53 @@ async def list_class_groups(
         include_retired=include_retired,
         has_class_teacher=has_class_teacher,
     )
-    if not scope.unscoped:
-        stmt = stmt.where(
-            build_scope_filter(
-                scope,
-                department_column=ClassGroup.department_id,
-                academic_level_column=ClassGroup.academic_level_id,
-                class_group_column=ClassGroup.id,
+    if scope.has_any_access:
+        if not scope.unscoped:
+            stmt = stmt.where(
+                build_scope_filter(
+                    scope,
+                    department_column=ClassGroup.department_id,
+                    academic_level_column=ClassGroup.academic_level_id,
+                    class_group_column=ClassGroup.id,
+                )
             )
-        )
-    items, meta = await paginate(db, stmt, page=page, page_size=page_size)
-    if items:
-        from app.modules.students.models import StudentEnrollment
-
-        cg_ids = [cg.id for cg in items]
-        teacher_ids = [cg.class_teacher_id for cg in items if cg.class_teacher_id is not None]
-
-        teacher_map: dict[UUID, str] = {}
-        if teacher_ids:
-            teacher_rows = (
+    else:
+        assigned_cg_ids = set(
+            (
                 await db.execute(
-                    select(User.id, User.first_name, User.last_name).where(User.id.in_(teacher_ids))
+                    select(ClassSubject.class_group_id)
+                    .join(TeacherAssignment, TeacherAssignment.class_subject_id == ClassSubject.id)
+                    .where(
+                        TeacherAssignment.school_id == school_id,
+                        TeacherAssignment.teacher_id == current_user.id,
+                        TeacherAssignment.is_active.is_(True),
+                        TeacherAssignment.deleted_at.is_(None),
+                        ClassSubject.deleted_at.is_(None),
+                    )
                 )
-            ).all()
-            teacher_map = {uid: f"{fname} {lname}".strip() for uid, fname, lname in teacher_rows}
-
-        count_rows = (
-            await db.execute(
-                select(StudentEnrollment.class_group_id, func.count())
-                .where(
-                    StudentEnrollment.school_id == school_id,
-                    StudentEnrollment.class_group_id.in_(cg_ids),
-                    StudentEnrollment.enrollment_status == "ENROLLED",
-                    StudentEnrollment.deleted_at.is_(None),
+            )
+            .scalars()
+            .all()
+        )
+        form_cg_ids = set(
+            (
+                await db.execute(
+                    select(ClassGroup.id).where(
+                        ClassGroup.school_id == school_id,
+                        ClassGroup.class_teacher_id == current_user.id,
+                        ClassGroup.deleted_at.is_(None),
+                    )
                 )
-                .group_by(StudentEnrollment.class_group_id)
             )
-        ).all()
-        count_map = {cg_id: cnt for cg_id, cnt in count_rows}
-
-        for cg in items:
-            cg.class_teacher_name = (
-                teacher_map.get(cg.class_teacher_id) if cg.class_teacher_id else None
-            )
-            cg.student_count = count_map.get(cg.id, 0)
+            .scalars()
+            .all()
+        )
+        allowed_cg_ids = assigned_cg_ids | form_cg_ids
+        if not allowed_cg_ids:
+            raise InsufficientPermissionException(permission_code="structure:manage")
+        stmt = stmt.where(ClassGroup.id.in_(allowed_cg_ids))
+    items, meta = await paginate(db, stmt, page=page, page_size=page_size)
+    await _enrich_class_groups(db, school_id, items)
     return items, meta
 
 
@@ -1350,7 +1486,12 @@ async def create_class_group(
     )
 
     if req.class_teacher_id is not None:
-        await _validate_class_teacher(db, school_id, req.class_teacher_id)
+        await _validate_class_teacher(
+            db,
+            school_id,
+            req.class_teacher_id,
+            session_id=session.id,
+        )
 
     await _ensure_class_group_available(
         db,
@@ -1417,7 +1558,27 @@ async def get_class_group(
     current_user: User,
 ) -> ClassGroup:
     class_group = await _get_class_group(db, school_id, class_group_id)
-    await _require_class_group_scope(db, current_user, class_group)
+    if class_group.class_teacher_id != current_user.id:
+        from app.modules.subjects.models import ClassSubject, TeacherAssignment
+
+        is_subject_teacher = (
+            await db.execute(
+                select(TeacherAssignment.id)
+                .join(ClassSubject, ClassSubject.id == TeacherAssignment.class_subject_id)
+                .where(
+                    TeacherAssignment.school_id == school_id,
+                    TeacherAssignment.teacher_id == current_user.id,
+                    TeacherAssignment.is_active.is_(True),
+                    TeacherAssignment.deleted_at.is_(None),
+                    ClassSubject.class_group_id == class_group.id,
+                    ClassSubject.deleted_at.is_(None),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if is_subject_teacher is None:
+            await _require_class_group_scope(db, current_user, class_group)
+    await _enrich_class_groups(db, school_id, [class_group])
     return class_group
 
 
@@ -1435,7 +1596,13 @@ async def update_class_group(
 
     if "class_teacher_id" in req.model_fields_set:
         if req.class_teacher_id is not None:
-            await _validate_class_teacher(db, school_id, req.class_teacher_id)
+            await _validate_class_teacher(
+                db,
+                school_id,
+                req.class_teacher_id,
+                session_id=class_group.academic_session_id,
+                exclude_class_group_id=class_group.id,
+            )
         class_group.class_teacher_id = req.class_teacher_id
     if req.display_name is not None:
         class_group.display_name = req.display_name.strip()

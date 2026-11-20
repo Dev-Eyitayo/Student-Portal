@@ -52,6 +52,10 @@ class OfferingResponse(BaseModel):
     academic_session_id: UUID
     academic_level_id: UUID
     department_id: UUID | None = None
+    subject_name: str | None = None
+    subject_code: str | None = None
+    academic_level_name: str | None = None
+    department_name: str | None = None
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None

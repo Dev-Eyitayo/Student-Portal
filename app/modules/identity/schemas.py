@@ -96,6 +96,7 @@ class MeResponse(BaseModel):
     id: UUID
     school_id: UUID | None = None
     school_name: str | None = None
+    school_type: str | None = None
     email: EmailStr
     first_name: str
     last_name: str
@@ -495,3 +496,22 @@ class MeUpdateRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(..., min_length=1)
     new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class StaffUpdateRequest(BaseModel):
+    first_name: str | None = Field(default=None, min_length=1, max_length=64)
+    last_name: str | None = Field(default=None, min_length=1, max_length=64)
+    phone_number: str | None = Field(default=None, max_length=32)
+    role: StaffRole | None = None
+    staff_id_number: str | None = Field(default=None, min_length=1, max_length=64)
+    specialization: str | None = Field(default=None, max_length=128)
+
+    @field_validator("first_name", "last_name", "staff_id_number")
+    @classmethod
+    def strip_non_blank(cls, value: str | None) -> str | None:
+        if value is not None:
+            cleaned = value.strip()
+            if not cleaned:
+                raise ValueError("This field cannot be blank.")
+            return cleaned
+        return value

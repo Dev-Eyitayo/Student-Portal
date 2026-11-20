@@ -251,6 +251,42 @@ async def _enrollment_exists(
     return (await db.execute(stmt)).scalar_one_or_none() is not None
 
 
+async def _attach_current_class(db: AsyncSession, school_id: UUID, items: list[Student]) -> None:
+    if not items:
+        return
+    student_ids = [s.id for s in items]
+    enroll_rows = (
+        await db.execute(
+            select(
+                StudentEnrollment.student_id,
+                ClassGroup.id,
+                ClassGroup.display_name,
+                AcademicSession.is_current,
+            )
+            .join(ClassGroup, ClassGroup.id == StudentEnrollment.class_group_id)
+            .join(AcademicSession, AcademicSession.id == StudentEnrollment.academic_session_id)
+            .where(
+                StudentEnrollment.school_id == school_id,
+                StudentEnrollment.student_id.in_(student_ids),
+                StudentEnrollment.enrollment_status == "ENROLLED",
+                StudentEnrollment.deleted_at.is_(None),
+            )
+            .order_by(
+                AcademicSession.is_current.desc(),
+                StudentEnrollment.created_at.desc(),
+            )
+        )
+    ).all()
+    class_map: dict[UUID, tuple[UUID, str]] = {}
+    for sid, cg_id, cg_name, _ in enroll_rows:
+        if sid not in class_map:
+            class_map[sid] = (cg_id, cg_name)
+    for s in items:
+        match = class_map.get(s.id)
+        s.current_class_group_id = match[0] if match else None
+        s.current_class_name = match[1] if match else None
+
+
 async def list_students(
     db: AsyncSession,
     school_id: UUID,
@@ -275,38 +311,7 @@ async def list_students(
         class_group_id=class_group_id,
     )
     items, meta = await paginate(db, stmt, page=page, page_size=page_size)
-    if items:
-        student_ids = [s.id for s in items]
-        enroll_rows = (
-            await db.execute(
-                select(
-                    StudentEnrollment.student_id,
-                    ClassGroup.id,
-                    ClassGroup.display_name,
-                    AcademicSession.is_current,
-                )
-                .join(ClassGroup, ClassGroup.id == StudentEnrollment.class_group_id)
-                .join(AcademicSession, AcademicSession.id == StudentEnrollment.academic_session_id)
-                .where(
-                    StudentEnrollment.school_id == school_id,
-                    StudentEnrollment.student_id.in_(student_ids),
-                    StudentEnrollment.enrollment_status == "ENROLLED",
-                    StudentEnrollment.deleted_at.is_(None),
-                )
-                .order_by(
-                    AcademicSession.is_current.desc(),
-                    StudentEnrollment.created_at.desc(),
-                )
-            )
-        ).all()
-        class_map: dict[UUID, tuple[UUID, str]] = {}
-        for sid, cg_id, cg_name, _ in enroll_rows:
-            if sid not in class_map:
-                class_map[sid] = (cg_id, cg_name)
-        for s in items:
-            match = class_map.get(s.id)
-            s.current_class_group_id = match[0] if match else None
-            s.current_class_name = match[1] if match else None
+    await _attach_current_class(db, school_id, items)
     return items, meta
 
 
@@ -441,7 +446,9 @@ async def create_student(
 
 
 async def get_student(db: AsyncSession, school_id: UUID, student_id: UUID) -> Student:
-    return await _get_student(db, school_id, student_id)
+    student = await _get_student(db, school_id, student_id)
+    await _attach_current_class(db, school_id, [student])
+    return student
 
 
 async def update_student(
