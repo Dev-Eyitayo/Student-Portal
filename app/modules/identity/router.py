@@ -45,6 +45,7 @@ from app.modules.identity.schemas import (
     BrandingAssetType,
     BrandingUploadResponse,
     ChangePasswordRequest,
+    CreateSchoolRoleRequest,
     DeactivateUserResponse,
     LoginRequest,
     LogoutRequest,
@@ -54,6 +55,7 @@ from app.modules.identity.schemas import (
     PermissionCatalogItemResponse,
     PermissionGrantRequest,
     RefreshTokenRequest,
+    RolePermissionsResponse,
     SchoolConfigurationResponse,
     SchoolConfigurationUpdateRequest,
     SchoolCreateRequest,
@@ -70,6 +72,7 @@ from app.modules.identity.schemas import (
     StaffUpdateRequest,
     StaffVerifyInviteResponse,
     TokenResponse,
+    UpdateRolePermissionsRequest,
     UserPermissionGrantDetailResponse,
     UserPermissionGrantResponse,
 )
@@ -771,7 +774,7 @@ async def update_school_user(
         first_name=req.first_name,
         last_name=req.last_name,
         phone_number=req.phone_number,
-        role=req.role.value if req.role is not None else None,
+        role=req.role,
         staff_id_number=req.staff_id_number,
         specialization=req.specialization,
         actor_id=current_user.id,
@@ -812,4 +815,90 @@ async def list_user_permission_grants(
     )
     return SuccessResponse[list[UserPermissionGrantDetailResponse]](
         data=[UserPermissionGrantDetailResponse.model_validate(g) for g in grants]
+    )
+
+
+@router.get(
+    "/roles/permissions",
+    response_model=SuccessResponse[list[RolePermissionsResponse]],
+    dependencies=[Depends(require_permission("users:manage"))],
+)
+async def list_school_role_permissions(
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    items = await services.list_school_role_permissions(db, require_school_id(current_user))
+    return SuccessResponse[list[RolePermissionsResponse]](
+        data=[RolePermissionsResponse.model_validate(item) for item in items]
+    )
+
+
+@router.put(
+    "/roles/{role}/permissions",
+    response_model=SuccessResponse[RolePermissionsResponse],
+    dependencies=[Depends(require_permission("users:manage"))],
+)
+async def update_school_role_permissions(
+    role: str,
+    req: UpdateRolePermissionsRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    item = await services.update_school_role_permissions(
+        db,
+        require_school_id(current_user),
+        role,
+        req.permission_codes,
+        build_audit_context(request, current_user),
+    )
+    return SuccessResponse[RolePermissionsResponse](
+        data=RolePermissionsResponse.model_validate(item)
+    )
+
+
+@router.post(
+    "/roles",
+    status_code=status.HTTP_201_CREATED,
+    response_model=SuccessResponse[RolePermissionsResponse],
+    dependencies=[Depends(require_permission("users:manage"))],
+)
+async def create_school_role(
+    req: CreateSchoolRoleRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    item = await services.create_school_role(
+        db,
+        require_school_id(current_user),
+        req.name,
+        req.description,
+        req.permission_codes,
+        build_audit_context(request, current_user),
+    )
+    return SuccessResponse[RolePermissionsResponse](
+        data=RolePermissionsResponse.model_validate(item)
+    )
+
+
+@router.delete(
+    "/roles/{role}",
+    response_model=SuccessResponse[MessageResponse],
+    dependencies=[Depends(require_permission("users:manage"))],
+)
+async def delete_school_role(
+    role: str,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    await services.delete_school_role(
+        db,
+        require_school_id(current_user),
+        role,
+        build_audit_context(request, current_user),
+    )
+    return SuccessResponse[MessageResponse](
+        data=MessageResponse(message="The custom role has been deleted.")
     )

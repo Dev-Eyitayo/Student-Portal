@@ -11,9 +11,49 @@ from app.core.exceptions import InsufficientPermissionException
 from app.modules.identity.models import (
     Permission,
     RoleDefaultPermission,
+    SchoolRolePermission,
     User,
     UserPermissionGrant,
 )
+
+
+async def role_has_permission(
+    db: AsyncSession,
+    school_id: UUID,
+    role: str,
+    permission_code: str,
+) -> bool:
+    """Checks school-specific role overrides first, falling back to global role defaults."""
+    override_exists = (
+        await db.execute(
+            select(SchoolRolePermission.id)
+            .where(
+                SchoolRolePermission.school_id == school_id,
+                SchoolRolePermission.role == role,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if override_exists is not None:
+        stmt_school_role = (
+            select(SchoolRolePermission.id)
+            .join(Permission, Permission.id == SchoolRolePermission.permission_id)
+            .where(
+                SchoolRolePermission.school_id == school_id,
+                SchoolRolePermission.role == role,
+                SchoolRolePermission.is_enabled.is_(True),
+                Permission.code == permission_code,
+            )
+        )
+        return (await db.execute(stmt_school_role)).scalar_one_or_none() is not None
+
+    stmt_role = (
+        select(Permission.id)
+        .join(RoleDefaultPermission, RoleDefaultPermission.permission_id == Permission.id)
+        .where(RoleDefaultPermission.role == role, Permission.code == permission_code)
+    )
+    return (await db.execute(stmt_role)).scalar_one_or_none() is not None
 
 
 async def user_has_permission(
@@ -42,12 +82,7 @@ async def user_has_permission(
         department_id is not None or academic_level_id is not None or class_group_id is not None
     )
 
-    stmt_role = (
-        select(Permission)
-        .join(RoleDefaultPermission, RoleDefaultPermission.permission_id == Permission.id)
-        .where(RoleDefaultPermission.role == user.role, Permission.code == permission_code)
-    )
-    role_has_perm = (await db.execute(stmt_role)).scalar_one_or_none()
+    role_has_perm = await role_has_permission(db, user.school_id, user.role, permission_code)
     if role_has_perm and not scope_requested:
         return True
 
@@ -134,12 +169,7 @@ async def get_permission_scope(
     if user.role in ("SUPER_ADMIN", "SCHOOL_ADMIN"):
         return PermissionScope(unscoped=True)
 
-    stmt_role = (
-        select(Permission)
-        .join(RoleDefaultPermission, RoleDefaultPermission.permission_id == Permission.id)
-        .where(RoleDefaultPermission.role == user.role, Permission.code == permission_code)
-    )
-    if (await db.execute(stmt_role)).scalar_one_or_none():
+    if await role_has_permission(db, user.school_id, user.role, permission_code):
         return PermissionScope(unscoped=True)
 
     stmt_grants = (
