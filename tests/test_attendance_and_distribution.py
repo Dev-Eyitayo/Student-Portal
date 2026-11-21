@@ -1,5 +1,6 @@
 import uuid
-from datetime import date, timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -121,7 +122,7 @@ async def test_attendance_marking_summary_and_report_card_verification_lifecycle
         suffix = uuid.uuid4().hex[:6]
         school_id, headers = await _register_and_login(client, suffix)
 
-        today = date.today()
+        today = datetime.now(ZoneInfo("Africa/Lagos")).date()
         session_start = today - timedelta(days=30)
         session_end = today + timedelta(days=60)
 
@@ -414,7 +415,7 @@ async def test_teacher_and_class_discovery_endpoints(seed_permissions_fixture):
         user_id = me_before.json()["data"]["id"]
         assert me_before.json()["data"]["assigned_class_groups"] == []
 
-        today = date.today()
+        today = datetime.now(ZoneInfo("Africa/Lagos")).date()
         apply_resp = await client.post(
             "/api/v1/structure/templates/apply",
             json={
