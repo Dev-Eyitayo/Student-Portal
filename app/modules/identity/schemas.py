@@ -32,6 +32,7 @@ class PermissionScopeType(StrEnum):
 class SchoolType(StrEnum):
     PRIMARY = "PRIMARY"
     SECONDARY = "SECONDARY"
+    COMBINED = "COMBINED"
 
 
 class TokenResponse(BaseModel):

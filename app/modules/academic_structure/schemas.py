@@ -16,6 +16,7 @@ class LevelCategory(StrEnum):
 class StructureTemplateType(StrEnum):
     PRIMARY = "PRIMARY"
     SECONDARY = "SECONDARY"
+    COMBINED = "COMBINED"
 
 
 class SessionCreateRequest(BaseModel):
