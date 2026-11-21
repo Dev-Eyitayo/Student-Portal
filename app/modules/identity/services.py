@@ -1557,9 +1557,7 @@ def _generate_role_code(name: str) -> str:
     return slug[:32]
 
 
-async def _validate_school_role_code(
-    db: AsyncSession, school_id: UUID, role_code: str
-) -> str:
+async def _validate_school_role_code(db: AsyncSession, school_id: UUID, role_code: str) -> str:
     from app.modules.identity.models import SchoolRole
 
     normalized = role_code.strip().upper()
@@ -1582,9 +1580,7 @@ async def _validate_school_role_code(
     return normalized
 
 
-async def list_school_role_permissions(
-    db: AsyncSession, school_id: UUID
-) -> list[dict[str, Any]]:
+async def list_school_role_permissions(db: AsyncSession, school_id: UUID) -> list[dict[str, Any]]:
     from app.modules.identity.models import SchoolRole
 
     items: list[dict[str, Any]] = []
@@ -1602,15 +1598,19 @@ async def list_school_role_permissions(
         )
 
     custom_roles = (
-        await db.execute(
-            select(SchoolRole)
-            .where(
-                SchoolRole.school_id == school_id,
-                SchoolRole.deleted_at.is_(None),
+        (
+            await db.execute(
+                select(SchoolRole)
+                .where(
+                    SchoolRole.school_id == school_id,
+                    SchoolRole.deleted_at.is_(None),
+                )
+                .order_by(SchoolRole.created_at.asc())
             )
-            .order_by(SchoolRole.created_at.asc())
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     for cr in custom_roles:
         codes, is_customized = await _get_role_permission_codes(db, school_id, cr.code)
