@@ -65,14 +65,18 @@ def upgrade() -> None:
     policy = _policy_expression()
     op.execute("ALTER TABLE school_role_permissions ENABLE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE school_role_permissions FORCE ROW LEVEL SECURITY")
-    op.execute("DROP POLICY IF EXISTS tenant_isolation_school_role_permissions ON school_role_permissions")
+    op.execute(
+        "DROP POLICY IF EXISTS tenant_isolation_school_role_permissions ON school_role_permissions"
+    )
     op.execute(
         f"CREATE POLICY tenant_isolation_school_role_permissions ON school_role_permissions FOR ALL USING ({policy}) WITH CHECK ({policy})"
     )
 
 
 def downgrade() -> None:
-    op.execute("DROP POLICY IF EXISTS tenant_isolation_school_role_permissions ON school_role_permissions")
+    op.execute(
+        "DROP POLICY IF EXISTS tenant_isolation_school_role_permissions ON school_role_permissions"
+    )
     op.execute("ALTER TABLE school_role_permissions DISABLE ROW LEVEL SECURITY")
     op.drop_index("ix_school_role_permissions_school_id", table_name="school_role_permissions")
     op.drop_table("school_role_permissions")
