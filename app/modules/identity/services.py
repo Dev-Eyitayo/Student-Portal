@@ -31,8 +31,11 @@ from app.modules.academic_structure.models import (
     Department,
 )
 from app.modules.academic_structure.templates import (
+    COMBINED_STRUCTURE_TEMPLATE_ID,
+    JUNIOR_SECONDARY_STRUCTURE_TEMPLATE_ID,
     PRIMARY_STRUCTURE_TEMPLATE_ID,
     SECONDARY_STRUCTURE_TEMPLATE_ID,
+    SENIOR_SECONDARY_STRUCTURE_TEMPLATE_ID,
     get_structure_template_preview,
 )
 from app.modules.audit.services import AuditContext, record_audit_log
@@ -179,6 +182,16 @@ SCHOOL_DEFAULTS: dict[SchoolType, dict[str, Any]] = {
         "currency": "NGN",
         "report_card_template_id": PRIMARY_REPORT_CARD_TEMPLATE_ID,
         "structure_template_id": PRIMARY_STRUCTURE_TEMPLATE_ID,
+    },
+    SchoolType.COMBINED: {
+        "grading_scale_schema": {"grades": SECONDARY_GRADING_SCALE},
+        "assessment_weight_schema": SECONDARY_ASSESSMENT_WEIGHTS,
+        "academic_term_definitions": {"terms": DEFAULT_TERM_DEFINITIONS},
+        "annual_results_schema": DEFAULT_ANNUAL_RESULTS_CONFIG,
+        "timezone": "Africa/Lagos",
+        "currency": "NGN",
+        "report_card_template_id": SECONDARY_REPORT_CARD_TEMPLATE_ID,
+        "structure_template_id": COMBINED_STRUCTURE_TEMPLATE_ID,
     },
 }
 
@@ -506,23 +519,53 @@ def get_onboarding_templates() -> list[OnboardingTemplateResponse]:
     catalog = [
         (
             "olivet_nigeria_default",
-            "Olivet Nigeria Default",
+            "Nigeria Secondary (JSS 1 - SS 3)",
             (
-                "Olivet's familiar grading, 10/10/10/70 assessment pattern, three terms, "
-                "and JSS-SS3 structure."
+                "Six secondary levels (JSS 1-SS 3), Science/Arts/Commercial for senior secondary, "
+                "ten arms, and 10/10/10/70 assessments."
             ),
             SchoolType.SECONDARY,
             SECONDARY_STRUCTURE_TEMPLATE_ID,
         ),
         (
+            "nigeria_junior_secondary_default",
+            "Nigeria Junior Secondary (JSS 1 - JSS 3)",
+            (
+                "Three junior secondary levels (JSS 1-3) with no departments, ten arms, "
+                "and 10/10/10/70 assessments."
+            ),
+            SchoolType.SECONDARY,
+            JUNIOR_SECONDARY_STRUCTURE_TEMPLATE_ID,
+        ),
+        (
+            "nigeria_senior_secondary_default",
+            "Nigeria Senior Secondary (SS 1 - SS 3)",
+            (
+                "Three senior secondary levels (SS 1-3) with Science, Arts, and Commercial "
+                "departments, ten arms, and WAEC A1-F9 grading."
+            ),
+            SchoolType.SECONDARY,
+            SENIOR_SECONDARY_STRUCTURE_TEMPLATE_ID,
+        ),
+        (
             "nigeria_primary_default",
-            "Nigeria Primary Basic 1-6",
+            "Nigeria Primary (Basic 1 - 6)",
             (
                 "Basic 1-6 with arms A-D, compulsory core subjects, an A-F grading scale, "
                 "and the same 10/10/10/70 assessment pattern."
             ),
             SchoolType.PRIMARY,
             PRIMARY_STRUCTURE_TEMPLATE_ID,
+        ),
+        (
+            "nigeria_combined_default",
+            "Nigeria Combined (Primary + Secondary)",
+            (
+                "Basic 1-6, JSS 1-3, and SS 1-3 (with Science, Arts, Commercial for senior secondary) "
+                "in a single school."
+            ),
+            SchoolType.COMBINED,
+            COMBINED_STRUCTURE_TEMPLATE_ID,
         ),
     ]
 
@@ -758,6 +801,37 @@ async def get_school_branding(db: AsyncSession, school_id: UUID) -> SchoolBrandi
     return _branding_response(school)
 
 
+async def _get_actor_user(db: AsyncSession, actor_id: UUID) -> User | None:
+    return await db.get(User, actor_id)
+
+
+def _assert_can_manage_target_user(actor: User | None, target: User) -> None:
+    actor_role = actor.role if actor is not None else ""
+    if target.role in ("SCHOOL_ADMIN", "SUPER_ADMIN") and actor_role not in (
+        "SCHOOL_ADMIN",
+        "SUPER_ADMIN",
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only a School Administrator can modify, deactivate, or manage permissions "
+                "for a School Administrator."
+            ),
+        )
+
+
+def _assert_can_assign_role(actor: User | None, role_code: str) -> None:
+    actor_role = actor.role if actor is not None else ""
+    if role_code in ("SCHOOL_ADMIN", "SUPER_ADMIN") and actor_role not in (
+        "SCHOOL_ADMIN",
+        "SUPER_ADMIN",
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only a School Administrator can assign the School Administrator role.",
+        )
+
+
 async def invite_staff_member(
     db: AsyncSession,
     school_id: UUID,
@@ -798,6 +872,8 @@ async def invite_staff_member(
 
     # Create inactive user waiting for invitation acceptance with a cryptographically random unusable hash
     validated_role = await _validate_school_role_code(db, school_id, req.role)
+    actor = await _get_actor_user(db, granter_id)
+    _assert_can_assign_role(actor, validated_role)
     unusable_random_secret = secrets.token_urlsafe(64)
     temporary_hash = await asyncio.to_thread(hash_password, unusable_random_secret)
     user = User(
@@ -1181,6 +1257,8 @@ async def grant_user_permission(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="The selected staff member was not found in your school.",
         )
+    actor = await _get_actor_user(db, granter_id)
+    _assert_can_manage_target_user(actor, target_user)
 
     # Find permission
     perm_res = await db.execute(
@@ -1271,6 +1349,10 @@ async def revoke_user_permission(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="The permission grant you are trying to revoke does not exist.",
         )
+    target_user = await db.get(User, target_user_id)
+    if target_user is not None:
+        actor = await _get_actor_user(db, actor_id)
+        _assert_can_manage_target_user(actor, target_user)
 
     grant.deleted_at = datetime.now(UTC)
     await db.flush()
@@ -1303,6 +1385,13 @@ async def deactivate_user(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="The specified user could not be found in your school.",
+        )
+    actor = await _get_actor_user(db, actor_id)
+    _assert_can_manage_target_user(actor, user)
+    if user.id == actor_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot deactivate your own account.",
         )
 
     user.is_active = False
@@ -2037,6 +2126,8 @@ async def update_school_user(
     ).scalar_one_or_none()
     if target is None:
         raise ResourceNotFoundException("staff member", target_user_id)
+    actor = await _get_actor_user(db, actor_id)
+    _assert_can_manage_target_user(actor, target)
 
     if first_name is not None:
         target.first_name = first_name
@@ -2045,7 +2136,9 @@ async def update_school_user(
     if phone_number is not None:
         target.phone_number = phone_number.strip() or None
     if role is not None:
-        target.role = await _validate_school_role_code(db, school_id, role)
+        validated_role = await _validate_school_role_code(db, school_id, role)
+        _assert_can_assign_role(actor, validated_role)
+        target.role = validated_role
 
     sp = target.staff_profile
     if sp is not None:

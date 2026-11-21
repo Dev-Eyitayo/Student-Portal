@@ -416,8 +416,9 @@ CREATE TABLE schools (
 CREATE INDEX idx_schools_slug ON schools(slug) WHERE deleted_at IS NULL;
 ```
 
-> **M9 (LIVE):** `school_type VARCHAR(16) NOT NULL DEFAULT 'SECONDARY'` with
-> `CHECK (school_type IN ('PRIMARY', 'SECONDARY'))` is applied by
+> **M9+ (LIVE):** `school_type VARCHAR(16) NOT NULL DEFAULT 'SECONDARY'` with
+> `CHECK (school_type IN ('PRIMARY', 'SECONDARY', 'COMBINED'))` is applied by
+> `b1c4d7e9a2f0_m9_primary_school_support.py` and `f1a2b3c4d5e6_add_combined_school_type.py`.
 > `b1c4d7e9a2f0_m9_primary_school_support.py`; existing tenants stay
 > `SECONDARY`. Seeding rules are specified in §17.2.
 
@@ -489,6 +490,28 @@ CREATE TABLE role_default_permissions (
     role VARCHAR(32) NOT NULL, -- 'TEACHER', 'ACADEMIC_OFFICER', 'SCHOOL_ADMIN', etc.
     permission_id UUID NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
     PRIMARY KEY (role, permission_id)
+);
+
+CREATE TABLE school_roles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
+    code VARCHAR(32) NOT NULL,
+    name VARCHAR(64) NOT NULL,
+    description VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ
+);
+
+CREATE TABLE school_role_permissions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
+    role VARCHAR(32) NOT NULL,
+    permission_id UUID NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
+    is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_school_role_permissions_school_role_perm UNIQUE (school_id, role, permission_id)
 );
 
 CREATE TABLE user_permission_grants (
@@ -1177,9 +1200,11 @@ This catalog is authoritative. `BACKEND_DEV_PLAN.md`, module routers, tests, and
 | **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/arms/{arm_id}` | Read, update, or retire a class arm | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Structure** | `GET`, `POST` | `/api/v1/structure/class-groups` | List or instantiate class cohorts | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/class-groups/{class_group_id}` | Read, update, or retire a class group | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
-| **Structure** | `POST` | `/api/v1/structure/templates/apply` | **(LIVE — M8/M9)** Idempotently apply a secondary (`olivet_nigeria_jss_ss3`) or primary (`nigeria_primary_basic1_6`) structure template for a session via `template_type = PRIMARY\|SECONDARY` | `structure:manage` |
-| **Identity** | `POST` | `/api/v1/identity/schools` | **(LIVE — M9)** Accept `school_type = PRIMARY\|SECONDARY` and seed the matching defaults/report template | `SUPER_ADMIN` |
-| **Identity** | `GET`, `PATCH` | `/api/v1/identity/schools/{school_id}/setup` | **(LIVE — M9)** Read/save `school_type` and the selected primary or secondary template | `SCHOOL_ADMIN` |
+| **Structure** | `POST` | `/api/v1/structure/templates/apply` | **(LIVE — M8/M9+)** Idempotently apply secondary (`olivet_nigeria_jss_ss3`, `nigeria_junior_secondary`, `nigeria_senior_secondary`), primary (`nigeria_primary_basic1_6`), or combined (`nigeria_combined_k12`) structure templates for a session | `structure:manage` |
+| **Identity** | `POST` | `/api/v1/identity/schools` | **(LIVE — M9+)** Accept `school_type = PRIMARY\|SECONDARY\|COMBINED` and seed the matching defaults/report template | `SUPER_ADMIN` |
+| **Identity** | `GET`, `PATCH` | `/api/v1/identity/schools/{school_id}/setup` | **(LIVE — M9+)** Read/save `school_type` and the selected primary, secondary, or combined template | `SCHOOL_ADMIN` |
+| **Identity** | `GET`, `POST` | `/api/v1/identity/roles/permissions`, `/api/v1/identity/roles` | **(LIVE)** List per-school role permissions (system + custom) and create custom school roles | `users:manage` |
+| **Identity** | `PUT`, `DELETE` | `/api/v1/identity/roles/{role}/permissions`, `/api/v1/identity/roles/{role}` | **(LIVE)** Update role permissions for all staff with that role, or soft-delete an unused custom role | `users:manage` |
 | **Students** | `GET`, `POST` | `/api/v1/students` | List or register students | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Students** | `GET`, `PATCH` | `/api/v1/students/{student_id}` | Read or update a student | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Students** | `POST` | `/api/v1/students/{student_id}/status` | Transition student lifecycle status with an audit note | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
@@ -2280,7 +2305,7 @@ live.
 ```sql
 ALTER TABLE schools ADD COLUMN school_type VARCHAR(16) NOT NULL DEFAULT 'SECONDARY';
 ALTER TABLE schools ADD CONSTRAINT chk_schools_school_type
-  CHECK (school_type IN ('PRIMARY', 'SECONDARY'));
+  CHECK (school_type IN ('PRIMARY', 'SECONDARY', 'COMBINED'));
 ALTER TABLE academic_levels DROP CONSTRAINT chk_level_category;
 ALTER TABLE academic_levels ADD CONSTRAINT chk_level_category
   CHECK (category IN ('PRIMARY', 'JUNIOR_SECONDARY', 'SENIOR_SECONDARY'));
@@ -2292,10 +2317,10 @@ No new domains or legacy aliases; M9 extends existing canonical routes.
 
 | Method | Path | M9 change | Permission |
 |---|---|---|---|
-| `GET` | `/api/v1/identity/onboarding/templates` | Public catalog returns a JSON array (`data: [...]`) containing both `olivet_nigeria_default` (`school_type: "SECONDARY"`) and `nigeria_primary_default` (`school_type: "PRIMARY"`). | `ANONYMOUS` |
-| `POST` | `/api/v1/identity/schools` | Accept `school_type = PRIMARY\|SECONDARY`; seed the matching grading/assessment/annual schema and report template (`default_primary_v1` for primary). | `SUPER_ADMIN` |
+| `GET` | `/api/v1/identity/onboarding/templates` | Public catalog returns a JSON array (`data: [...]`) containing `olivet_nigeria_default`, `nigeria_junior_secondary_default`, `nigeria_senior_secondary_default` (`SECONDARY`), `nigeria_primary_default` (`PRIMARY`), and `nigeria_combined_default` (`COMBINED`). | `ANONYMOUS` |
+| `POST` | `/api/v1/identity/schools` | Accept `school_type = PRIMARY\|SECONDARY\|COMBINED`; seed the matching grading/assessment/annual schema and report template (`default_primary_v1` for primary). | `SUPER_ADMIN` |
 | `GET`, `PATCH` | `/api/v1/identity/schools/{school_id}/setup` | Read/save `school_type` and the selected template in the aggregate setup payload. | `SCHOOL_ADMIN` |
-| `POST` | `/api/v1/structure/templates/apply` | Accept `template_type = PRIMARY\|SECONDARY` (or internal `template_id` such as `nigeria_primary_basic1_6`); primary template creates Basic 1–6, arms A–D, no departments, and core subject offerings/class subjects for the session. Idempotent. | `structure:manage` |
+| `POST` | `/api/v1/structure/templates/apply` | Accept `template_type = PRIMARY\|SECONDARY\|COMBINED` or `template_id` (`olivet_nigeria_jss_ss3`, `nigeria_junior_secondary`, `nigeria_senior_secondary`, `nigeria_primary_basic1_6`, `nigeria_combined_k12`). Idempotent. | `structure:manage` |
 | `GET`, `POST` | `/api/v1/subjects/offerings`, `/api/v1/class-subjects` | Unchanged routes used by the primary template; primary rows have `department_id = NULL` and `is_elective = FALSE`. | `subjects:manage` |
 | `POST` | `/api/v1/computation/calculate-term`, `GET /api/v1/computation/broadsheet/{class_group_id}`, `POST /api/v1/publication/publish-term` | Unchanged reuse of the live three-term flow. (Note: `GET /api/v1/results/verify/{token}` and the rendered report card JSON payload in §6.3.2—where `TermReportCard.teacher_comment` maps to `class_teacher_comment`—are specified for **Milestone 6**, which remains PLANNED/PARTIAL.) | Existing permissions |
 

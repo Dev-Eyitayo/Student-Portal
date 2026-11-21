@@ -624,7 +624,7 @@ async def get_bulk_import_status(
     "/users/{user_id}/permissions",
     response_model=SuccessResponse[UserPermissionGrantResponse],
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("users:manage"))],
+    dependencies=[Depends(require_permission("permissions:delegate"))],
 )
 async def grant_permission(
     user_id: UUID,
@@ -656,7 +656,7 @@ async def grant_permission(
     "/users/{user_id}/permissions/{grant_id}",
     response_model=SuccessResponse[MessageResponse],
     status_code=status.HTTP_200_OK,
-    dependencies=[Depends(require_permission("users:manage"))],
+    dependencies=[Depends(require_permission("permissions:delegate"))],
 )
 async def revoke_permission(
     user_id: UUID,
@@ -803,7 +803,7 @@ async def list_permissions_catalog(
 @router.get(
     "/users/{user_id}/permissions",
     response_model=SuccessResponse[list[UserPermissionGrantDetailResponse]],
-    dependencies=[Depends(require_permission("users:manage"))],
+    dependencies=[Depends(require_permission("permissions:delegate"))],
 )
 async def list_user_permission_grants(
     user_id: UUID,
@@ -836,7 +836,7 @@ async def list_school_role_permissions(
 @router.put(
     "/roles/{role}/permissions",
     response_model=SuccessResponse[RolePermissionsResponse],
-    dependencies=[Depends(require_permission("users:manage"))],
+    dependencies=[Depends(require_permission("permissions:delegate"))],
 )
 async def update_school_role_permissions(
     role: str,
@@ -861,7 +861,7 @@ async def update_school_role_permissions(
     "/roles",
     status_code=status.HTTP_201_CREATED,
     response_model=SuccessResponse[RolePermissionsResponse],
-    dependencies=[Depends(require_permission("users:manage"))],
+    dependencies=[Depends(require_permission("permissions:delegate"))],
 )
 async def create_school_role(
     req: CreateSchoolRoleRequest,
@@ -885,7 +885,7 @@ async def create_school_role(
 @router.delete(
     "/roles/{role}",
     response_model=SuccessResponse[MessageResponse],
-    dependencies=[Depends(require_permission("users:manage"))],
+    dependencies=[Depends(require_permission("permissions:delegate"))],
 )
 async def delete_school_role(
     role: str,

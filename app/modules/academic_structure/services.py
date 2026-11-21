@@ -39,6 +39,7 @@ from app.modules.academic_structure.schemas import (
     TermUpdateRequest,
 )
 from app.modules.academic_structure.templates import (
+    COMBINED_STRUCTURE_TEMPLATE_ID,
     PRIMARY_STRUCTURE_TEMPLATE_ID,
     SECONDARY_STRUCTURE_TEMPLATE_ID,
     get_structure_template_preview,
@@ -1665,6 +1666,8 @@ def _resolve_structure_template_id(req: StructureTemplateApplyRequest) -> str:
         return req.template_id
     if req.template_type == StructureTemplateType.PRIMARY:
         return PRIMARY_STRUCTURE_TEMPLATE_ID
+    if req.template_type == StructureTemplateType.COMBINED:
+        return COMBINED_STRUCTURE_TEMPLATE_ID
     return SECONDARY_STRUCTURE_TEMPLATE_ID
 
 

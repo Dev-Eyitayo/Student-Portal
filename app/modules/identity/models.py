@@ -39,7 +39,10 @@ class School(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     __table_args__ = (
-        CheckConstraint("school_type IN ('PRIMARY', 'SECONDARY')", name="chk_schools_school_type"),
+        CheckConstraint(
+            "school_type IN ('PRIMARY', 'SECONDARY', 'COMBINED')",
+            name="chk_schools_school_type",
+        ),
     )
 
     # Relationships
