@@ -797,6 +797,7 @@ async def invite_staff_member(
         )
 
     # Create inactive user waiting for invitation acceptance with a cryptographically random unusable hash
+    validated_role = await _validate_school_role_code(db, school_id, req.role)
     unusable_random_secret = secrets.token_urlsafe(64)
     temporary_hash = await asyncio.to_thread(hash_password, unusable_random_secret)
     user = User(
@@ -806,7 +807,7 @@ async def invite_staff_member(
         first_name=req.first_name.strip(),
         last_name=req.last_name.strip(),
         phone_number=req.phone_number.strip() if req.phone_number else None,
-        role=req.role.value,
+        role=validated_role,
         is_active=False,
     )
     db.add(user)
@@ -870,6 +871,22 @@ async def provision_staff_batch(
             ],
         )
 
+    from app.modules.identity.models import SchoolRole
+
+    custom_role_codes = set(
+        (
+            await db.execute(
+                select(SchoolRole.code).where(
+                    SchoolRole.school_id == school_id,
+                    SchoolRole.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    valid_roles = {"SCHOOL_ADMIN", "ACADEMIC_OFFICER", "TEACHER"} | custom_role_codes
+
     errors: list[dict[str, Any]] = []
     seen_emails: dict[str, int] = {}
     seen_staff_ids: dict[str, int] = {}
@@ -879,6 +896,13 @@ async def provision_staff_batch(
         row = parsed.data
         email = row.email.lower()
         staff_id = row.staff_id_number
+        if row.role not in valid_roles:
+            errors.append(
+                {
+                    "row": parsed.row_number,
+                    "message": f"Role '{row.role}' does not exist in your school.",
+                }
+            )
 
         if email in seen_emails:
             errors.append(
@@ -1336,26 +1360,53 @@ async def deactivate_user(
     return user
 
 
-async def get_user_effective_permissions(db: AsyncSession, user: User) -> list[str]:
-    """Returns the set of permission codes effective for the user."""
-    from app.modules.identity.models import RoleDefaultPermission
+async def _get_role_permission_codes(
+    db: AsyncSession, school_id: UUID, role: str
+) -> tuple[list[str], bool]:
+    """Returns (permission_codes, is_customized) for a role within a school."""
+    from app.modules.identity.models import RoleDefaultPermission, SchoolRolePermission
 
-    if user.role in ("SUPER_ADMIN", "SCHOOL_ADMIN"):
-        all_perms = await db.execute(select(Permission.code))
-        return list(all_perms.scalars().all())
+    if role in ("SUPER_ADMIN", "SCHOOL_ADMIN"):
+        all_perms = (await db.execute(select(Permission.code))).scalars().all()
+        return sorted(list(all_perms)), False
+
+    override_rows = (
+        await db.execute(
+            select(Permission.code, SchoolRolePermission.is_enabled)
+            .join(Permission, Permission.id == SchoolRolePermission.permission_id)
+            .where(
+                SchoolRolePermission.school_id == school_id,
+                SchoolRolePermission.role == role,
+            )
+        )
+    ).all()
+
+    if override_rows:
+        return sorted([code for code, is_enabled in override_rows if is_enabled]), True
 
     role_perms_stmt = (
         select(Permission.code)
         .join(RoleDefaultPermission, RoleDefaultPermission.permission_id == Permission.id)
-        .where(RoleDefaultPermission.role == user.role)
+        .where(RoleDefaultPermission.role == role)
     )
     role_perms = (await db.execute(role_perms_stmt)).scalars().all()
+    return sorted(list(role_perms)), False
+
+
+async def get_user_effective_permissions(db: AsyncSession, user: User) -> list[str]:
+    """Returns the set of permission codes effective for the user."""
+    if user.role in ("SUPER_ADMIN", "SCHOOL_ADMIN"):
+        all_perms = await db.execute(select(Permission.code))
+        return list(all_perms.scalars().all())
+
+    role_perms, _ = await _get_role_permission_codes(db, user.school_id, user.role)
 
     user_grants_stmt = (
         select(Permission.code)
         .join(UserPermissionGrant, UserPermissionGrant.permission_id == Permission.id)
         .where(
             UserPermissionGrant.user_id == user.id,
+            UserPermissionGrant.school_id == user.school_id,
             UserPermissionGrant.deleted_at.is_(None),
         )
     )
@@ -1490,6 +1541,353 @@ async def list_school_users(
 async def list_permissions_catalog(db: AsyncSession) -> list[Permission]:
     result = await db.execute(select(Permission).order_by(Permission.category, Permission.code))
     return list(result.scalars().all())
+
+
+_SYSTEM_ROLES: list[tuple[str, str, str]] = [
+    ("SCHOOL_ADMIN", "School Administrator", "Full school access"),
+    ("ACADEMIC_OFFICER", "Academic Officer", "Scoped academic & approval access"),
+    ("TEACHER", "Teacher", "Teaching & assigned class access"),
+]
+
+
+def _generate_role_code(name: str) -> str:
+    import re
+
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", name.strip()).strip("_").upper()
+    return slug[:32]
+
+
+async def _validate_school_role_code(
+    db: AsyncSession, school_id: UUID, role_code: str
+) -> str:
+    from app.modules.identity.models import SchoolRole
+
+    normalized = role_code.strip().upper()
+    if normalized in ("SCHOOL_ADMIN", "ACADEMIC_OFFICER", "TEACHER"):
+        return normalized
+    custom = (
+        await db.execute(
+            select(SchoolRole).where(
+                SchoolRole.school_id == school_id,
+                SchoolRole.code == normalized,
+                SchoolRole.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if custom is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Role '{role_code}' does not exist in your school.",
+        )
+    return normalized
+
+
+async def list_school_role_permissions(
+    db: AsyncSession, school_id: UUID
+) -> list[dict[str, Any]]:
+    from app.modules.identity.models import SchoolRole
+
+    items: list[dict[str, Any]] = []
+    for code, name, description in _SYSTEM_ROLES:
+        codes, is_customized = await _get_role_permission_codes(db, school_id, code)
+        items.append(
+            {
+                "role": code,
+                "name": name,
+                "description": description,
+                "is_system": True,
+                "permission_codes": codes,
+                "is_customized": is_customized,
+            }
+        )
+
+    custom_roles = (
+        await db.execute(
+            select(SchoolRole)
+            .where(
+                SchoolRole.school_id == school_id,
+                SchoolRole.deleted_at.is_(None),
+            )
+            .order_by(SchoolRole.created_at.asc())
+        )
+    ).scalars().all()
+
+    for cr in custom_roles:
+        codes, is_customized = await _get_role_permission_codes(db, school_id, cr.code)
+        items.append(
+            {
+                "role": cr.code,
+                "name": cr.name,
+                "description": cr.description,
+                "is_system": False,
+                "permission_codes": codes,
+                "is_customized": is_customized,
+            }
+        )
+
+    return items
+
+
+async def create_school_role(
+    db: AsyncSession,
+    school_id: UUID,
+    name: str,
+    description: str | None,
+    permission_codes: list[str],
+    audit: AuditContext,
+) -> dict[str, Any]:
+    from sqlalchemy import delete
+
+    from app.modules.identity.models import SchoolRole, SchoolRolePermission
+
+    code = _generate_role_code(name)
+    if not code or len(code) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please enter a role name with letters or numbers.",
+        )
+    if code in ("SUPER_ADMIN", "SCHOOL_ADMIN", "ACADEMIC_OFFICER", "TEACHER"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"'{name}' conflicts with a built-in system role. Please choose another name.",
+        )
+
+    existing = (
+        await db.execute(
+            select(SchoolRole).where(
+                SchoolRole.school_id == school_id,
+                SchoolRole.code == code,
+                SchoolRole.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"A role named '{existing.name}' already exists in your school.",
+        )
+
+    catalog = await list_permissions_catalog(db)
+    catalog_codes = {p.code for p in catalog}
+    requested = set(permission_codes)
+    unknown = sorted(requested - catalog_codes)
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown permission code(s): {', '.join(unknown)}.",
+        )
+
+    role_row = SchoolRole(
+        school_id=school_id,
+        code=code,
+        name=name.strip(),
+        description=description.strip() if description else None,
+    )
+    db.add(role_row)
+    await db.flush()
+
+    await db.execute(
+        delete(SchoolRolePermission).where(
+            SchoolRolePermission.school_id == school_id,
+            SchoolRolePermission.role == code,
+        )
+    )
+
+    for perm in catalog:
+        db.add(
+            SchoolRolePermission(
+                school_id=school_id,
+                role=code,
+                permission_id=perm.id,
+                is_enabled=perm.code in requested,
+            )
+        )
+
+    record_audit_log(
+        db,
+        audit,
+        action="ROLE_CREATED",
+        resource_type="SchoolRole",
+        resource_id=role_row.id,
+        diff_payload={
+            "after": {
+                "role": code,
+                "name": role_row.name,
+                "permission_codes": sorted(requested),
+            }
+        },
+    )
+    await _commit_or_conflict(
+        db,
+        message=f"A role named '{role_row.name}' already exists in your school.",
+        code="SCHOOL_ROLE_CONFLICT",
+    )
+
+    return {
+        "role": code,
+        "name": role_row.name,
+        "description": role_row.description,
+        "is_system": False,
+        "permission_codes": sorted(requested),
+        "is_customized": True,
+    }
+
+
+async def update_school_role_permissions(
+    db: AsyncSession,
+    school_id: UUID,
+    role: str,
+    permission_codes: list[str],
+    audit: AuditContext,
+) -> dict[str, Any]:
+    from sqlalchemy import delete
+
+    from app.modules.identity.models import SchoolRole, SchoolRolePermission
+
+    normalized_role = role.strip().upper()
+    if normalized_role in ("SCHOOL_ADMIN", "SUPER_ADMIN"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="School Administrator always has full school access and cannot be restricted.",
+        )
+
+    role_name = normalized_role
+    role_desc: str | None = None
+    resource_id: UUID = school_id
+    is_system = normalized_role in ("ACADEMIC_OFFICER", "TEACHER")
+
+    if is_system:
+        for sys_code, sys_name, sys_desc in _SYSTEM_ROLES:
+            if sys_code == normalized_role:
+                role_name = sys_name
+                role_desc = sys_desc
+                break
+    else:
+        custom = (
+            await db.execute(
+                select(SchoolRole).where(
+                    SchoolRole.school_id == school_id,
+                    SchoolRole.code == normalized_role,
+                    SchoolRole.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if custom is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Role '{role}' was not found in your school.",
+            )
+        role_name = custom.name
+        role_desc = custom.description
+        resource_id = custom.id
+
+    catalog = await list_permissions_catalog(db)
+    catalog_by_code = {p.code: p for p in catalog}
+    requested = set(permission_codes)
+    unknown = sorted(requested - set(catalog_by_code.keys()))
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown permission code(s): {', '.join(unknown)}.",
+        )
+
+    await db.execute(
+        delete(SchoolRolePermission).where(
+            SchoolRolePermission.school_id == school_id,
+            SchoolRolePermission.role == normalized_role,
+        )
+    )
+
+    for perm in catalog:
+        db.add(
+            SchoolRolePermission(
+                school_id=school_id,
+                role=normalized_role,
+                permission_id=perm.id,
+                is_enabled=perm.code in requested,
+            )
+        )
+
+    record_audit_log(
+        db,
+        audit,
+        action="ROLE_PERMISSIONS_UPDATED",
+        resource_type="SchoolRolePermission",
+        resource_id=resource_id,
+        diff_payload={
+            "after": {
+                "role": normalized_role,
+                "permission_codes": sorted(requested),
+            }
+        },
+    )
+    await db.commit()
+
+    return {
+        "role": normalized_role,
+        "name": role_name,
+        "description": role_desc,
+        "is_system": is_system,
+        "permission_codes": sorted(requested),
+        "is_customized": True,
+    }
+
+
+async def delete_school_role(
+    db: AsyncSession,
+    school_id: UUID,
+    role: str,
+    audit: AuditContext,
+) -> None:
+    from app.modules.identity.models import SchoolRole
+
+    normalized_role = role.strip().upper()
+    if normalized_role in ("SUPER_ADMIN", "SCHOOL_ADMIN", "ACADEMIC_OFFICER", "TEACHER"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Built-in system roles cannot be deleted.",
+        )
+
+    custom = (
+        await db.execute(
+            select(SchoolRole).where(
+                SchoolRole.school_id == school_id,
+                SchoolRole.code == normalized_role,
+                SchoolRole.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if custom is None:
+        raise ResourceNotFoundException("role", role)
+
+    assigned_count = (
+        await db.execute(
+            select(func.count(User.id)).where(
+                User.school_id == school_id,
+                User.role == normalized_role,
+                User.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one()
+    if assigned_count:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Cannot delete '{custom.name}' because {assigned_count} staff member(s) "
+                "currently have this role. Please reassign them first."
+            ),
+        )
+
+    custom.deleted_at = datetime.now(UTC)
+    record_audit_log(
+        db,
+        audit,
+        action="ROLE_DELETED",
+        resource_type="SchoolRole",
+        resource_id=custom.id,
+        diff_payload={"before": {"role": custom.code, "name": custom.name}},
+    )
+    await db.commit()
 
 
 async def list_user_permission_grants(
@@ -1647,7 +2045,7 @@ async def update_school_user(
     if phone_number is not None:
         target.phone_number = phone_number.strip() or None
     if role is not None:
-        target.role = role
+        target.role = await _validate_school_role_code(db, school_id, role)
 
     sp = target.staff_profile
     if sp is not None:

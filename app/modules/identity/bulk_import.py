@@ -64,8 +64,10 @@ class StaffBulkImportRow(BaseModel):
     @classmethod
     def normalize_role(cls, value: Any) -> str:
         role = str(value or "TEACHER").strip().upper()
-        if role not in ALLOWED_STAFF_ROLES:
-            raise ValueError("Role must be one of TEACHER, ACADEMIC_OFFICER, or SCHOOL_ADMIN.")
+        if not role or len(role) > 32:
+            raise ValueError("Role must be between 1 and 32 characters.")
+        if role == "SUPER_ADMIN":
+            raise ValueError("SUPER_ADMIN cannot be assigned via staff bulk import.")
         return role
 
 

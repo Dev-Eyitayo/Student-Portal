@@ -73,7 +73,7 @@ class UserResponse(BaseModel):
     first_name: str
     last_name: str
     phone_number: str | None = None
-    role: UserRole
+    role: str
     is_active: bool
     is_mfa_enabled: bool
     staff_profile: StaffProfileResponse | None = None
@@ -101,7 +101,7 @@ class MeResponse(BaseModel):
     first_name: str
     last_name: str
     phone_number: str | None = None
-    role: UserRole
+    role: str
     is_active: bool
     is_mfa_enabled: bool
     staff_profile: StaffProfileResponse | None = None
@@ -114,14 +114,14 @@ class StaffInviteRequest(BaseModel):
     first_name: str = Field(..., min_length=1, max_length=64)
     last_name: str = Field(..., min_length=1, max_length=64)
     phone_number: str | None = Field(None, max_length=32)
-    role: StaffRole = StaffRole.TEACHER
+    role: str = Field(default=StaffRole.TEACHER.value, min_length=1, max_length=32)
     staff_id_number: str = Field(..., min_length=1, max_length=64)
     specialization: str | None = Field(None, max_length=128)
 
 
 class StaffInviteResponse(BaseModel):
     email: EmailStr
-    role: StaffRole
+    role: str
     invitation_token: str
     expires_at: datetime
     message: str
@@ -132,7 +132,7 @@ class StaffVerifyInviteResponse(BaseModel):
     first_name: str
     last_name: str
     school_name: str
-    role: StaffRole
+    role: str
 
 
 class AcceptInvitationRequest(BaseModel):
@@ -502,7 +502,7 @@ class StaffUpdateRequest(BaseModel):
     first_name: str | None = Field(default=None, min_length=1, max_length=64)
     last_name: str | None = Field(default=None, min_length=1, max_length=64)
     phone_number: str | None = Field(default=None, max_length=32)
-    role: StaffRole | None = None
+    role: str | None = Field(default=None, min_length=1, max_length=32)
     staff_id_number: str | None = Field(default=None, min_length=1, max_length=64)
     specialization: str | None = Field(default=None, max_length=128)
 
@@ -515,3 +515,30 @@ class StaffUpdateRequest(BaseModel):
                 raise ValueError("This field cannot be blank.")
             return cleaned
         return value
+
+
+class RolePermissionsResponse(BaseModel):
+    role: str
+    name: str
+    description: str | None = None
+    is_system: bool = True
+    permission_codes: list[str]
+    is_customized: bool
+
+
+class CreateSchoolRoleRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=64)
+    description: str | None = Field(default=None, max_length=255)
+    permission_codes: list[str] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def strip_role_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if len(cleaned) < 2:
+            raise ValueError("Role name must be at least 2 characters.")
+        return cleaned
+
+
+class UpdateRolePermissionsRequest(BaseModel):
+    permission_codes: list[str]

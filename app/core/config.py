@@ -77,7 +77,12 @@ class Settings(BaseSettings):
     REDIS_MAX_CONNECTIONS: int = 20
 
     # CORS
-    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:8000"]
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8000",
+    ]
 
     # Asset storage
     STORAGE_PROVIDER: str = "local"
@@ -144,6 +149,8 @@ class Settings(BaseSettings):
 
         if not self.REDIS_BROKER_URL:
             self.REDIS_BROKER_URL = self.REDIS_URL
+        if not self.CELERY_RESULT_BACKEND:
+            self.CELERY_RESULT_BACKEND = self.REDIS_BROKER_URL
 
         # Enforce non-default secret key outside development and testing
         if self.ENVIRONMENT not in ("development", "testing", "test"):

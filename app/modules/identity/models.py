@@ -147,6 +147,55 @@ class RoleDefaultPermission(Base):
     )
 
 
+class SchoolRole(Base, TimestampMixin):
+    __tablename__ = "school_roles"
+    __table_args__ = (
+        Index(
+            "uq_school_roles_school_code_active",
+            "school_id",
+            "code",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
+    school_id: Mapped[UUID] = mapped_column(
+        ForeignKey("schools.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    code: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class SchoolRolePermission(Base):
+    __tablename__ = "school_role_permissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "school_id",
+            "role",
+            "permission_id",
+            name="uq_school_role_permissions_school_role_perm",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
+    school_id: Mapped[UUID] = mapped_column(
+        ForeignKey("schools.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    permission_id: Mapped[UUID] = mapped_column(
+        ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False
+    )
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False
+    )
+
+
 class UserPermissionGrant(Base, TimestampMixin):
     __tablename__ = "user_permission_grants"
 
