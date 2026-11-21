@@ -1,5 +1,6 @@
 import uuid
-from datetime import date, timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -98,7 +99,7 @@ async def test_dashboard_staff_filters_attendance_sheets_and_report_cards(
         assert grants_resp.json()["data"] == []
 
         # Apply PRIMARY template + create term
-        today = date.today()
+        today = datetime.now(ZoneInfo("Africa/Lagos")).date()
         apply_resp = await client.post(
             "/api/v1/structure/templates/apply",
             json={

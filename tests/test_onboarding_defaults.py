@@ -21,9 +21,11 @@ async def test_onboarding_templates_are_public():
     assert response.status_code == 200
     body = response.json()
     assert body["success"] is True
-    assert len(body["data"]) == 2
+    assert len(body["data"]) == 5
     secondary = next(item for item in body["data"] if item["id"] == "olivet_nigeria_default")
     primary = next(item for item in body["data"] if item["id"] == "nigeria_primary_default")
+    combined = next(item for item in body["data"] if item["id"] == "nigeria_combined_default")
+    assert combined["school_type"] == "COMBINED"
 
     assert secondary["school_type"] == "SECONDARY"
     assert secondary["configuration_defaults"]["timezone"] == "Africa/Lagos"
