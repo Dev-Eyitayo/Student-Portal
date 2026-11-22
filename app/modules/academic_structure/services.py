@@ -31,6 +31,8 @@ from app.modules.academic_structure.schemas import (
     LevelCreateRequest,
     LevelUpdateRequest,
     SessionCreateRequest,
+    SessionRolloverRequest,
+    SessionRolloverResponse,
     SessionUpdateRequest,
     StructureTemplateApplyRequest,
     StructureTemplateApplyResponse,
@@ -44,13 +46,16 @@ from app.modules.academic_structure.templates import (
     SECONDARY_STRUCTURE_TEMPLATE_ID,
     get_structure_template_preview,
 )
-from app.modules.assessments.services import seed_assessment_definitions_for_term
+from app.modules.assessments.services import (
+    seed_assessment_definitions_for_class_subject,
+    seed_assessment_definitions_for_term,
+)
 from app.modules.audit.services import AuditContext, record_audit_log
 from app.modules.common.pagination import paginate
 from app.modules.common.schemas import PageMeta
 from app.modules.identity.models import User
 from app.modules.students.models import StudentEnrollment
-from app.modules.subjects.models import ClassSubject, Subject, SubjectOffering
+from app.modules.subjects.models import ClassSubject, Subject, SubjectOffering, TeacherAssignment
 from app.modules.subjects.services import (
     backfill_compulsory_registrations_for_class_group,
     get_or_create_class_subject_with_status,
@@ -2063,4 +2068,488 @@ async def apply_structure_template(
         class_groups_reused=class_groups_reused,
         **subject_counts,
         message=("The structure template has been applied. Existing records were kept unchanged."),
+    )
+
+
+def _format_rollover_summary(
+    source_name: str,
+    target_name: str,
+    *,
+    class_groups_created: int,
+    subject_offerings_created: int,
+    class_subjects_created: int,
+    teacher_assignments_created: int,
+    skipped_inactive_teachers: int,
+) -> str:
+    parts: list[str] = []
+    if class_groups_created:
+        parts.append(
+            f"{class_groups_created} class {'arm' if class_groups_created == 1 else 'arms'}"
+        )
+    if subject_offerings_created:
+        label = "subject offering" if subject_offerings_created == 1 else "subject offerings"
+        parts.append(f"{subject_offerings_created} {label}")
+    if class_subjects_created:
+        label = "class subject" if class_subjects_created == 1 else "class subjects"
+        parts.append(f"{class_subjects_created} {label}")
+    if teacher_assignments_created:
+        label = "teacher assignment" if teacher_assignments_created == 1 else "teacher assignments"
+        parts.append(f"{teacher_assignments_created} {label}")
+
+    if parts:
+        if len(parts) > 1:
+            joined = ", ".join(parts[:-1]) + f" and {parts[-1]}"
+        else:
+            joined = parts[0]
+        base = f"{target_name} is now set up from {source_name}: added {joined}."
+    else:
+        base = (
+            f"{target_name} already has all matching classes and subjects from {source_name} — "
+            "nothing new needed to be added."
+        )
+
+    if skipped_inactive_teachers > 0:
+        noun = "teacher was" if skipped_inactive_teachers == 1 else "teachers were"
+        base += (
+            f" Note: {skipped_inactive_teachers} inactive or former {noun} skipped so you can "
+            "assign active staff."
+        )
+    return base
+
+
+async def rollover_session(
+    db: AsyncSession,
+    school_id: UUID,
+    target_session_id: UUID,
+    req: SessionRolloverRequest,
+    actor_user_id: UUID,
+    audit: AuditContext,
+) -> SessionRolloverResponse:
+    """Idempotently copy class arms, offerings, class subjects, and active teachers into a session."""
+    if req.source_session_id == target_session_id:
+        raise ValidationException(
+            "Please choose a different previous session to copy from.",
+            code="INVALID_ROLLOVER_SOURCE",
+        )
+
+    sessions = (
+        (
+            await db.execute(
+                select(AcademicSession).where(
+                    AcademicSession.school_id == school_id,
+                    AcademicSession.id.in_([req.source_session_id, target_session_id]),
+                    AcademicSession.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    sessions_by_id = {s.id: s for s in sessions}
+    source_session = sessions_by_id.get(req.source_session_id)
+    target_session = sessions_by_id.get(target_session_id)
+    if source_session is None or target_session is None:
+        missing_id = target_session_id if target_session is None else req.source_session_id
+        raise ResourceNotFoundException("Academic session", str(missing_id))
+
+    active_user_ids = set(
+        (
+            await db.execute(
+                select(User.id).where(
+                    User.school_id == school_id,
+                    User.is_active.is_(True),
+                    User.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    active_level_ids = set(
+        (
+            await db.execute(
+                select(AcademicLevel.id).where(
+                    AcademicLevel.school_id == school_id,
+                    AcademicLevel.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    active_dept_ids = set(
+        (
+            await db.execute(
+                select(Department.id).where(
+                    Department.school_id == school_id,
+                    Department.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    active_arm_ids = set(
+        (
+            await db.execute(
+                select(ClassArm.id).where(
+                    ClassArm.school_id == school_id,
+                    ClassArm.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    class_groups_created = 0
+    class_groups_reused = 0
+    subject_offerings_created = 0
+    subject_offerings_reused = 0
+    class_subjects_created = 0
+    class_subjects_reused = 0
+    teacher_assignments_created = 0
+    skipped_inactive_teachers = 0
+
+    group_map: dict[UUID, ClassGroup] = {}
+    target_groups_by_key: dict[tuple[UUID, UUID | None, UUID], ClassGroup] = {}
+
+    if req.copy_class_groups or req.copy_class_subjects:
+        source_groups = (
+            (
+                await db.execute(
+                    select(ClassGroup).where(
+                        ClassGroup.school_id == school_id,
+                        ClassGroup.academic_session_id == source_session.id,
+                        ClassGroup.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        target_groups = (
+            (
+                await db.execute(
+                    select(ClassGroup).where(
+                        ClassGroup.school_id == school_id,
+                        ClassGroup.academic_session_id == target_session.id,
+                        ClassGroup.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        target_groups_by_key = {
+            (g.academic_level_id, g.department_id, g.class_arm_id): g for g in target_groups
+        }
+
+        for src_group in source_groups:
+            if (
+                src_group.academic_level_id not in active_level_ids
+                or src_group.class_arm_id not in active_arm_ids
+                or (
+                    src_group.department_id is not None
+                    and src_group.department_id not in active_dept_ids
+                )
+            ):
+                continue
+
+            key = (
+                src_group.academic_level_id,
+                src_group.department_id,
+                src_group.class_arm_id,
+            )
+            existing_target = target_groups_by_key.get(key)
+            if existing_target is not None:
+                if (
+                    req.copy_class_teachers
+                    and existing_target.class_teacher_id is None
+                    and src_group.class_teacher_id is not None
+                ):
+                    if src_group.class_teacher_id in active_user_ids:
+                        existing_target.class_teacher_id = src_group.class_teacher_id
+                    else:
+                        skipped_inactive_teachers += 1
+                group_map[src_group.id] = existing_target
+                class_groups_reused += 1
+                continue
+
+            if not req.copy_class_groups:
+                continue
+
+            teacher_id: UUID | None = None
+            if req.copy_class_teachers and src_group.class_teacher_id is not None:
+                if src_group.class_teacher_id in active_user_ids:
+                    teacher_id = src_group.class_teacher_id
+                else:
+                    skipped_inactive_teachers += 1
+
+            new_group = ClassGroup(
+                school_id=school_id,
+                academic_session_id=target_session.id,
+                academic_level_id=src_group.academic_level_id,
+                department_id=src_group.department_id,
+                class_arm_id=src_group.class_arm_id,
+                class_teacher_id=teacher_id,
+                display_name=src_group.display_name,
+            )
+            db.add(new_group)
+            target_groups_by_key[key] = new_group
+            group_map[src_group.id] = new_group
+            class_groups_created += 1
+
+        await db.flush()
+
+    offering_map: dict[UUID, SubjectOffering] = {}
+    if req.copy_subject_offerings or req.copy_class_subjects:
+        active_subject_ids = set(
+            (
+                await db.execute(
+                    select(Subject.id).where(
+                        Subject.school_id == school_id,
+                        Subject.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        source_offerings = (
+            (
+                await db.execute(
+                    select(SubjectOffering).where(
+                        SubjectOffering.school_id == school_id,
+                        SubjectOffering.academic_session_id == source_session.id,
+                        SubjectOffering.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        target_offerings = (
+            (
+                await db.execute(
+                    select(SubjectOffering).where(
+                        SubjectOffering.school_id == school_id,
+                        SubjectOffering.academic_session_id == target_session.id,
+                        SubjectOffering.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        target_offerings_by_key = {
+            (o.subject_id, o.academic_level_id, o.department_id): o for o in target_offerings
+        }
+
+        for src_off in source_offerings:
+            if (
+                src_off.subject_id not in active_subject_ids
+                or src_off.academic_level_id not in active_level_ids
+                or (
+                    src_off.department_id is not None
+                    and src_off.department_id not in active_dept_ids
+                )
+            ):
+                continue
+
+            key = (src_off.subject_id, src_off.academic_level_id, src_off.department_id)
+            existing_off = target_offerings_by_key.get(key)
+            if existing_off is not None:
+                offering_map[src_off.id] = existing_off
+                subject_offerings_reused += 1
+                continue
+
+            if not req.copy_subject_offerings:
+                continue
+
+            new_off = SubjectOffering(
+                school_id=school_id,
+                subject_id=src_off.subject_id,
+                academic_session_id=target_session.id,
+                academic_level_id=src_off.academic_level_id,
+                department_id=src_off.department_id,
+            )
+            db.add(new_off)
+            target_offerings_by_key[key] = new_off
+            offering_map[src_off.id] = new_off
+            subject_offerings_created += 1
+
+        await db.flush()
+
+    if req.copy_class_subjects and group_map and offering_map:
+        source_cs_list = (
+            (
+                await db.execute(
+                    select(ClassSubject).where(
+                        ClassSubject.school_id == school_id,
+                        ClassSubject.class_group_id.in_(list(group_map.keys())),
+                        ClassSubject.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        target_group_ids = [g.id for g in target_groups_by_key.values()]
+        target_cs_list = (
+            (
+                await db.execute(
+                    select(ClassSubject).where(
+                        ClassSubject.school_id == school_id,
+                        ClassSubject.class_group_id.in_(target_group_ids),
+                        ClassSubject.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        target_cs_by_key = {
+            (cs.subject_offering_id, cs.class_group_id): cs for cs in target_cs_list
+        }
+        cs_map: dict[UUID, ClassSubject] = {}
+
+        for src_cs in source_cs_list:
+            tgt_group = group_map.get(src_cs.class_group_id)
+            tgt_off = offering_map.get(src_cs.subject_offering_id)
+            if tgt_group is None or tgt_off is None:
+                continue
+
+            key = (tgt_off.id, tgt_group.id)
+            existing_cs = target_cs_by_key.get(key)
+            if existing_cs is not None:
+                cs_map[src_cs.id] = existing_cs
+                class_subjects_reused += 1
+                continue
+
+            new_cs = ClassSubject(
+                school_id=school_id,
+                subject_offering_id=tgt_off.id,
+                class_group_id=tgt_group.id,
+            )
+            db.add(new_cs)
+            target_cs_by_key[key] = new_cs
+            cs_map[src_cs.id] = new_cs
+            class_subjects_created += 1
+
+        await db.flush()
+        for cs in cs_map.values():
+            await seed_assessment_definitions_for_class_subject(db, school_id, cs)
+
+        if req.copy_subject_teachers and cs_map:
+            src_assignments = (
+                (
+                    await db.execute(
+                        select(TeacherAssignment).where(
+                            TeacherAssignment.school_id == school_id,
+                            TeacherAssignment.class_subject_id.in_(list(cs_map.keys())),
+                            TeacherAssignment.is_active.is_(True),
+                            TeacherAssignment.deleted_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            tgt_cs_ids = [cs.id for cs in cs_map.values()]
+            existing_tgt_assignments = (
+                (
+                    await db.execute(
+                        select(TeacherAssignment).where(
+                            TeacherAssignment.school_id == school_id,
+                            TeacherAssignment.class_subject_id.in_(tgt_cs_ids),
+                            TeacherAssignment.is_active.is_(True),
+                            TeacherAssignment.deleted_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            existing_pairs = {
+                (ta.class_subject_id, ta.teacher_id) for ta in existing_tgt_assignments
+            }
+
+            for src_ta in src_assignments:
+                tgt_cs = cs_map.get(src_ta.class_subject_id)
+                if tgt_cs is None:
+                    continue
+                if src_ta.teacher_id not in active_user_ids:
+                    skipped_inactive_teachers += 1
+                    continue
+                pair = (tgt_cs.id, src_ta.teacher_id)
+                if pair in existing_pairs:
+                    continue
+
+                db.add(
+                    TeacherAssignment(
+                        school_id=school_id,
+                        teacher_id=src_ta.teacher_id,
+                        class_subject_id=tgt_cs.id,
+                        assigned_by_id=actor_user_id,
+                        is_active=True,
+                        start_date=target_session.start_date,
+                    )
+                )
+                existing_pairs.add(pair)
+                teacher_assignments_created += 1
+
+    message = _format_rollover_summary(
+        source_session.name,
+        target_session.name,
+        class_groups_created=class_groups_created,
+        subject_offerings_created=subject_offerings_created,
+        class_subjects_created=class_subjects_created,
+        teacher_assignments_created=teacher_assignments_created,
+        skipped_inactive_teachers=skipped_inactive_teachers,
+    )
+
+    record_audit_log(
+        db,
+        audit,
+        action="SESSION_ROLLOVER",
+        resource_type="AcademicSession",
+        resource_id=target_session.id,
+        diff_payload={
+            "source_session_id": str(source_session.id),
+            "source_session_name": source_session.name,
+            "target_session_name": target_session.name,
+            "class_groups_created": class_groups_created,
+            "class_groups_reused": class_groups_reused,
+            "subject_offerings_created": subject_offerings_created,
+            "subject_offerings_reused": subject_offerings_reused,
+            "class_subjects_created": class_subjects_created,
+            "class_subjects_reused": class_subjects_reused,
+            "teacher_assignments_created": teacher_assignments_created,
+            "skipped_inactive_teachers": skipped_inactive_teachers,
+        },
+    )
+    await _commit_or_conflict(
+        db,
+        message=(
+            "We couldn't finish copying classes and subjects into this session. Please review "
+            "your existing setup and try again."
+        ),
+        code="SESSION_ROLLOVER_CONFLICT",
+    )
+
+    return SessionRolloverResponse(
+        source_session_id=source_session.id,
+        target_session_id=target_session.id,
+        source_session_name=source_session.name,
+        target_session_name=target_session.name,
+        class_groups_created=class_groups_created,
+        class_groups_reused=class_groups_reused,
+        subject_offerings_created=subject_offerings_created,
+        subject_offerings_reused=subject_offerings_reused,
+        class_subjects_created=class_subjects_created,
+        class_subjects_reused=class_subjects_reused,
+        teacher_assignments_created=teacher_assignments_created,
+        skipped_inactive_teachers=skipped_inactive_teachers,
+        message=message,
     )

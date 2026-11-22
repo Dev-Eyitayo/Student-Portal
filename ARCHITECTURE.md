@@ -1201,6 +1201,7 @@ This catalog is authoritative. `BACKEND_DEV_PLAN.md`, module routers, tests, and
 | **Structure** | `GET`, `POST` | `/api/v1/structure/class-groups` | List or instantiate class cohorts | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/class-groups/{class_group_id}` | Read, update, or retire a class group | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Structure** | `POST` | `/api/v1/structure/templates/apply` | **(LIVE — M8/M9+)** Idempotently apply secondary (`olivet_nigeria_jss_ss3`, `nigeria_junior_secondary`, `nigeria_senior_secondary`), primary (`nigeria_primary_basic1_6`), or combined (`nigeria_combined_k12`) structure templates for a session | `structure:manage` |
+| **Structure** | `POST` | `/api/v1/structure/sessions/{session_id}/rollover` | **(LIVE)** Idempotently copy active class groups, class teachers, subject offerings, class subjects, and active teacher assignments from a previous session | `structure:manage` |
 | **Identity** | `POST` | `/api/v1/identity/schools` | **(LIVE — M9+)** Accept `school_type = PRIMARY\|SECONDARY\|COMBINED` and seed the matching defaults/report template | `SUPER_ADMIN` |
 | **Identity** | `GET`, `PATCH` | `/api/v1/identity/schools/{school_id}/setup` | **(LIVE — M9+)** Read/save `school_type` and the selected primary, secondary, or combined template | `SCHOOL_ADMIN` |
 | **Identity** | `GET`, `POST` | `/api/v1/identity/roles/permissions`, `/api/v1/identity/roles` | **(LIVE)** List per-school role permissions (system + custom) and create custom school roles | `users:manage` |
@@ -1225,7 +1226,8 @@ This catalog is authoritative. `BACKEND_DEV_PLAN.md`, module routers, tests, and
 | **Subjects** | `POST` | `/api/v1/class-subjects/teacher-assignments/bulk` | Cascading teacher assignment across arms | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Subjects** | `POST` | `/api/v1/class-subjects/{class_subject_id}/subject-registrations/bulk` | Bulk-register a cohort for a trade or elective | `ACADEMIC_OFFICER` |
 | **Assessments** | `GET`, `POST` | `/api/v1/assessments/definitions` | List or configure assessment components | `ACADEMIC_OFFICER` |
-| **Assessments** | `GET`, `PATCH` | `/api/v1/assessments/definitions/{definition_id}` | Read or update an assessment component | `ACADEMIC_OFFICER` |
+| **Assessments** | `POST` | `/api/v1/assessments/definitions/bulk`, `/definitions/bulk-remove` | **(LIVE)** Bulk-apply or remove assessment components across a level category (`PRIMARY`/`JUNIOR_SECONDARY`/`SENIOR_SECONDARY`) or selected class levels | `subjects:manage` |
+| **Assessments** | `GET`, `PATCH`, `DELETE` | `/api/v1/assessments/definitions/{definition_id}` | Read, update, or remove an unused assessment component | `ACADEMIC_OFFICER` |
 | **Assessments** | `GET` | `/api/v1/assessments/scores` | Read a class-subject score sheet | `TEACHER` (Assigned only), `ACADEMIC_OFFICER` |
 | **Assessments** | `POST` | `/api/v1/assessments/scores/bulk-entry` | Enter or update a score sheet | `TEACHER` (Assigned only), `ACADEMIC_OFFICER` |
 | **Assessments** | `POST` | `/api/v1/assessments/submit` | Submit scores for review | `TEACHER` (Assigned only) |

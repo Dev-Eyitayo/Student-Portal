@@ -320,3 +320,28 @@ class TeacherDashboardResponse(BaseModel):
     subjects_count: int
     pending_score_sheets: int
     teaching_subjects: list[TeacherSubjectSummary]
+
+
+class SessionRolloverRequest(BaseModel):
+    source_session_id: UUID
+    copy_class_groups: bool = True
+    copy_class_teachers: bool = True
+    copy_subject_offerings: bool = True
+    copy_class_subjects: bool = True
+    copy_subject_teachers: bool = True
+
+
+class SessionRolloverResponse(BaseModel):
+    source_session_id: UUID
+    target_session_id: UUID
+    source_session_name: str
+    target_session_name: str
+    class_groups_created: int = 0
+    class_groups_reused: int = 0
+    subject_offerings_created: int = 0
+    subject_offerings_reused: int = 0
+    class_subjects_created: int = 0
+    class_subjects_reused: int = 0
+    teacher_assignments_created: int = 0
+    skipped_inactive_teachers: int = 0
+    message: str

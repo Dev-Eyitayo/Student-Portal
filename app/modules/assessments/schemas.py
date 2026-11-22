@@ -3,7 +3,7 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.modules.common.schemas import PageMeta
 
@@ -32,6 +32,109 @@ class AssessmentDefinitionUpdateRequest(BaseModel):
     sequence_order: int | None = Field(None, ge=1)
 
 
+class AssessmentDefinitionBulkCreateRequest(BaseModel):
+    academic_term_id: UUID
+    academic_level_ids: list[UUID] = Field(default_factory=list)
+    level_category: str | None = Field(
+        None, pattern="^(PRIMARY|JUNIOR_SECONDARY|SENIOR_SECONDARY)$"
+    )
+    apply_to_all_levels: bool = False
+    subject_id: UUID | None = None
+    name: str = Field(..., min_length=1, max_length=64)
+    code: str = Field(..., min_length=1, max_length=16)
+    assessment_type: AssessmentType
+    max_score: Decimal = Field(..., gt=0, max_digits=5, decimal_places=2)
+    weight_percentage: Decimal = Field(..., ge=0, le=100, max_digits=5, decimal_places=2)
+    sequence_order: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def validate_scope_and_text(self) -> "AssessmentDefinitionBulkCreateRequest":
+        if not self.name.strip() or not self.code.strip():
+            raise ValueError("Component name and code cannot be blank.")
+        modes = sum(
+            [
+                bool(self.apply_to_all_levels),
+                bool(self.level_category),
+                bool(self.academic_level_ids),
+            ]
+        )
+        if modes != 1:
+            raise ValueError(
+                "Select exactly one target scope: apply_to_all_levels, level_category, "
+                "or academic_level_ids."
+            )
+        return self
+
+
+class AssessmentDefinitionBulkRemoveRequest(BaseModel):
+    academic_term_id: UUID
+    code: str = Field(..., min_length=1, max_length=16)
+    academic_level_ids: list[UUID] = Field(default_factory=list)
+    level_category: str | None = Field(
+        None, pattern="^(PRIMARY|JUNIOR_SECONDARY|SENIOR_SECONDARY)$"
+    )
+    apply_to_all_levels: bool = False
+    subject_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_scope_and_code(self) -> "AssessmentDefinitionBulkRemoveRequest":
+        if not self.code.strip():
+            raise ValueError("Component code cannot be blank.")
+        modes = sum(
+            [
+                bool(self.apply_to_all_levels),
+                bool(self.level_category),
+                bool(self.academic_level_ids),
+            ]
+        )
+        if modes != 1:
+            raise ValueError(
+                "Select exactly one target scope: apply_to_all_levels, level_category, "
+                "or academic_level_ids."
+            )
+        return self
+
+
+class AssessmentDefinitionBulkUpdateRequest(BaseModel):
+    academic_term_id: UUID
+    code: str = Field(..., min_length=1, max_length=16)
+    academic_level_ids: list[UUID] = Field(default_factory=list)
+    level_category: str | None = Field(
+        None, pattern="^(PRIMARY|JUNIOR_SECONDARY|SENIOR_SECONDARY)$"
+    )
+    apply_to_all_levels: bool = False
+    name: str | None = Field(None, min_length=1, max_length=64)
+    max_score: Decimal | None = Field(None, gt=0, max_digits=5, decimal_places=2)
+    weight_percentage: Decimal | None = Field(None, ge=0, le=100, max_digits=5, decimal_places=2)
+    sequence_order: int | None = Field(None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_scope_and_fields(self) -> "AssessmentDefinitionBulkUpdateRequest":
+        if not self.code.strip():
+            raise ValueError("Component code cannot be blank.")
+        if self.name is not None and not self.name.strip():
+            raise ValueError("Component name cannot be blank.")
+        modes = sum(
+            [
+                bool(self.apply_to_all_levels),
+                bool(self.level_category),
+                bool(self.academic_level_ids),
+            ]
+        )
+        if modes != 1:
+            raise ValueError(
+                "Select exactly one target scope: apply_to_all_levels, level_category, "
+                "or academic_level_ids."
+            )
+        return self
+
+
+class AssessmentDefinitionBulkActionResponse(BaseModel):
+    affected_count: int
+    skipped_count: int
+    message: str
+
+
 class AssessmentDefinitionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -46,6 +149,20 @@ class AssessmentDefinitionResponse(BaseModel):
     weight_percentage: Decimal
     sequence_order: int
     created_at: datetime
+    level_categories: list[str] = Field(default_factory=list)
+    level_names: list[str] = Field(default_factory=list)
+    scope_label: str | None = None
+
+    @field_validator("assessment_type", mode="before")
+    @classmethod
+    def normalize_legacy_assessment_type(cls, value: object) -> object:
+        if isinstance(value, str):
+            upper = value.strip().upper()
+            if upper == "CA":
+                return AssessmentType.CONTINUOUS_ASSESSMENT
+            if upper == "EXAM":
+                return AssessmentType.EXAMINATION
+        return value
 
 
 class ScoreStatus(StrEnum):
