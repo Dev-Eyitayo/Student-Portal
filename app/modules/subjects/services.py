@@ -356,7 +356,7 @@ def _offering_query(
         stmt = stmt.where(SubjectOffering.academic_session_id == academic_session_id)
     if academic_level_id is not None:
         stmt = stmt.where(SubjectOffering.academic_level_id == academic_level_id)
-    return stmt
+    return stmt.order_by(SubjectOffering.created_at.desc(), SubjectOffering.id.desc())
 
 
 async def list_offerings(
@@ -682,6 +682,8 @@ async def list_class_subjects(
         stmt = stmt.where(
             ClassSubject.deleted_at.is_(None),
             ClassGroup.deleted_at.is_(None),
+            SubjectOffering.deleted_at.is_(None),
+            Subject.deleted_at.is_(None),
         )
     if class_group_id is not None:
         stmt = stmt.where(ClassSubject.class_group_id == class_group_id)
@@ -786,28 +788,19 @@ async def list_class_subjects(
 async def get_subjects_summary(
     db: AsyncSession, school_id: UUID, academic_session_id: UUID | None = None
 ) -> dict[str, int]:
-    total_subjects = (
+    total_subjects, elective_or_trade = (
         await db.execute(
-            select(func.count())
-            .select_from(Subject)
-            .where(
+            select(
+                func.count(Subject.id),
+                func.count(Subject.id).filter(
+                    or_(Subject.is_elective.is_(True), Subject.is_trade_subject.is_(True))
+                ),
+            ).where(
                 Subject.school_id == school_id,
                 Subject.deleted_at.is_(None),
             )
         )
-    ).scalar_one()
-
-    elective_or_trade = (
-        await db.execute(
-            select(func.count())
-            .select_from(Subject)
-            .where(
-                Subject.school_id == school_id,
-                Subject.deleted_at.is_(None),
-                or_(Subject.is_elective.is_(True), Subject.is_trade_subject.is_(True)),
-            )
-        )
-    ).scalar_one()
+    ).one()
 
     target_session_id = academic_session_id
     if target_session_id is None:
@@ -821,37 +814,39 @@ async def get_subjects_summary(
             )
         ).scalar_one_or_none()
 
-    cs_ids: list[UUID] = []
-    if target_session_id is not None:
-        cs_stmt = (
-            select(ClassSubject.id)
-            .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
-            .where(
-                ClassSubject.school_id == school_id,
-                ClassSubject.deleted_at.is_(None),
-                ClassGroup.deleted_at.is_(None),
-                ClassGroup.academic_session_id == target_session_id,
-            )
-        )
-        cs_ids = list((await db.execute(cs_stmt)).scalars().all())
-    class_allocations = len(cs_ids)
+    class_allocations = 0
     without_teacher = 0
-    if cs_ids:
-        assigned_ids = set(
-            (
-                await db.execute(
-                    select(TeacherAssignment.class_subject_id).where(
-                        TeacherAssignment.school_id == school_id,
-                        TeacherAssignment.class_subject_id.in_(cs_ids),
-                        TeacherAssignment.is_active.is_(True),
-                        TeacherAssignment.deleted_at.is_(None),
-                    )
+    if target_session_id is not None:
+        has_active_teacher = (
+            select(TeacherAssignment.id)
+            .where(
+                TeacherAssignment.school_id == school_id,
+                TeacherAssignment.class_subject_id == ClassSubject.id,
+                TeacherAssignment.is_active.is_(True),
+                TeacherAssignment.deleted_at.is_(None),
+            )
+            .exists()
+        )
+        class_allocations, without_teacher = (
+            await db.execute(
+                select(
+                    func.count(ClassSubject.id),
+                    func.count(ClassSubject.id).filter(~has_active_teacher),
+                )
+                .select_from(ClassSubject)
+                .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+                .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+                .join(Subject, Subject.id == SubjectOffering.subject_id)
+                .where(
+                    ClassSubject.school_id == school_id,
+                    ClassSubject.deleted_at.is_(None),
+                    ClassGroup.deleted_at.is_(None),
+                    SubjectOffering.deleted_at.is_(None),
+                    Subject.deleted_at.is_(None),
+                    ClassGroup.academic_session_id == target_session_id,
                 )
             )
-            .scalars()
-            .all()
-        )
-        without_teacher = sum(1 for cid in cs_ids if cid not in assigned_ids)
+        ).one()
 
     return {
         "total_subjects": total_subjects,
@@ -1054,10 +1049,15 @@ async def _assign_teacher_to_class_subject(
     if active:
         return active, True
 
-    inactive_stmt = select(TeacherAssignment).where(
-        TeacherAssignment.class_subject_id == class_subject.id,
-        TeacherAssignment.teacher_id == teacher.id,
-        TeacherAssignment.is_active.is_(False),
+    inactive_stmt = (
+        select(TeacherAssignment)
+        .where(
+            TeacherAssignment.class_subject_id == class_subject.id,
+            TeacherAssignment.teacher_id == teacher.id,
+            TeacherAssignment.is_active.is_(False),
+        )
+        .order_by(TeacherAssignment.created_at.desc())
+        .limit(1)
     )
     inactive = (await db.execute(inactive_stmt)).scalar_one_or_none()
     if inactive:
