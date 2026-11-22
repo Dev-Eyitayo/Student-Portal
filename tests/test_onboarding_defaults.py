@@ -378,3 +378,129 @@ async def test_staging_local_storage_returns_stub_without_writing_to_disk(tmp_pa
     assert path.startswith("schools/olivet-staging/branding/logo/")
     assert path.endswith(".png")
     assert list(tmp_path.rglob("*")) == []
+
+
+@pytest.mark.asyncio
+async def test_session_rollover_is_idempotent_and_easy_to_read():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        suffix = uuid.uuid4().hex[:6]
+        school_payload = {
+            "name": f"Rollover Primary {suffix}",
+            "slug": f"rollover-primary-{suffix}",
+            "official_code": f"RLV-{suffix.upper()}",
+            "state": "Oyo State",
+            "city": "Oyo",
+            "address": "Olivet Heights, Oyo, Nigeria",
+            "country_code": "NG",
+            "admin_email": f"admin-{suffix}@example.edu.ng",
+            "admin_first_name": "Ada",
+            "admin_last_name": "Obi",
+            "admin_password": "StrongPassword123!",
+            "school_type": "PRIMARY",
+        }
+        reg_resp = await client.post("/api/v1/identity/schools", json=school_payload)
+        assert reg_resp.status_code == 201, reg_resp.text
+        login_resp = await client.post(
+            "/api/v1/identity/login",
+            json={
+                "email": school_payload["admin_email"],
+                "password": school_payload["admin_password"],
+            },
+        )
+        assert login_resp.status_code == 200, login_resp.text
+        headers = {"Authorization": f"Bearer {login_resp.json()['data']['access_token']}"}
+
+        apply_resp = await client.post(
+            "/api/v1/structure/templates/apply",
+            json={
+                "template_type": "PRIMARY",
+                "session_name": f"2025/2026 {suffix}",
+                "session_start_date": "2025-09-08",
+                "session_end_date": "2026-07-24",
+                "include_class_groups": True,
+            },
+            headers=headers,
+        )
+        assert apply_resp.status_code == 201, apply_resp.text
+        source_session_id = apply_resp.json()["data"]["academic_session_id"]
+
+        new_session_resp = await client.post(
+            "/api/v1/structure/sessions",
+            json={
+                "name": f"2026/2027 {suffix}",
+                "start_date": "2026-09-07",
+                "end_date": "2027-07-23",
+                "is_current": True,
+            },
+            headers=headers,
+        )
+        assert new_session_resp.status_code == 201, new_session_resp.text
+        target_session_id = new_session_resp.json()["data"]["id"]
+
+        rollover_resp = await client.post(
+            f"/api/v1/structure/sessions/{target_session_id}/rollover",
+            json={
+                "source_session_id": source_session_id,
+                "copy_class_groups": True,
+                "copy_class_teachers": True,
+                "copy_subject_offerings": True,
+                "copy_class_subjects": True,
+                "copy_subject_teachers": True,
+            },
+            headers=headers,
+        )
+        assert rollover_resp.status_code == 200, rollover_resp.text
+        rdata = rollover_resp.json()["data"]
+        assert rdata["class_groups_created"] == 24
+        assert rdata["subject_offerings_created"] == 60
+        assert rdata["class_subjects_created"] == 240
+        assert f"2026/2027 {suffix} is now set up from 2025/2026 {suffix}" in rdata["message"]
+
+        rerun_resp = await client.post(
+            f"/api/v1/structure/sessions/{target_session_id}/rollover",
+            json={"source_session_id": source_session_id},
+            headers=headers,
+        )
+        assert rerun_resp.status_code == 200, rerun_resp.text
+        rerun = rerun_resp.json()["data"]
+        assert rerun["class_groups_created"] == 0
+        assert rerun["class_groups_reused"] == 24
+        assert rerun["subject_offerings_created"] == 0
+        assert rerun["subject_offerings_reused"] == 60
+        assert rerun["class_subjects_created"] == 0
+        assert rerun["class_subjects_reused"] == 240
+        assert "already has all matching classes and subjects" in rerun["message"]
+
+        other_suffix = uuid.uuid4().hex[:6]
+        other_payload = {
+            "name": f"Other School {other_suffix}",
+            "slug": f"other-school-{other_suffix}",
+            "official_code": f"OTH-{other_suffix.upper()}",
+            "state": "Oyo State",
+            "city": "Oyo",
+            "address": "Olivet Heights, Oyo, Nigeria",
+            "country_code": "NG",
+            "admin_email": f"other-{other_suffix}@example.edu.ng",
+            "admin_first_name": "Tunde",
+            "admin_last_name": "Bello",
+            "admin_password": "StrongPassword123!",
+            "school_type": "PRIMARY",
+        }
+        other_reg = await client.post("/api/v1/identity/schools", json=other_payload)
+        assert other_reg.status_code == 201, other_reg.text
+        other_login = await client.post(
+            "/api/v1/identity/login",
+            json={
+                "email": other_payload["admin_email"],
+                "password": other_payload["admin_password"],
+            },
+        )
+        assert other_login.status_code == 200, other_login.text
+        other_headers = {"Authorization": f"Bearer {other_login.json()['data']['access_token']}"}
+        cross_tenant_resp = await client.post(
+            f"/api/v1/structure/sessions/{target_session_id}/rollover",
+            json={"source_session_id": source_session_id},
+            headers=other_headers,
+        )
+        assert cross_tenant_resp.status_code == 404

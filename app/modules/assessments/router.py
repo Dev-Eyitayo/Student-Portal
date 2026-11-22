@@ -6,6 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_current_authenticated_user, get_tenant_db
 from app.modules.assessments import services
 from app.modules.assessments.schemas import (
+    AssessmentDefinitionBulkActionResponse,
+    AssessmentDefinitionBulkCreateRequest,
+    AssessmentDefinitionBulkRemoveRequest,
+    AssessmentDefinitionBulkUpdateRequest,
     AssessmentDefinitionCreateRequest,
     AssessmentDefinitionResponse,
     AssessmentDefinitionUpdateRequest,
@@ -20,7 +24,7 @@ from app.modules.assessments.schemas import (
     ScoreSheetUnlockRequest,
 )
 from app.modules.audit.services import AuditContext
-from app.modules.common.schemas import Page, SuccessResponse
+from app.modules.common.schemas import MessageResponse, Page, SuccessResponse
 from app.modules.identity.models import User
 
 router = APIRouter(prefix="/assessments", tags=["Assessments & Scores"])
@@ -56,6 +60,10 @@ def _audit_context(request: Request, current_user: User) -> AuditContext:
 async def list_definitions(
     academic_term_id: UUID | None = Query(None),
     class_subject_id: UUID | None = Query(None),
+    academic_level_id: UUID | None = Query(None),
+    level_category: str | None = Query(
+        None, pattern="^(PRIMARY|JUNIOR_SECONDARY|SENIOR_SECONDARY)$"
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     current_user: User = Depends(get_current_authenticated_user),
@@ -67,6 +75,8 @@ async def list_definitions(
         current_user,
         academic_term_id=academic_term_id,
         class_subject_id=class_subject_id,
+        academic_level_id=academic_level_id,
+        level_category=level_category,
         page=page,
         page_size=page_size,
     )
@@ -109,6 +119,75 @@ async def get_definition(
     return SuccessResponse[AssessmentDefinitionResponse](
         data=AssessmentDefinitionResponse.model_validate(definition)
     )
+
+
+@router.post(
+    "/definitions/bulk",
+    response_model=SuccessResponse[AssessmentDefinitionBulkActionResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def bulk_create_definitions(
+    req: AssessmentDefinitionBulkCreateRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    result = await services.bulk_create_definitions(
+        db, _school_id(current_user), req, current_user, _audit_context(request, current_user)
+    )
+    return SuccessResponse[AssessmentDefinitionBulkActionResponse](data=result)
+
+
+@router.post(
+    "/definitions/bulk-remove",
+    response_model=SuccessResponse[AssessmentDefinitionBulkActionResponse],
+)
+async def bulk_remove_definitions(
+    req: AssessmentDefinitionBulkRemoveRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    result = await services.bulk_remove_definitions(
+        db, _school_id(current_user), req, current_user, _audit_context(request, current_user)
+    )
+    return SuccessResponse[AssessmentDefinitionBulkActionResponse](data=result)
+
+
+@router.post(
+    "/definitions/bulk-update",
+    response_model=SuccessResponse[AssessmentDefinitionBulkActionResponse],
+)
+async def bulk_update_definitions(
+    req: AssessmentDefinitionBulkUpdateRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    result = await services.bulk_update_definitions(
+        db, _school_id(current_user), req, current_user, _audit_context(request, current_user)
+    )
+    return SuccessResponse[AssessmentDefinitionBulkActionResponse](data=result)
+
+
+@router.delete(
+    "/definitions/{definition_id}",
+    response_model=SuccessResponse[MessageResponse],
+)
+async def delete_definition(
+    definition_id: UUID,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    msg = await services.delete_definition(
+        db,
+        _school_id(current_user),
+        definition_id,
+        current_user,
+        _audit_context(request, current_user),
+    )
+    return SuccessResponse[MessageResponse](data=MessageResponse(message=msg))
 
 
 @router.patch(

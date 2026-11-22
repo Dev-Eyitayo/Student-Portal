@@ -30,6 +30,8 @@ from app.modules.academic_structure.schemas import (
     LevelUpdateRequest,
     SessionCreateRequest,
     SessionResponse,
+    SessionRolloverRequest,
+    SessionRolloverResponse,
     SessionUpdateRequest,
     StructureTemplateApplyRequest,
     StructureTemplateApplyResponse,
@@ -168,6 +170,29 @@ async def retire_session(
             )
         )
     )
+
+
+@router.post(
+    "/sessions/{session_id}/rollover",
+    response_model=SuccessResponse[SessionRolloverResponse],
+    dependencies=[Depends(require_permission("structure:manage"))],
+)
+async def rollover_session(
+    session_id: UUID,
+    req: SessionRolloverRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    result = await services.rollover_session(
+        db,
+        require_school_id(current_user),
+        session_id,
+        req,
+        current_user.id,
+        build_audit_context(request, current_user),
+    )
+    return SuccessResponse[SessionRolloverResponse](data=result)
 
 
 @router.get(

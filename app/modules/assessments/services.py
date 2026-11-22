@@ -20,9 +20,13 @@ from app.core.permissions import (
     require_scoped_permission,
     user_has_permission,
 )
-from app.modules.academic_structure.models import AcademicTerm, ClassGroup
+from app.modules.academic_structure.models import AcademicLevel, AcademicTerm, ClassGroup
 from app.modules.assessments.models import AssessmentDefinition, AssessmentScore, ScoreSheetStatus
 from app.modules.assessments.schemas import (
+    AssessmentDefinitionBulkActionResponse,
+    AssessmentDefinitionBulkCreateRequest,
+    AssessmentDefinitionBulkRemoveRequest,
+    AssessmentDefinitionBulkUpdateRequest,
     AssessmentDefinitionCreateRequest,
     AssessmentDefinitionUpdateRequest,
     BulkScoreEntryAssessmentSummary,
@@ -224,7 +228,9 @@ async def _get_class_subject(
 
 async def _get_term(db: AsyncSession, school_id: UUID, academic_term_id: UUID) -> AcademicTerm:
     stmt = select(AcademicTerm).where(
-        AcademicTerm.id == academic_term_id, AcademicTerm.school_id == school_id
+        AcademicTerm.id == academic_term_id,
+        AcademicTerm.school_id == school_id,
+        AcademicTerm.deleted_at.is_(None),
     )
     term = (await db.execute(stmt)).scalar_one_or_none()
     if not term:
@@ -286,6 +292,8 @@ async def list_definitions(
     *,
     academic_term_id: UUID | None,
     class_subject_id: UUID | None,
+    academic_level_id: UUID | None = None,
+    level_category: str | None = None,
     page: int,
     page_size: int,
 ) -> tuple[list[AssessmentDefinition], PageMeta]:
@@ -300,27 +308,36 @@ async def list_definitions(
     ):
         raise InsufficientPermissionException(permission_code="subjects:manage")
 
-    stmt: Select[tuple[AssessmentDefinition]] = select(AssessmentDefinition).where(
-        AssessmentDefinition.school_id == school_id
+    stmt: Select[tuple[AssessmentDefinition]] = (
+        select(AssessmentDefinition)
+        .join(ClassSubject, ClassSubject.id == AssessmentDefinition.class_subject_id)
+        .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+        .join(AcademicLevel, AcademicLevel.id == ClassGroup.academic_level_id)
+        .where(
+            AssessmentDefinition.school_id == school_id,
+            ClassSubject.deleted_at.is_(None),
+            ClassGroup.deleted_at.is_(None),
+            AcademicLevel.deleted_at.is_(None),
+        )
     )
     if academic_term_id is not None:
         stmt = stmt.where(AssessmentDefinition.academic_term_id == academic_term_id)
     if class_subject_id is not None:
         stmt = stmt.where(AssessmentDefinition.class_subject_id == class_subject_id)
+    if academic_level_id is not None:
+        stmt = stmt.where(ClassGroup.academic_level_id == academic_level_id)
+    if level_category is not None:
+        stmt = stmt.where(AcademicLevel.category == level_category)
 
     effective_scope = scope if scope.has_any_access else approve_scope
     if effective_scope.has_any_access:
         if not effective_scope.unscoped:
-            stmt = (
-                stmt.join(ClassSubject, ClassSubject.id == AssessmentDefinition.class_subject_id)
-                .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
-                .where(
-                    build_scope_filter(
-                        effective_scope,
-                        department_column=ClassGroup.department_id,
-                        academic_level_column=ClassGroup.academic_level_id,
-                        class_group_column=ClassGroup.id,
-                    )
+            stmt = stmt.where(
+                build_scope_filter(
+                    effective_scope,
+                    department_column=ClassGroup.department_id,
+                    academic_level_column=ClassGroup.academic_level_id,
+                    class_group_column=ClassGroup.id,
                 )
             )
     else:
@@ -333,7 +350,67 @@ async def list_definitions(
             TeacherAssignment.deleted_at.is_(None),
         )
         stmt = stmt.where(AssessmentDefinition.class_subject_id.in_(assigned_sub))
-    stmt = stmt.order_by(AssessmentDefinition.sequence_order.asc())
+
+    stmt = stmt.order_by(
+        AssessmentDefinition.sequence_order.asc(), AssessmentDefinition.created_at.asc()
+    )
+    if class_subject_id is None:
+        scoped_stmt = stmt.add_columns(
+            AcademicLevel.category,
+            AcademicLevel.name,
+            AcademicLevel.level_order,
+        )
+        rows = (await db.execute(scoped_stmt)).all()
+        by_code: dict[str, AssessmentDefinition] = {}
+        categories_by_code: dict[str, list[str]] = {}
+        levels_by_code: dict[str, list[tuple[int, str]]] = {}
+        for d, cat, lvl_name, lvl_seq in rows:
+            if d.code not in by_code:
+                by_code[d.code] = d
+                categories_by_code[d.code] = []
+                levels_by_code[d.code] = []
+            if cat and cat not in categories_by_code[d.code]:
+                categories_by_code[d.code].append(cat)
+            if lvl_name and (lvl_seq, lvl_name) not in levels_by_code[d.code]:
+                levels_by_code[d.code].append((lvl_seq, lvl_name))
+
+        category_labels = {
+            "PRIMARY": "Primary",
+            "JUNIOR_SECONDARY": "Junior Secondary",
+            "SENIOR_SECONDARY": "Senior Secondary",
+        }
+        unique_defs: list[AssessmentDefinition] = []
+        for code, d in by_code.items():
+            cats = categories_by_code[code]
+            lvls = [name for _, name in sorted(levels_by_code[code], key=lambda x: x[0])]
+            d.level_categories = cats  # type: ignore[attr-defined]
+            d.level_names = lvls  # type: ignore[attr-defined]
+            if len(cats) >= 3:
+                d.scope_label = "All categories"  # type: ignore[attr-defined]
+            elif len(cats) == 1:
+                cat_label = category_labels.get(cats[0], cats[0])
+                if len(lvls) == 1:
+                    d.scope_label = f"{cat_label} · {lvls[0]}"  # type: ignore[attr-defined]
+                elif len(lvls) <= 3:
+                    d.scope_label = f"{cat_label} ({', '.join(lvls)})"  # type: ignore[attr-defined]
+                else:
+                    d.scope_label = f"{cat_label} ({len(lvls)} levels)"  # type: ignore[attr-defined]
+            elif cats:
+                d.scope_label = ", ".join(  # type: ignore[attr-defined]
+                    category_labels.get(c, c) for c in cats
+                )
+            else:
+                d.scope_label = None  # type: ignore[attr-defined]
+            unique_defs.append(d)
+
+        total = len(unique_defs)
+        start = (page - 1) * page_size
+        end = start + page_size
+        total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 0
+        return unique_defs[start:end], PageMeta(
+            page=page, page_size=page_size, total=total, total_pages=total_pages
+        )
+
     return await paginate(db, stmt, page=page, page_size=page_size)
 
 
@@ -362,9 +439,20 @@ async def create_definition(
     current_user: User,
     audit: AuditContext,
 ) -> AssessmentDefinition:
-    await _get_term(db, school_id, req.academic_term_id)
+    term = await _get_term(db, school_id, req.academic_term_id)
+    if term.is_locked_for_scoring:
+        raise ValidationException(
+            "This term is locked for scoring, so assessment components cannot be added."
+        )
     class_subject = await _get_class_subject(db, school_id, req.class_subject_id)
     await _require_class_subject_scope(db, current_user, class_subject)
+    class_group = (
+        await db.execute(select(ClassGroup).where(ClassGroup.id == class_subject.class_group_id))
+    ).scalar_one()
+    if class_group.academic_session_id != term.academic_session_id:
+        raise ValidationException(
+            "The selected term does not belong to this class subject's academic session."
+        )
 
     definition = AssessmentDefinition(
         school_id=school_id,
@@ -416,6 +504,11 @@ async def update_definition(
     audit: AuditContext,
 ) -> AssessmentDefinition:
     definition = await _get_definition(db, school_id, definition_id)
+    term = await _get_term(db, school_id, definition.academic_term_id)
+    if term.is_locked_for_scoring:
+        raise ValidationException(
+            "This term is locked for scoring, so assessment components cannot be edited."
+        )
     class_subject = await _get_class_subject(db, school_id, definition.class_subject_id)
     await _require_class_subject_scope(db, current_user, class_subject)
 
@@ -456,6 +549,435 @@ async def update_definition(
     return definition
 
 
+async def delete_definition(
+    db: AsyncSession,
+    school_id: UUID,
+    definition_id: UUID,
+    current_user: User,
+    audit: AuditContext,
+) -> str:
+    definition = await _get_definition(db, school_id, definition_id)
+    term = await _get_term(db, school_id, definition.academic_term_id)
+    if term.is_locked_for_scoring:
+        raise ValidationException(
+            "This term is locked for scoring, so assessment components cannot be removed."
+        )
+    class_subject = await _get_class_subject(db, school_id, definition.class_subject_id)
+    await _require_class_subject_scope(db, current_user, class_subject)
+
+    score_count = await db.execute(
+        select(func.count()).where(AssessmentScore.assessment_definition_id == definition.id)
+    )
+    if score_count.scalar_one() > 0:
+        raise ConflictException(
+            message=(
+                f"{definition.name} already has recorded scores and cannot be removed. "
+                "You can adjust scores or change the structure in a new term."
+            ),
+            code="ASSESSMENT_DEFINITION_IN_USE",
+        )
+
+    removed_name = definition.name
+    removed_code = definition.code
+    await db.delete(definition)
+    await db.flush()
+    record_audit_log(
+        db,
+        audit,
+        action="ASSESSMENT_DEFINITION_DELETED",
+        resource_type="AssessmentDefinition",
+        resource_id=definition_id,
+        diff_payload={"code": removed_code, "name": removed_name},
+    )
+    await db.commit()
+    return f"{removed_name} has been removed."
+
+
+async def _resolve_target_class_subjects(
+    db: AsyncSession,
+    school_id: UUID,
+    current_user: User,
+    *,
+    session_id: UUID,
+    academic_level_ids: list[UUID],
+    level_category: str | None,
+    apply_to_all_levels: bool,
+    subject_id: UUID | None,
+) -> list[ClassSubject]:
+    if not apply_to_all_levels and not level_category and not academic_level_ids:
+        raise ValidationException(
+            "Please select a category, one or more class levels, or all levels."
+        )
+
+    scope = await get_permission_scope(db, current_user, "subjects:manage")
+    if not scope.has_any_access:
+        raise InsufficientPermissionException(permission_code="subjects:manage")
+
+    stmt = (
+        select(ClassSubject)
+        .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+        .join(AcademicLevel, AcademicLevel.id == ClassGroup.academic_level_id)
+        .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+        .where(
+            ClassSubject.school_id == school_id,
+            ClassSubject.deleted_at.is_(None),
+            ClassGroup.deleted_at.is_(None),
+            ClassGroup.academic_session_id == session_id,
+            AcademicLevel.deleted_at.is_(None),
+        )
+    )
+    if level_category:
+        stmt = stmt.where(AcademicLevel.category == level_category)
+    elif academic_level_ids:
+        stmt = stmt.where(ClassGroup.academic_level_id.in_(academic_level_ids))
+    if subject_id is not None:
+        stmt = stmt.where(SubjectOffering.subject_id == subject_id)
+    if not scope.unscoped:
+        stmt = stmt.where(
+            build_scope_filter(
+                scope,
+                department_column=ClassGroup.department_id,
+                academic_level_column=ClassGroup.academic_level_id,
+                class_group_column=ClassGroup.id,
+            )
+        )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def bulk_create_definitions(
+    db: AsyncSession,
+    school_id: UUID,
+    req: AssessmentDefinitionBulkCreateRequest,
+    current_user: User,
+    audit: AuditContext,
+) -> AssessmentDefinitionBulkActionResponse:
+    term = await _get_term(db, school_id, req.academic_term_id)
+    if term.is_locked_for_scoring:
+        raise ValidationException(
+            "This term is locked for scoring, so assessment components cannot be added."
+        )
+
+    targets = await _resolve_target_class_subjects(
+        db,
+        school_id,
+        current_user,
+        session_id=term.academic_session_id,
+        academic_level_ids=req.academic_level_ids,
+        level_category=req.level_category,
+        apply_to_all_levels=req.apply_to_all_levels,
+        subject_id=req.subject_id,
+    )
+    if not targets:
+        raise ValidationException(
+            "No matching class subjects were found for the selected class levels or category."
+        )
+
+    code = req.code.strip().upper()
+    target_ids = [cs.id for cs in targets]
+    existing_cs_ids = set(
+        (
+            await db.execute(
+                select(AssessmentDefinition.class_subject_id).where(
+                    AssessmentDefinition.school_id == school_id,
+                    AssessmentDefinition.academic_term_id == req.academic_term_id,
+                    AssessmentDefinition.class_subject_id.in_(target_ids),
+                    AssessmentDefinition.code == code,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    affected_count = 0
+    skipped_count = 0
+    for cs in targets:
+        if cs.id in existing_cs_ids:
+            skipped_count += 1
+            continue
+        db.add(
+            AssessmentDefinition(
+                school_id=school_id,
+                academic_term_id=req.academic_term_id,
+                class_subject_id=cs.id,
+                name=req.name.strip(),
+                code=code,
+                assessment_type=req.assessment_type.value,
+                max_score=req.max_score,
+                weight_percentage=req.weight_percentage,
+                sequence_order=req.sequence_order,
+            )
+        )
+        affected_count += 1
+
+    await db.flush()
+    record_audit_log(
+        db,
+        audit,
+        action="ASSESSMENT_DEFINITION_BULK_CREATED",
+        resource_type="AssessmentDefinition",
+        resource_id=req.academic_term_id,
+        diff_payload={
+            "code": code,
+            "name": req.name.strip(),
+            "affected_count": affected_count,
+            "skipped_count": skipped_count,
+        },
+    )
+    await _commit_or_conflict(
+        db,
+        message="Some assessment components could not be created. Please try again.",
+        code="ASSESSMENT_DEFINITION_CONFLICT",
+    )
+
+    if affected_count > 0:
+        message = (
+            f"Added {req.name.strip()} to {affected_count} class "
+            f"{'subject' if affected_count == 1 else 'subjects'}."
+        )
+        if skipped_count > 0:
+            message += f" {skipped_count} already had this component."
+    else:
+        message = f"All {skipped_count} matching class subjects already have {req.name.strip()}."
+
+    return AssessmentDefinitionBulkActionResponse(
+        affected_count=affected_count,
+        skipped_count=skipped_count,
+        message=message,
+    )
+
+
+async def bulk_remove_definitions(
+    db: AsyncSession,
+    school_id: UUID,
+    req: AssessmentDefinitionBulkRemoveRequest,
+    current_user: User,
+    audit: AuditContext,
+) -> AssessmentDefinitionBulkActionResponse:
+    term = await _get_term(db, school_id, req.academic_term_id)
+    if term.is_locked_for_scoring:
+        raise ValidationException(
+            "This term is locked for scoring, so assessment components cannot be removed."
+        )
+
+    targets = await _resolve_target_class_subjects(
+        db,
+        school_id,
+        current_user,
+        session_id=term.academic_session_id,
+        academic_level_ids=req.academic_level_ids,
+        level_category=req.level_category,
+        apply_to_all_levels=req.apply_to_all_levels,
+        subject_id=req.subject_id,
+    )
+    if not targets:
+        return AssessmentDefinitionBulkActionResponse(
+            affected_count=0,
+            skipped_count=0,
+            message="No matching class subjects were found for the selected scope.",
+        )
+
+    code = req.code.strip().upper()
+    target_ids = [cs.id for cs in targets]
+    defs = (
+        (
+            await db.execute(
+                select(AssessmentDefinition).where(
+                    AssessmentDefinition.school_id == school_id,
+                    AssessmentDefinition.academic_term_id == req.academic_term_id,
+                    AssessmentDefinition.class_subject_id.in_(target_ids),
+                    AssessmentDefinition.code == code,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not defs:
+        return AssessmentDefinitionBulkActionResponse(
+            affected_count=0,
+            skipped_count=0,
+            message="No matching assessment components were found to remove.",
+        )
+
+    def_ids = [d.id for d in defs]
+    in_use_def_ids = set(
+        (
+            await db.execute(
+                select(AssessmentScore.assessment_definition_id)
+                .where(AssessmentScore.assessment_definition_id.in_(def_ids))
+                .distinct()
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    affected_count = 0
+    skipped_count = 0
+    for d in defs:
+        if d.id in in_use_def_ids:
+            skipped_count += 1
+            continue
+        await db.delete(d)
+        affected_count += 1
+
+    await db.flush()
+    record_audit_log(
+        db,
+        audit,
+        action="ASSESSMENT_DEFINITION_BULK_DELETED",
+        resource_type="AssessmentDefinition",
+        resource_id=req.academic_term_id,
+        diff_payload={
+            "code": code,
+            "affected_count": affected_count,
+            "skipped_count": skipped_count,
+        },
+    )
+    await db.commit()
+
+    if affected_count > 0:
+        message = (
+            f"Removed {code} from {affected_count} class "
+            f"{'subject' if affected_count == 1 else 'subjects'}."
+        )
+        if skipped_count > 0:
+            message += f" {skipped_count} with recorded scores were kept."
+    else:
+        message = (
+            f"No components were removed because all {skipped_count} matching class subjects "
+            "already have recorded scores."
+        )
+
+    return AssessmentDefinitionBulkActionResponse(
+        affected_count=affected_count,
+        skipped_count=skipped_count,
+        message=message,
+    )
+
+
+async def bulk_update_definitions(
+    db: AsyncSession,
+    school_id: UUID,
+    req: AssessmentDefinitionBulkUpdateRequest,
+    current_user: User,
+    audit: AuditContext,
+) -> AssessmentDefinitionBulkActionResponse:
+    term = await _get_term(db, school_id, req.academic_term_id)
+    if term.is_locked_for_scoring:
+        raise ValidationException(
+            "This term is locked for scoring, so assessment components cannot be edited."
+        )
+
+    targets = await _resolve_target_class_subjects(
+        db,
+        school_id,
+        current_user,
+        session_id=term.academic_session_id,
+        academic_level_ids=req.academic_level_ids,
+        level_category=req.level_category,
+        apply_to_all_levels=req.apply_to_all_levels,
+        subject_id=None,
+    )
+    if not targets:
+        return AssessmentDefinitionBulkActionResponse(
+            affected_count=0,
+            skipped_count=0,
+            message="No matching class subjects were found for the selected scope.",
+        )
+
+    code = req.code.strip().upper()
+    target_ids = [cs.id for cs in targets]
+    defs = (
+        (
+            await db.execute(
+                select(AssessmentDefinition).where(
+                    AssessmentDefinition.school_id == school_id,
+                    AssessmentDefinition.academic_term_id == req.academic_term_id,
+                    AssessmentDefinition.class_subject_id.in_(target_ids),
+                    AssessmentDefinition.code == code,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not defs:
+        return AssessmentDefinitionBulkActionResponse(
+            affected_count=0,
+            skipped_count=0,
+            message="No matching assessment components were found to update.",
+        )
+
+    def_ids = [d.id for d in defs]
+    in_use_def_ids = set(
+        (
+            await db.execute(
+                select(AssessmentScore.assessment_definition_id)
+                .where(AssessmentScore.assessment_definition_id.in_(def_ids))
+                .distinct()
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    affected_count = 0
+    skipped_count = 0
+    for d in defs:
+        if d.id in in_use_def_ids:
+            skipped_count += 1
+            continue
+        if req.name is not None:
+            d.name = req.name.strip()
+        if req.max_score is not None:
+            d.max_score = req.max_score
+        if req.weight_percentage is not None:
+            d.weight_percentage = req.weight_percentage
+        if req.sequence_order is not None:
+            d.sequence_order = req.sequence_order
+        affected_count += 1
+
+    await db.flush()
+    record_audit_log(
+        db,
+        audit,
+        action="ASSESSMENT_DEFINITION_BULK_UPDATED",
+        resource_type="AssessmentDefinition",
+        resource_id=req.academic_term_id,
+        diff_payload={
+            "code": code,
+            "affected_count": affected_count,
+            "skipped_count": skipped_count,
+        },
+    )
+    await _commit_or_conflict(
+        db,
+        message="Some assessment components could not be updated. Please try again.",
+        code="ASSESSMENT_DEFINITION_CONFLICT",
+    )
+
+    if affected_count > 0:
+        message = (
+            f"Updated {code} across {affected_count} class "
+            f"{'subject' if affected_count == 1 else 'subjects'}."
+        )
+        if skipped_count > 0:
+            message += f" {skipped_count} with recorded scores were kept unchanged."
+    else:
+        message = (
+            f"No components were updated because all {skipped_count} matching class subjects "
+            "already have recorded scores."
+        )
+
+    return AssessmentDefinitionBulkActionResponse(
+        affected_count=affected_count,
+        skipped_count=skipped_count,
+        message=message,
+    )
+
+
 # --------------------------------------------------------------------------
 # Score Sheet (read + bulk entry)
 # --------------------------------------------------------------------------
@@ -492,6 +1014,8 @@ async def get_score_sheet(
         .where(
             StudentSubjectRegistration.class_subject_id == class_subject.id,
             StudentSubjectRegistration.is_active.is_(True),
+            StudentEnrollment.deleted_at.is_(None),
+            Student.deleted_at.is_(None),
         )
         .order_by(Student.last_name.asc(), Student.first_name.asc())
     )
@@ -520,6 +1044,9 @@ async def bulk_score_entry(
 ) -> BulkScoreEntryResponse:
     class_subject = await _get_class_subject(db, school_id, req.class_subject_id)
     definition = await _get_definition(db, school_id, req.assessment_definition_id)
+    term = await _get_term(db, school_id, definition.academic_term_id)
+    if term.is_locked_for_scoring:
+        raise ValidationException("This term is locked for scoring, so scores cannot be edited.")
     if definition.class_subject_id != class_subject.id:
         raise ValidationException(
             "This assessment component does not belong to the selected class subject."
@@ -535,6 +1062,11 @@ async def bulk_score_entry(
             "officer to unlock them if a correction is needed."
         )
 
+    deduped_scores: dict[UUID, Any] = {}
+    for item in req.scores:
+        deduped_scores[item.student_enrollment_id] = item
+    unique_scores = list(deduped_scores.values())
+
     registered_stmt = select(StudentSubjectRegistration.student_enrollment_id).where(
         StudentSubjectRegistration.class_subject_id == class_subject.id,
         StudentSubjectRegistration.is_active.is_(True),
@@ -543,7 +1075,7 @@ async def bulk_score_entry(
 
     errors: list[ScoreEntryError] = []
     updated_count = 0
-    for item in req.scores:
+    for item in unique_scores:
         if item.student_enrollment_id not in registered_ids:
             errors.append(
                 ScoreEntryError(
@@ -931,6 +1463,8 @@ async def list_score_sheets_overview(
                     TeacherAssignment.class_subject_id.in_(cs_ids),
                     TeacherAssignment.is_active.is_(True),
                     TeacherAssignment.deleted_at.is_(None),
+                    User.is_active.is_(True),
+                    User.deleted_at.is_(None),
                 )
             )
         ).all()
