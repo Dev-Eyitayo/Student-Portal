@@ -1,6 +1,10 @@
 # Olivet Frontend Pages, Design System & Figma Make Spec
 
-This document defines the visual design system, page-by-page information architecture, and batched **Figma Make** prompts for the Olivet Academic Records Management Platform.
+This document defines the visual design system, page-by-page information architecture, role-based access rules, and batched **Figma Make** prompts for the Olivet Academic Records Management Platform.
+
+- **Figma Design Reference:** [https://flint-mower-06389066.figma.site](https://flint-mower-06389066.figma.site)
+- **Roles & Permissions Matrix:** [personas-and-permissions.md](./personas-and-permissions.md)
+- **Ticket Assignments & Exact Endpoints:** [Olivet_Frontend_Tickets.xlsx](./Olivet_Frontend_Tickets.xlsx)
 
 It uses natural Nigerian school terminology (**Class Teacher**, **Class Arm**, **Subject Teacher**, **CA & Exam**, **Broadsheet**, **Admission Number**, **Parent / Guardian**, **Report Card**) and maps every screen to live backend endpoints in [Olivet_Frontend_Tickets.xlsx](./Olivet_Frontend_Tickets.xlsx).
 

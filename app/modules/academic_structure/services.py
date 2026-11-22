@@ -50,7 +50,7 @@ from app.modules.common.pagination import paginate
 from app.modules.common.schemas import PageMeta
 from app.modules.identity.models import User
 from app.modules.students.models import StudentEnrollment
-from app.modules.subjects.models import Subject, SubjectOffering
+from app.modules.subjects.models import ClassSubject, Subject, SubjectOffering
 from app.modules.subjects.services import (
     backfill_compulsory_registrations_for_class_group,
     get_or_create_class_subject_with_status,
@@ -1735,22 +1735,70 @@ async def _provision_template_subjects(
     for group in class_groups:
         groups_by_level.setdefault(group.academic_level_id, []).append(group)
 
-    for item in subject_items:
-        subject, created = await _get_or_create_core_subject(db, school_id, item)
-        counts["subjects_created" if created else "subjects_reused"] += 1
+    existing_subjects = (
+        (
+            await db.execute(
+                select(Subject).where(
+                    Subject.school_id == school_id,
+                    Subject.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    subjects_by_code = {subj.code.upper(): subj for subj in existing_subjects}
+    subjects_by_name = {subj.name.lower(): subj for subj in existing_subjects}
 
+    new_subjects: list[Subject] = []
+    resolved_subjects: list[Subject] = []
+    for item in subject_items:
+        code_upper = str(item["code"]).strip().upper()
+        name_lower = str(item["name"]).strip().lower()
+        existing = subjects_by_code.get(code_upper) or subjects_by_name.get(name_lower)
+        if existing is not None:
+            counts["subjects_reused"] += 1
+            resolved_subjects.append(existing)
+        else:
+            created_subj = Subject(
+                school_id=school_id,
+                name=str(item["name"]).strip(),
+                code=code_upper,
+                is_elective=bool(item.get("is_elective", False)),
+                is_trade_subject=bool(item.get("is_trade_subject", False)),
+            )
+            db.add(created_subj)
+            new_subjects.append(created_subj)
+            subjects_by_code[code_upper] = created_subj
+            subjects_by_name[name_lower] = created_subj
+            counts["subjects_created"] += 1
+            resolved_subjects.append(created_subj)
+    if new_subjects:
+        await db.flush()
+
+    existing_offerings = (
+        (
+            await db.execute(
+                select(SubjectOffering).where(
+                    SubjectOffering.school_id == school_id,
+                    SubjectOffering.academic_session_id == session_id,
+                    SubjectOffering.department_id.is_(None),
+                    SubjectOffering.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    offerings_by_key = {(o.subject_id, o.academic_level_id): o for o in existing_offerings}
+
+    new_offerings: list[SubjectOffering] = []
+    target_offerings: list[tuple[SubjectOffering, AcademicLevel]] = []
+    for subject in resolved_subjects:
         for level_item in preview["levels"]:
             level = levels_by_code[level_item["code"]]
-            offering_stmt = select(SubjectOffering).where(
-                SubjectOffering.school_id == school_id,
-                SubjectOffering.subject_id == subject.id,
-                SubjectOffering.academic_session_id == session_id,
-                SubjectOffering.academic_level_id == level.id,
-                SubjectOffering.department_id.is_(None),
-                SubjectOffering.deleted_at.is_(None),
-            )
-            offering = (await db.execute(offering_stmt)).scalar_one_or_none()
-            offering_created = False
+            key = (subject.id, level.id)
+            offering = offerings_by_key.get(key)
             if offering is None:
                 offering = SubjectOffering(
                     school_id=school_id,
@@ -1760,16 +1808,38 @@ async def _provision_template_subjects(
                     department_id=None,
                 )
                 db.add(offering)
-                await db.flush()
-                offering_created = True
-            counts[
-                "subject_offerings_created" if offering_created else "subject_offerings_reused"
-            ] += 1
+                new_offerings.append(offering)
+                offerings_by_key[key] = offering
+                counts["subject_offerings_created"] += 1
+            else:
+                counts["subject_offerings_reused"] += 1
+            target_offerings.append((offering, level))
+    if new_offerings:
+        await db.flush()
 
-            for class_group in groups_by_level.get(level.id, []):
+    class_group_ids = [group.id for group in class_groups]
+    existing_class_subjects: set[tuple[UUID, UUID]] = set()
+    if class_group_ids:
+        existing_cs_rows = (
+            await db.execute(
+                select(ClassSubject.subject_offering_id, ClassSubject.class_group_id).where(
+                    ClassSubject.school_id == school_id,
+                    ClassSubject.class_group_id.in_(class_group_ids),
+                    ClassSubject.deleted_at.is_(None),
+                )
+            )
+        ).all()
+        existing_class_subjects = {(oid, cgid) for oid, cgid in existing_cs_rows}
+
+    for offering, level in target_offerings:
+        for class_group in groups_by_level.get(level.id, []):
+            if (offering.id, class_group.id) in existing_class_subjects:
+                counts["class_subjects_reused"] += 1
+            else:
                 _, cs_created = await get_or_create_class_subject_with_status(
                     db, school_id, offering, class_group
                 )
+                existing_class_subjects.add((offering.id, class_group.id))
                 counts["class_subjects_created" if cs_created else "class_subjects_reused"] += 1
 
     for class_group in class_groups:
@@ -1835,14 +1905,19 @@ async def apply_structure_template(
         .all()
     )
     levels_by_code = {level.code: level for level in level_rows}
+    used_level_orders = {level.level_order for level in level_rows}
     levels_created = 0
     for item in preview["levels"]:
         if item["code"] not in levels_by_code:
+            desired_order = item["level_order"]
+            if desired_order in used_level_orders:
+                desired_order = max(used_level_orders, default=0) + 1
+            used_level_orders.add(desired_order)
             level = AcademicLevel(
                 school_id=school_id,
                 name=item["name"],
                 code=item["code"],
-                level_order=item["level_order"],
+                level_order=desired_order,
                 category=item["category"],
             )
             db.add(level)

@@ -61,6 +61,7 @@ async def list_audit_logs(
     db: AsyncSession,
     school_id: UUID,
     *,
+    q: str | None = None,
     action: str | None = None,
     resource_type: str | None = None,
     page: int = 1,
@@ -71,7 +72,24 @@ async def list_audit_logs(
         .outerjoin(User, User.id == AuditLog.actor_id)
         .where(AuditLog.school_id == school_id)
     )
-    count_stmt = select(func.count()).select_from(AuditLog).where(AuditLog.school_id == school_id)
+    count_stmt = (
+        select(func.count())
+        .select_from(AuditLog)
+        .outerjoin(User, User.id == AuditLog.actor_id)
+        .where(AuditLog.school_id == school_id)
+    )
+
+    if q and q.strip():
+        pattern = f"%{q.strip()}%"
+        search_filter = (
+            User.first_name.ilike(pattern)
+            | User.last_name.ilike(pattern)
+            | User.email.ilike(pattern)
+            | AuditLog.action.ilike(pattern)
+            | AuditLog.resource_type.ilike(pattern)
+        )
+        stmt = stmt.where(search_filter)
+        count_stmt = count_stmt.where(search_filter)
 
     if action:
         stmt = stmt.where(AuditLog.action == action.strip())

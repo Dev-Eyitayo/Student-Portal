@@ -17,6 +17,7 @@ router = APIRouter(prefix="/audit", tags=["Audit Logs"])
     dependencies=[Depends(require_permission("audit:view"))],
 )
 async def list_audit_logs(
+    q: str | None = Query(None, max_length=128),
     action: str | None = Query(None, max_length=64),
     resource_type: str | None = Query(None, max_length=64),
     page: int = Query(1, ge=1),
@@ -27,6 +28,7 @@ async def list_audit_logs(
     items, meta = await services.list_audit_logs(
         db,
         require_school_id(current_user),
+        q=q,
         action=action,
         resource_type=resource_type,
         page=page,

@@ -13,12 +13,15 @@ The backend is the source of truth. When this handoff and the code disagree, ins
 
 ## Document map
 
+- **Figma Design Reference:** [https://flint-mower-06389066.figma.site](https://flint-mower-06389066.figma.site)
+
 | Document | Use it for |
 | --- | --- |
+| [pages-and-design-spec.md](./pages-and-design-spec.md) | Visual design system, page-by-page information architecture, role-based UI behavior, and Figma Make spec. |
 | [platform-overview.md](./platform-overview.md) | Product scope, domain model, tenancy, architecture, API conventions, and live versus planned capabilities. |
 | [personas-and-permissions.md](./personas-and-permissions.md) | User personas, system roles, permission codes, scoped grants, and UI authorization rules. |
-| [user-journeys.md](./user-journeys.md) | End-to-end flows for onboarding, the M8 guided setup wizard, structure setup, students, subjects, assessments, computation, publication, and planned verification.
- |
+| [user-journeys.md](./user-journeys.md) | End-to-end flows for onboarding, the M8 guided setup wizard, structure setup, students, subjects, assessments, computation, publication, and planned verification. |
+| [Olivet_Frontend_Tickets.xlsx](./Olivet_Frontend_Tickets.xlsx) | Ticket backlog, assignees, status, exact live backend endpoints, and acceptance criteria. |
 
 ## Status labels
 
