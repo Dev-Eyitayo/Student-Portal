@@ -342,6 +342,11 @@ class SchoolConfigurationUpdateRequest(BaseModel):
     timezone: str | None = Field(None, min_length=3, max_length=64)
     currency: str | None = Field(None, min_length=3, max_length=3)
     report_card_template_id: str | None = Field(None, min_length=2, max_length=64)
+    show_department_position_on_report_card: bool | None = None
+    show_level_position_on_report_card: bool | None = None
+    show_subject_position_on_report_card: bool | None = None
+    setup_wizard_completed: bool | None = None
+    setup_wizard_dismissed: bool | None = None
 
 
 class SchoolConfigurationResponse(BaseModel):
@@ -356,6 +361,11 @@ class SchoolConfigurationResponse(BaseModel):
     timezone: str
     currency: str
     report_card_template_id: str
+    show_department_position_on_report_card: bool = False
+    show_level_position_on_report_card: bool = False
+    show_subject_position_on_report_card: bool = False
+    setup_wizard_completed: bool = False
+    setup_wizard_dismissed: bool = False
     created_at: datetime
     updated_at: datetime
 

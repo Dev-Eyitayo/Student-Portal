@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.modules.common.schemas import PageMeta
+
 
 class ReportSchoolInfo(BaseModel):
     name: str
@@ -40,6 +42,8 @@ class ReportSummaryInfo(BaseModel):
     percentage: Decimal
     class_position: int | None = None
     total_students_in_arm: int
+    level_position: int | None = None
+    total_students_in_level: int | None = None
     class_teacher_comment: str | None = None
     principal_comment: str | None = None
     annual_cumulative_score: Decimal | None = None
@@ -98,6 +102,17 @@ class ReportCardRemarksResponse(BaseModel):
     principal_comment: str | None
 
 
+class BulkReportCardRemarksRequest(BaseModel):
+    report_card_ids: list[UUID] = Field(..., min_length=1)
+    teacher_comment: str | None = Field(None, max_length=1000)
+    principal_comment: str | None = Field(None, max_length=1000)
+
+
+class BulkReportCardRemarksResponse(BaseModel):
+    updated_count: int
+    message: str
+
+
 class NotifyResultLinkItem(BaseModel):
     student_enrollment_id: UUID
     token: str = Field(..., min_length=1)
@@ -120,8 +135,13 @@ class ReportCardListItem(BaseModel):
     student_id: UUID
     admission_number: str
     student_name: str
+    class_group_name: str | None = None
+    overall_percentage: str | None = None
     cumulative_average_percentage: str | None = None
     class_position: int | None = None
+    total_students_in_arm: int | None = None
+    level_position: int | None = None
+    total_students_in_level: int | None = None
     promotion_decision: str | None = None
     teacher_comment: str | None = None
     principal_comment: str | None = None
@@ -138,3 +158,4 @@ class ReportCardListSummary(BaseModel):
 class ReportCardListResponse(BaseModel):
     items: list[ReportCardListItem]
     summary: ReportCardListSummary
+    meta: PageMeta | None = None

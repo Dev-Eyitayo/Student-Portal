@@ -34,12 +34,13 @@ async def test_onboarding_templates_are_public():
         secondary["configuration_defaults"]["assessment_weight_schema"]["EXAM"]["weight_percentage"]
         == 70
     )
-    assert secondary["structure_template"]["class_group_count"] == 120
+    assert secondary["structure_template"]["arms"] == ["A", "B", "C"]
+    assert secondary["structure_template"]["class_group_count"] == 36
 
     assert primary["school_type"] == "PRIMARY"
     assert primary["configuration_defaults"]["report_card_template_id"] == "default_primary_v1"
     assert primary["configuration_defaults"]["grading_scale_schema"]["grades"][0]["grade"] == "A"
-    assert primary["structure_template"]["class_group_count"] == 24
+    assert primary["structure_template"]["class_group_count"] == 18
     assert all(item["custom_domain"]["status"] == "PLANNED_POST_PILOT" for item in body["data"])
 
 
@@ -62,9 +63,9 @@ def test_primary_structure_template_preview_is_deterministic():
     assert len(preview["levels"]) == 6
     assert preview["levels"][0]["code"] == "BASIC1"
     assert len(preview["departments"]) == 0
-    assert preview["arms"] == ["A", "B", "C", "D"]
-    assert len(preview["subjects"]) == 10
-    assert preview["class_group_count"] == 24
+    assert preview["arms"] == ["A", "B", "C"]
+    assert len(preview["subjects"]) == 13
+    assert preview["class_group_count"] == 18
     assert all(item["department_code"] is None for item in preview["class_groups"])
 
 
@@ -324,19 +325,19 @@ async def test_apply_primary_template_creates_core_subjects_idempotently():
         assert data["template_type"] == "PRIMARY"
         assert data["levels_created"] == 6
         assert data["departments_created"] == 0
-        assert data["arms_created"] == 4
-        assert data["class_groups_created"] == 24
-        assert data["subjects_created"] == 10
-        assert data["subject_offerings_created"] == 60
-        assert data["class_subjects_created"] == 240
+        assert data["arms_created"] == 3
+        assert data["class_groups_created"] == 18
+        assert data["subjects_created"] == 13
+        assert data["subject_offerings_created"] == 78
+        assert data["class_subjects_created"] == 234
 
         subjects_resp = await client.get(
             "/api/v1/subjects", params={"page_size": 100}, headers=headers
         )
         assert subjects_resp.status_code == 200, subjects_resp.text
         subjects = subjects_resp.json()["data"]["items"]
-        assert len(subjects) == 10
-        assert all(subject["is_elective"] is False for subject in subjects)
+        assert len(subjects) == 13
+        assert any(subject["is_elective"] is False for subject in subjects)
         assert all(subject["is_trade_subject"] is False for subject in subjects)
 
         reapply_resp = await client.post(
@@ -452,9 +453,9 @@ async def test_session_rollover_is_idempotent_and_easy_to_read():
         )
         assert rollover_resp.status_code == 200, rollover_resp.text
         rdata = rollover_resp.json()["data"]
-        assert rdata["class_groups_created"] == 24
-        assert rdata["subject_offerings_created"] == 60
-        assert rdata["class_subjects_created"] == 240
+        assert rdata["class_groups_created"] == 18
+        assert rdata["subject_offerings_created"] == 78
+        assert rdata["class_subjects_created"] == 234
         assert f"2026/2027 {suffix} is now set up from 2025/2026 {suffix}" in rdata["message"]
 
         rerun_resp = await client.post(
@@ -465,11 +466,11 @@ async def test_session_rollover_is_idempotent_and_easy_to_read():
         assert rerun_resp.status_code == 200, rerun_resp.text
         rerun = rerun_resp.json()["data"]
         assert rerun["class_groups_created"] == 0
-        assert rerun["class_groups_reused"] == 24
+        assert rerun["class_groups_reused"] == 18
         assert rerun["subject_offerings_created"] == 0
-        assert rerun["subject_offerings_reused"] == 60
+        assert rerun["subject_offerings_reused"] == 78
         assert rerun["class_subjects_created"] == 0
-        assert rerun["class_subjects_reused"] == 240
+        assert rerun["class_subjects_reused"] == 234
         assert "already has all matching classes and subjects" in rerun["message"]
 
         other_suffix = uuid.uuid4().hex[:6]
@@ -504,3 +505,160 @@ async def test_session_rollover_is_idempotent_and_easy_to_read():
             headers=other_headers,
         )
         assert cross_tenant_resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_incremental_arms_selected_subjects_and_setup_wizard_flags():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        suffix = uuid.uuid4().hex[:6]
+        payload = {
+            "name": f"Incremental Arms High {suffix}",
+            "slug": f"incremental-arms-{suffix}",
+            "official_code": f"IAH-{suffix.upper()}",
+            "state": "Oyo State",
+            "city": "Oyo",
+            "address": "10 Unity Road, Oyo",
+            "country_code": "NG",
+            "admin_email": f"admin.{suffix}@incremental-test.edu.ng",
+            "admin_first_name": "Bisi",
+            "admin_last_name": "Ogunleye",
+            "admin_password": "IncrementalSecurePassword123!",
+            "school_type": "SECONDARY",
+        }
+        register_resp = await client.post("/api/v1/identity/schools", json=payload)
+        assert register_resp.status_code == 201, register_resp.text
+        school_id = register_resp.json()["data"]["id"]
+
+        login_resp = await client.post(
+            "/api/v1/identity/login",
+            json={"email": payload["admin_email"], "password": payload["admin_password"]},
+        )
+        assert login_resp.status_code == 200, login_resp.text
+        headers = {"Authorization": f"Bearer {login_resp.json()['data']['access_token']}"}
+
+        setup_resp = await client.get(
+            f"/api/v1/identity/schools/{school_id}/setup", headers=headers
+        )
+        assert setup_resp.status_code == 200, setup_resp.text
+        config = setup_resp.json()["data"]["configuration"]
+        assert config["setup_wizard_completed"] is False
+        assert config["setup_wizard_dismissed"] is False
+
+        apply_resp = await client.post(
+            "/api/v1/structure/templates/apply",
+            json={
+                "template_id": "nigeria_senior_secondary",
+                "session_name": f"2025/2026 {suffix}",
+                "session_start_date": "2025-09-08",
+                "session_end_date": "2026-07-24",
+                "include_class_groups": True,
+                "arms_per_level": 2,
+                "department_arm_counts": {"SCI": 2, "ART": 1, "COMM": 1},
+                "selected_subject_codes": ["ENG", "MTH", "PHY", "CHM", "LIT", "ACC"],
+            },
+            headers=headers,
+        )
+        assert apply_resp.status_code == 201, apply_resp.text
+        adata = apply_resp.json()["data"]
+        assert adata["arms_created"] == 2
+        assert adata["class_groups_created"] == 12
+        assert adata["subjects_created"] == 6
+
+        arms_resp = await client.get("/api/v1/structure/arms", headers=headers)
+        assert arms_resp.status_code == 200, arms_resp.text
+        arm_letters = sorted(item["name"] for item in arms_resp.json()["data"]["items"])
+        assert arm_letters == ["A", "B"]
+
+        dismiss_resp = await client.patch(
+            f"/api/v1/identity/schools/{school_id}/configuration",
+            json={"setup_wizard_dismissed": True},
+            headers=headers,
+        )
+        assert dismiss_resp.status_code == 200, dismiss_resp.text
+        assert dismiss_resp.json()["data"]["setup_wizard_dismissed"] is True
+        assert dismiss_resp.json()["data"]["setup_wizard_completed"] is False
+
+        complete_resp = await client.patch(
+            f"/api/v1/identity/schools/{school_id}/configuration",
+            json={"setup_wizard_completed": True, "setup_wizard_dismissed": False},
+            headers=headers,
+        )
+        assert complete_resp.status_code == 200, complete_resp.text
+        assert complete_resp.json()["data"]["setup_wizard_completed"] is True
+        assert complete_resp.json()["data"]["setup_wizard_dismissed"] is False
+
+        locked_apply_resp = await client.post(
+            "/api/v1/structure/templates/apply",
+            json={
+                "template_id": "nigeria_senior_secondary",
+                "session_name": f"2026/2027 {suffix}",
+                "session_start_date": "2026-09-07",
+                "session_end_date": "2027-07-23",
+                "include_class_groups": True,
+            },
+            headers=headers,
+        )
+        assert locked_apply_resp.status_code == 409, locked_apply_resp.text
+        assert locked_apply_resp.json()["error"]["code"] == "SETUP_WIZARD_ALREADY_COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_mixed_senior_secondary_without_departments():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        suffix = uuid.uuid4().hex[:6]
+        payload = {
+            "name": f"Mixed Senior High {suffix}",
+            "slug": f"mixed-senior-{suffix}",
+            "official_code": f"MSH-{suffix.upper()}",
+            "state": "Oyo State",
+            "city": "Oyo",
+            "address": "15 Mixed Class Way, Oyo",
+            "country_code": "NG",
+            "admin_email": f"admin.{suffix}@mixed-senior-test.edu.ng",
+            "admin_first_name": "Kemi",
+            "admin_last_name": "Balogun",
+            "admin_password": "MixedSeniorSecurePassword123!",
+            "school_type": "SECONDARY",
+        }
+        register_resp = await client.post("/api/v1/identity/schools", json=payload)
+        assert register_resp.status_code == 201, register_resp.text
+
+        login_resp = await client.post(
+            "/api/v1/identity/login",
+            json={"email": payload["admin_email"], "password": payload["admin_password"]},
+        )
+        assert login_resp.status_code == 200, login_resp.text
+        headers = {"Authorization": f"Bearer {login_resp.json()['data']['access_token']}"}
+
+        apply_resp = await client.post(
+            "/api/v1/structure/templates/apply",
+            json={
+                "template_id": "nigeria_senior_secondary",
+                "session_name": f"2025/2026 {suffix}",
+                "session_start_date": "2025-09-08",
+                "session_end_date": "2026-07-24",
+                "include_class_groups": True,
+                "separate_senior_departments": False,
+                "arms_per_level": 1,
+                "level_arm_counts": {"SS1": 2, "SS2": 1, "SS3": 1},
+                "selected_subject_codes": ["ENG", "PHY", "LIT"],
+            },
+            headers=headers,
+        )
+        assert apply_resp.status_code == 201, apply_resp.text
+        adata = apply_resp.json()["data"]
+        assert adata["departments_created"] == 0
+        assert adata["arms_created"] == 2
+        assert adata["class_groups_created"] == 4
+        assert adata["subjects_created"] == 3
+
+        subjects_resp = await client.get(
+            "/api/v1/subjects", params={"page_size": 20}, headers=headers
+        )
+        assert subjects_resp.status_code == 200, subjects_resp.text
+        by_code = {s["code"]: s for s in subjects_resp.json()["data"]["items"]}
+        assert by_code["ENG"]["is_elective"] is False
+        assert by_code["PHY"]["is_elective"] is True
+        assert by_code["LIT"]["is_elective"] is True

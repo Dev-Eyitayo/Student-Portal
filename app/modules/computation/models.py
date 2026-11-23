@@ -94,6 +94,8 @@ class TermReportCard(Base, TenantMixin, TimestampMixin):
     overall_percentage: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
     class_position: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     total_students_in_arm: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    level_position: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    total_students_in_level: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     times_school_opened: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)
     times_present: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)
     times_absent: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)
@@ -110,6 +112,7 @@ class TermReportCard(Base, TenantMixin, TimestampMixin):
         Numeric(5, 2), nullable=True
     )
     cumulative_class_position: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    cumulative_level_position: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     promotion_decision: Mapped[str | None] = mapped_column(
         String(32), nullable=True
     )  # 'PROMOTED', 'REPEATING', 'PROMOTED_ON_TRIAL', 'WITHDRAWN'

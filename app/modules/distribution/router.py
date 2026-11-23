@@ -15,6 +15,8 @@ from app.core.permissions import require_permission
 from app.modules.common.schemas import SuccessResponse
 from app.modules.distribution import services
 from app.modules.distribution.schemas import (
+    BulkReportCardRemarksRequest,
+    BulkReportCardRemarksResponse,
     NotifyTermResultsRequest,
     NotifyTermResultsResponse,
     QrVerifyResponse,
@@ -73,8 +75,12 @@ async def verify_qr(payload: str = Query(...)):
 )
 async def list_report_cards(
     academic_term_id: UUID = Query(...),
-    class_group_id: UUID = Query(...),
+    class_group_id: UUID | None = Query(None),
+    academic_level_id: UUID | None = Query(None),
+    department_id: UUID | None = Query(None),
     promotion_decision: str | None = Query(None, max_length=32),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
@@ -84,9 +90,33 @@ async def list_report_cards(
         academic_term_id,
         class_group_id,
         current_user,
+        academic_level_id=academic_level_id,
+        department_id=department_id,
         promotion_decision=promotion_decision,
+        page=page,
+        page_size=page_size,
     )
     return SuccessResponse[ReportCardListResponse](data=result)
+
+
+@publication_distribution_router.post(
+    "/report-cards/bulk-remarks",
+    response_model=SuccessResponse[BulkReportCardRemarksResponse],
+)
+async def bulk_update_report_card_remarks(
+    req: BulkReportCardRemarksRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    result = await services.bulk_update_report_card_remarks(
+        db,
+        require_school_id(current_user),
+        req,
+        current_user,
+        build_audit_context(request, current_user),
+    )
+    return SuccessResponse[BulkReportCardRemarksResponse](data=result)
 
 
 @publication_distribution_router.patch(

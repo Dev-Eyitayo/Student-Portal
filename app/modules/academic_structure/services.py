@@ -1709,6 +1709,10 @@ async def _provision_template_subjects(
     session_id: UUID,
     preview: dict[str, Any],
     levels_by_code: dict[str, AcademicLevel],
+    *,
+    departments_by_code: dict[str, Department] | None = None,
+    selected_subject_codes: list[str] | None = None,
+    separate_senior_departments: bool = True,
 ) -> dict[str, int]:
     subject_items = preview.get("subjects") or []
     counts = {
@@ -1720,6 +1724,11 @@ async def _provision_template_subjects(
         "class_subjects_reused": 0,
         "subject_registrations_created": 0,
     }
+    if selected_subject_codes is not None:
+        allowed_codes = {code.strip().upper() for code in selected_subject_codes if code.strip()}
+        subject_items = [
+            item for item in subject_items if str(item["code"]).strip().upper() in allowed_codes
+        ]
     if not subject_items:
         return counts
 
@@ -1756,20 +1765,25 @@ async def _provision_template_subjects(
     subjects_by_name = {subj.name.lower(): subj for subj in existing_subjects}
 
     new_subjects: list[Subject] = []
-    resolved_subjects: list[Subject] = []
+    resolved_items: list[tuple[Subject, dict[str, Any]]] = []
     for item in subject_items:
         code_upper = str(item["code"]).strip().upper()
         name_lower = str(item["name"]).strip().lower()
         existing = subjects_by_code.get(code_upper) or subjects_by_name.get(name_lower)
         if existing is not None:
             counts["subjects_reused"] += 1
-            resolved_subjects.append(existing)
+            resolved_items.append((existing, item))
         else:
+            dept_codes = {str(c).strip().upper() for c in (item.get("department_codes") or [])}
+            is_stream_specific = bool(dept_codes) and dept_codes != {"SCI", "ART", "COMM"}
             created_subj = Subject(
                 school_id=school_id,
                 name=str(item["name"]).strip(),
                 code=code_upper,
-                is_elective=bool(item.get("is_elective", False)),
+                is_elective=bool(
+                    item.get("is_elective", False)
+                    or (not separate_senior_departments and is_stream_specific)
+                ),
                 is_trade_subject=bool(item.get("is_trade_subject", False)),
             )
             db.add(created_subj)
@@ -1777,7 +1791,7 @@ async def _provision_template_subjects(
             subjects_by_code[code_upper] = created_subj
             subjects_by_name[name_lower] = created_subj
             counts["subjects_created"] += 1
-            resolved_subjects.append(created_subj)
+            resolved_items.append((created_subj, item))
     if new_subjects:
         await db.flush()
 
@@ -1787,7 +1801,6 @@ async def _provision_template_subjects(
                 select(SubjectOffering).where(
                     SubjectOffering.school_id == school_id,
                     SubjectOffering.academic_session_id == session_id,
-                    SubjectOffering.department_id.is_(None),
                     SubjectOffering.deleted_at.is_(None),
                 )
             )
@@ -1795,30 +1808,50 @@ async def _provision_template_subjects(
         .scalars()
         .all()
     )
-    offerings_by_key = {(o.subject_id, o.academic_level_id): o for o in existing_offerings}
+    offerings_by_key = {
+        (o.subject_id, o.academic_level_id, o.department_id): o for o in existing_offerings
+    }
 
+    dept_lookup = {k.upper(): v for k, v in (departments_by_code or {}).items()}
     new_offerings: list[SubjectOffering] = []
-    target_offerings: list[tuple[SubjectOffering, AcademicLevel]] = []
-    for subject in resolved_subjects:
+    target_offerings: list[tuple[SubjectOffering, AcademicLevel, UUID | None]] = []
+
+    for subject, item in resolved_items:
+        item_categories = set(item.get("categories") or [])
+        item_dept_codes = [str(c).strip().upper() for c in (item.get("department_codes") or [])]
         for level_item in preview["levels"]:
+            if item_categories and level_item.get("category") not in item_categories:
+                continue
             level = levels_by_code[level_item["code"]]
-            key = (subject.id, level.id)
-            offering = offerings_by_key.get(key)
-            if offering is None:
-                offering = SubjectOffering(
-                    school_id=school_id,
-                    subject_id=subject.id,
-                    academic_session_id=session_id,
-                    academic_level_id=level.id,
-                    department_id=None,
-                )
-                db.add(offering)
-                new_offerings.append(offering)
-                offerings_by_key[key] = offering
-                counts["subject_offerings_created"] += 1
+            is_senior_level = bool(
+                level_item.get("requires_department")
+                or level_item.get("category") == "SENIOR_SECONDARY"
+            )
+            if separate_senior_departments and is_senior_level and item_dept_codes:
+                target_dept_ids: list[UUID | None] = [
+                    dept_lookup[dc].id for dc in item_dept_codes if dc in dept_lookup
+                ]
             else:
-                counts["subject_offerings_reused"] += 1
-            target_offerings.append((offering, level))
+                target_dept_ids = [None]
+
+            for dept_id in target_dept_ids:
+                key = (subject.id, level.id, dept_id)
+                offering = offerings_by_key.get(key)
+                if offering is None:
+                    offering = SubjectOffering(
+                        school_id=school_id,
+                        subject_id=subject.id,
+                        academic_session_id=session_id,
+                        academic_level_id=level.id,
+                        department_id=dept_id,
+                    )
+                    db.add(offering)
+                    new_offerings.append(offering)
+                    offerings_by_key[key] = offering
+                    counts["subject_offerings_created"] += 1
+                else:
+                    counts["subject_offerings_reused"] += 1
+                target_offerings.append((offering, level, dept_id))
     if new_offerings:
         await db.flush()
 
@@ -1836,8 +1869,10 @@ async def _provision_template_subjects(
         ).all()
         existing_class_subjects = {(oid, cgid) for oid, cgid in existing_cs_rows}
 
-    for offering, level in target_offerings:
+    for offering, level, dept_id in target_offerings:
         for class_group in groups_by_level.get(level.id, []):
+            if dept_id is not None and class_group.department_id != dept_id:
+                continue
             if (offering.id, class_group.id) in existing_class_subjects:
                 counts["class_subjects_reused"] += 1
             else:
@@ -1861,8 +1896,34 @@ async def apply_structure_template(
     req: StructureTemplateApplyRequest,
     audit: AuditContext,
 ) -> StructureTemplateApplyResponse:
+    from app.modules.identity.models import SchoolConfiguration
+
+    config = (
+        await db.execute(
+            select(SchoolConfiguration).where(
+                SchoolConfiguration.school_id == school_id,
+                SchoolConfiguration.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if config is not None and config.setup_wizard_completed:
+        raise ConflictException(
+            message=(
+                "Your school's initial setup is already complete. To avoid duplicating classes, "
+                "arms, or subjects, please manage changes directly in Classes & Terms and Subjects."
+            ),
+            code="SETUP_WIZARD_ALREADY_COMPLETED",
+        )
+
     template_id = _resolve_structure_template_id(req)
-    preview = get_structure_template_preview(template_id)
+    preview = get_structure_template_preview(
+        template_id,
+        arms_per_level=req.arms_per_level,
+        department_arm_counts=req.department_arm_counts,
+        level_arm_counts=req.level_arm_counts,
+        level_department_arm_counts=req.level_department_arm_counts,
+        separate_senior_departments=req.separate_senior_departments,
+    )
     if preview is None:
         raise ValidationException(
             "We couldn't find that structure template. Please refresh the setup page and choose one of the available templates."
@@ -2027,7 +2088,14 @@ async def apply_structure_template(
 
     await db.flush()
     subject_counts = await _provision_template_subjects(
-        db, school_id, session.id, preview, levels_by_code
+        db,
+        school_id,
+        session.id,
+        preview,
+        levels_by_code,
+        departments_by_code=departments_by_code,
+        selected_subject_codes=req.selected_subject_codes,
+        separate_senior_departments=req.separate_senior_departments,
     )
     record_audit_log(
         db,

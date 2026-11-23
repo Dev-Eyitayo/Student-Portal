@@ -12,9 +12,15 @@ from app.core.exceptions import (
     ValidationException,
 )
 from app.core.permissions import user_has_permission
-from app.modules.academic_structure.models import AcademicTerm, ClassGroup
+from app.modules.academic_structure.models import (
+    AcademicLevel,
+    AcademicTerm,
+    ClassGroup,
+    Department,
+)
 from app.modules.assessments.models import AssessmentDefinition, AssessmentScore, ScoreSheetStatus
 from app.modules.audit.services import AuditContext, record_audit_log
+from app.modules.common.schemas import PageMeta
 from app.modules.computation import engine
 from app.modules.computation.models import SubjectResult, TermReportCard
 from app.modules.computation.schemas import (
@@ -73,11 +79,15 @@ async def _get_config(db: AsyncSession, school_id: UUID) -> SchoolConfiguration:
 
 def build_snapshot(config: SchoolConfiguration) -> dict[str, object]:
     return {
-        "engine_version": "m5_v1",
+        "engine_version": "m5_v2",
         "grading_scale_schema": config.grading_scale_schema,
         "assessment_weight_schema": config.assessment_weight_schema,
         "academic_term_definitions": config.academic_term_definitions,
         "annual_results_schema": config.annual_results_schema,
+        "report_card_template_id": config.report_card_template_id,
+        "show_department_position_on_report_card": config.show_department_position_on_report_card,
+        "show_level_position_on_report_card": config.show_level_position_on_report_card,
+        "show_subject_position_on_report_card": config.show_subject_position_on_report_card,
     }
 
 
@@ -86,6 +96,8 @@ async def _get_class_subject_context(
     school_id: UUID,
     term: AcademicTerm,
     class_group_id: UUID | None,
+    *,
+    class_group_ids: list[UUID] | None = None,
 ) -> list[tuple[ClassSubject, ClassGroup, Subject]]:
     stmt: Select[tuple[ClassSubject, ClassGroup, Subject]] = (
         select(ClassSubject, ClassGroup, Subject)
@@ -100,6 +112,14 @@ async def _get_class_subject_context(
     )
     if class_group_id is not None:
         stmt = stmt.where(ClassSubject.class_group_id == class_group_id)
+    elif class_group_ids is not None:
+        if not class_group_ids:
+            return []
+        stmt = stmt.where(ClassSubject.class_group_id.in_(class_group_ids))
+    stmt = stmt.where(
+        ClassGroup.deleted_at.is_(None),
+        SubjectOffering.deleted_at.is_(None),
+    )
     return list((await db.execute(stmt)).all())
 
 
@@ -136,10 +156,12 @@ async def _load_computation_inputs(
     dict[str, list[engine.SubjectInput]],
     dict[str, tuple[Student, StudentEnrollment]],
     dict[str, tuple[str, str, str]],
+    dict[str, str],
+    dict[str, str],
 ]:
     class_subject_ids = [class_subject.id for class_subject, _, _ in context]
     if not class_subject_ids:
-        return {}, {}, {}
+        return {}, {}, {}, {}, {}
 
     status_stmt = select(ScoreSheetStatus).where(
         ScoreSheetStatus.school_id == school_id,
@@ -179,7 +201,7 @@ async def _load_computation_inputs(
     registrations = (await db.execute(registrations_stmt)).scalars().all()
     enrollment_ids = {registration.student_enrollment_id for registration in registrations}
     if not enrollment_ids:
-        return {}, {}, {}
+        return {}, {}, {}, {}, {}
 
     enrollment_stmt = select(StudentEnrollment).where(
         StudentEnrollment.school_id == school_id,
@@ -220,7 +242,12 @@ async def _load_computation_inputs(
     subject_by_class_subject_id = {
         class_subject.id: subject for class_subject, _, subject in context
     }
+    class_group_by_cs_id = {
+        class_subject.id: class_group for class_subject, class_group, _ in context
+    }
     students_inputs: dict[str, list[engine.SubjectInput]] = {}
+    student_dept_cohorts: dict[str, str] = {}
+    student_level_cohorts: dict[str, str] = {}
     for registration in registrations:
         class_subject_id = registration.class_subject_id
         enrollment_id = registration.student_enrollment_id
@@ -230,6 +257,11 @@ async def _load_computation_inputs(
         ):
             continue
         subject = subject_by_class_subject_id[class_subject_id]
+        cg = class_group_by_cs_id[class_subject_id]
+        student_dept_cohorts[str(enrollment_id)] = (
+            f"{cg.academic_level_id}:{cg.department_id or 'GENERAL'}"
+        )
+        student_level_cohorts[str(enrollment_id)] = str(cg.academic_level_id)
         components: list[engine.AssessmentInput] = []
         for definition in sorted(
             definitions_by_class_subject[class_subject_id], key=lambda item: item.sequence_order
@@ -250,18 +282,33 @@ async def _load_computation_inputs(
                 subject_code=subject.code,
                 subject_name=subject.name,
                 assessments=tuple(components),
+                subject_rank_key=f"{cg.academic_level_id}:{subject.id}",
             )
         )
 
-    return students_inputs, student_metadata, subject_metadata
+    return (
+        students_inputs,
+        student_metadata,
+        subject_metadata,
+        student_dept_cohorts,
+        student_level_cohorts,
+    )
 
 
 async def _get_existing_subject_results(
-    db: AsyncSession, school_id: UUID, term_id: UUID
+    db: AsyncSession,
+    school_id: UUID,
+    term_id: UUID,
+    *,
+    enrollment_ids: list[UUID] | None = None,
 ) -> dict[tuple[UUID, UUID], SubjectResult]:
     stmt = select(SubjectResult).where(
         SubjectResult.school_id == school_id, SubjectResult.academic_term_id == term_id
     )
+    if enrollment_ids is not None:
+        if not enrollment_ids:
+            return {}
+        stmt = stmt.where(SubjectResult.student_enrollment_id.in_(enrollment_ids))
     return {
         (result.student_enrollment_id, result.class_subject_id): result
         for result in (await db.execute(stmt)).scalars().all()
@@ -269,11 +316,19 @@ async def _get_existing_subject_results(
 
 
 async def _get_existing_report_cards(
-    db: AsyncSession, school_id: UUID, term_id: UUID
+    db: AsyncSession,
+    school_id: UUID,
+    term_id: UUID,
+    *,
+    enrollment_ids: list[UUID] | None = None,
 ) -> dict[UUID, TermReportCard]:
     stmt = select(TermReportCard).where(
         TermReportCard.school_id == school_id, TermReportCard.academic_term_id == term_id
     )
+    if enrollment_ids is not None:
+        if not enrollment_ids:
+            return {}
+        stmt = stmt.where(TermReportCard.student_enrollment_id.in_(enrollment_ids))
     return {card.student_enrollment_id: card for card in (await db.execute(stmt)).scalars().all()}
 
 
@@ -285,6 +340,9 @@ async def _apply_annual_data(
     subject_results: dict[tuple[UUID, UUID], SubjectResult],
     report_cards: dict[UUID, TermReportCard],
     config: SchoolConfiguration,
+    *,
+    student_dept_cohorts: dict[str, str],
+    student_level_cohorts: dict[str, str],
 ) -> None:
     if TERM_KEYS.get(term.term_order) != "third_term":
         return
@@ -365,7 +423,20 @@ async def _apply_annual_data(
             },
             config.annual_results_schema,
         )
-    positions = engine.competition_ranks(annual_percentages)
+    dept_buckets: dict[str, dict[str, Decimal]] = {}
+    level_buckets: dict[str, dict[str, Decimal]] = {}
+    for student_id, pct in annual_percentages.items():
+        dept_buckets.setdefault(student_dept_cohorts.get(student_id, "ALL"), {})[student_id] = pct
+        level_buckets.setdefault(student_level_cohorts.get(student_id, "ALL"), {})[student_id] = pct
+
+    positions: dict[str, int] = {}
+    for bucket in dept_buckets.values():
+        positions.update(engine.competition_ranks(bucket))
+
+    level_positions: dict[str, int] = {}
+    for bucket in level_buckets.values():
+        level_positions.update(engine.competition_ranks(bucket))
+
     for student_id, percentage in annual_percentages.items():
         card = report_cards.get(UUID(student_id))
         if not card:
@@ -375,6 +446,7 @@ async def _apply_annual_data(
         card.cumulative_total_obtained = calculation.students[student_id].total_obtained
         card.cumulative_average_percentage = percentage
         card.cumulative_class_position = positions[student_id]
+        card.cumulative_level_position = level_positions[student_id]
         card.promotion_decision = engine.promotion_decision(
             percentage, config.annual_results_schema
         )
@@ -422,14 +494,23 @@ async def calculate_term(
         )
     class_groups = {class_group.id: class_group for _, class_group, _ in context}
     await _require_computation_access(db, current_user, list(class_groups.values()))
-    students_inputs, student_metadata, _ = await _load_computation_inputs(
-        db, school_id, term, context
-    )
+    (
+        students_inputs,
+        student_metadata,
+        _,
+        student_dept_cohorts,
+        student_level_cohorts,
+    ) = await _load_computation_inputs(db, school_id, term, context)
     if not students_inputs:
         raise ValidationException(
             "There are no registered students available to calculate for this term."
         )
-    calculation = engine.compute_term_results(students_inputs, config.grading_scale_schema)
+    calculation = engine.compute_term_results(
+        students_inputs,
+        config.grading_scale_schema,
+        student_dept_cohorts=student_dept_cohorts,
+        student_level_cohorts=student_level_cohorts,
+    )
     snapshot = build_snapshot(config)
     subject_results = await _get_existing_subject_results(db, school_id, term.id)
     report_cards = await _get_existing_report_cards(db, school_id, term.id)
@@ -483,11 +564,21 @@ async def calculate_term(
         card.overall_percentage = student_result.percentage
         card.class_position = student_result.class_position
         card.total_students_in_arm = student_result.total_students_in_class
+        card.level_position = student_result.level_position
+        card.total_students_in_level = student_result.total_students_in_level
         card.publication_status = "DRAFT"
         card.frozen_config_snapshot = snapshot
 
     await _apply_annual_data(
-        db, school_id, term, calculation, subject_results, report_cards, config
+        db,
+        school_id,
+        term,
+        calculation,
+        subject_results,
+        report_cards,
+        config,
+        student_dept_cohorts=student_dept_cohorts,
+        student_level_cohorts=student_level_cohorts,
     )
     record_audit_log(
         db,
@@ -521,6 +612,9 @@ async def get_broadsheet(
     class_group_id: UUID,
     academic_term_id: UUID | None,
     current_user: User,
+    *,
+    page: int = 1,
+    page_size: int = 50,
 ) -> BroadsheetResponse:
     class_group_stmt = select(ClassGroup).where(
         ClassGroup.id == class_group_id,
@@ -550,81 +644,410 @@ async def get_broadsheet(
 
     await _require_computation_access(db, current_user, [class_group], allow_form_master=True)
     config = await _get_config(db, school_id)
+    academic_level = (
+        await db.execute(
+            select(AcademicLevel).where(
+                AcademicLevel.id == class_group.academic_level_id,
+                AcademicLevel.school_id == school_id,
+                AcademicLevel.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    department = (
+        (
+            await db.execute(
+                select(Department).where(
+                    Department.id == class_group.department_id,
+                    Department.school_id == school_id,
+                    Department.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if class_group.department_id
+        else None
+    )
     context = await _get_class_subject_context(db, school_id, term, class_group_id)
     if not context:
         raise ValidationException("There are no class subjects available for this broadsheet yet.")
-    students_inputs, student_metadata, _ = await _load_computation_inputs(
-        db, school_id, term, context
-    )
+    (
+        students_inputs,
+        student_metadata,
+        _,
+        student_dept_cohorts,
+        student_level_cohorts,
+    ) = await _load_computation_inputs(db, school_id, term, context)
     if not students_inputs:
         return BroadsheetResponse(
             academic_term_id=term.id,
             class_group_id=class_group.id,
             class_group_name=class_group.display_name,
+            academic_level_id=class_group.academic_level_id,
+            academic_level_name=academic_level.name if academic_level else None,
+            department_name=department.name if department else None,
             academic_term_name=term.name,
             total_students=0,
             students=[],
+            meta=PageMeta(page=page, page_size=page_size, total=0, total_pages=0),
         )
 
-    calculation = engine.compute_term_results(students_inputs, config.grading_scale_schema)
-    report_cards = await _get_existing_report_cards(db, school_id, term.id)
+    calculation = engine.compute_term_results(
+        students_inputs,
+        config.grading_scale_schema,
+        student_dept_cohorts=student_dept_cohorts,
+        student_level_cohorts=student_level_cohorts,
+    )
+    scoped_enrollment_ids = [UUID(sid) for sid in calculation.students]
+    subject_results = await _get_existing_subject_results(
+        db, school_id, term.id, enrollment_ids=scoped_enrollment_ids
+    )
+    report_cards = await _get_existing_report_cards(
+        db, school_id, term.id, enrollment_ids=scoped_enrollment_ids
+    )
     rows: list[StudentBroadsheetRow] = []
     for student_id, result in calculation.students.items():
-        student, _ = student_metadata[student_id]
-        card = report_cards.get(UUID(student_id))
+        student, enrollment = student_metadata[student_id]
+        enrollment_uuid = UUID(student_id)
+        card = report_cards.get(enrollment_uuid)
         annual_score = (
             card.cumulative_average_percentage if card and card.is_cumulative_annual else None
         )
         promotion = card.promotion_decision if card and card.is_cumulative_annual else None
-        subjects = [
-            SubjectComputationResponse(
-                class_subject_id=UUID(subject.class_subject_id),
-                subject_code=subject.subject_code,
-                subject_name=subject.subject_name,
-                total_score=subject.total,
-                obtainable_marks=subject.obtainable,
-                grade=subject.grade,
-                grade_point=subject.grade_point,
-                remark=subject.remark,
-                subject_position=subject.position,
-                class_highest_score=subject.class_highest_score,
-                class_lowest_score=subject.class_lowest_score,
-                class_average_score=subject.class_average_score,
-                components=[
-                    ComponentScoreResponse(
-                        code=component.code,
-                        score_status=component.score_status,
-                        raw_score=component.raw_score,
-                        scaled_score=component.scaled_score,
-                    )
-                    for component in subject.components
-                ],
+        subjects = []
+        for subject in result.subjects.values():
+            persisted_sr = subject_results.get((enrollment_uuid, UUID(subject.class_subject_id)))
+            is_sr_published = bool(persisted_sr and persisted_sr.status == "PUBLISHED")
+            subjects.append(
+                SubjectComputationResponse(
+                    class_subject_id=UUID(subject.class_subject_id),
+                    subject_code=subject.subject_code,
+                    subject_name=subject.subject_name,
+                    total_score=persisted_sr.total_score if is_sr_published else subject.total,
+                    obtainable_marks=subject.obtainable,
+                    grade=persisted_sr.grade if is_sr_published else subject.grade,
+                    grade_point=(
+                        (persisted_sr.grade_point or Decimal("0.00"))
+                        if is_sr_published
+                        else subject.grade_point
+                    ),
+                    remark=persisted_sr.remark if is_sr_published else subject.remark,
+                    subject_position=(
+                        persisted_sr.subject_position
+                        if persisted_sr and persisted_sr.subject_position is not None
+                        else subject.position
+                    ),
+                    class_highest_score=(
+                        persisted_sr.class_highest_score
+                        if persisted_sr
+                        else subject.class_highest_score
+                    ),
+                    class_lowest_score=(
+                        persisted_sr.class_lowest_score
+                        if persisted_sr
+                        else subject.class_lowest_score
+                    ),
+                    class_average_score=(
+                        persisted_sr.class_average_score
+                        if persisted_sr
+                        else subject.class_average_score
+                    ),
+                    components=[
+                        ComponentScoreResponse(
+                            code=component.code,
+                            score_status=component.score_status,
+                            raw_score=component.raw_score,
+                            scaled_score=component.scaled_score,
+                        )
+                        for component in subject.components
+                    ],
+                )
             )
-            for subject in result.subjects.values()
-        ]
         rows.append(
             StudentBroadsheetRow(
-                student_enrollment_id=UUID(student_id),
+                student_enrollment_id=enrollment_uuid,
                 admission_number=student.admission_number,
                 first_name=student.first_name,
                 last_name=student.last_name,
+                class_group_name=class_group.display_name,
                 subjects=subjects,
-                total_obtained=result.total_obtained,
-                total_obtainable=result.total_obtainable,
-                percentage=result.percentage,
-                class_position=result.class_position,
+                total_obtained=(
+                    card.total_marks_obtained
+                    if card and card.publication_status == "PUBLISHED"
+                    else result.total_obtained
+                ),
+                total_obtainable=(
+                    card.total_obtainable_marks
+                    if card and card.publication_status == "PUBLISHED"
+                    else result.total_obtainable
+                ),
+                percentage=(
+                    card.overall_percentage
+                    if card and card.publication_status == "PUBLISHED"
+                    else result.percentage
+                ),
+                class_position=(
+                    card.class_position
+                    if card and card.class_position is not None
+                    else result.class_position
+                ),
+                total_students_in_arm=(
+                    card.total_students_in_arm if card else result.total_students_in_class
+                ),
+                level_position=(
+                    card.level_position
+                    if card and card.level_position is not None
+                    else result.level_position
+                ),
+                total_students_in_level=(
+                    card.total_students_in_level
+                    if card and card.total_students_in_level is not None
+                    else result.total_students_in_level
+                ),
                 annual_score=annual_score,
                 promotion_decision=promotion,
             )
         )
     rows.sort(key=lambda row: (row.class_position, row.last_name, row.first_name))
+    total = len(rows)
+    start = (page - 1) * page_size
+    end = start + page_size
+    total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 0
     return BroadsheetResponse(
         academic_term_id=term.id,
         class_group_id=class_group.id,
         class_group_name=class_group.display_name,
+        academic_level_id=class_group.academic_level_id,
+        academic_level_name=academic_level.name if academic_level else None,
+        department_name=department.name if department else None,
         academic_term_name=term.name,
-        total_students=len(rows),
-        students=rows,
+        total_students=total,
+        students=rows[start:end],
+        meta=PageMeta(page=page, page_size=page_size, total=total, total_pages=total_pages),
+    )
+
+
+async def get_filtered_broadsheet(
+    db: AsyncSession,
+    school_id: UUID,
+    *,
+    academic_term_id: UUID,
+    class_group_id: UUID | None,
+    academic_level_id: UUID | None,
+    department_id: UUID | None,
+    current_user: User,
+    page: int = 1,
+    page_size: int = 50,
+) -> BroadsheetResponse:
+    if class_group_id is not None:
+        return await get_broadsheet(
+            db,
+            school_id,
+            class_group_id,
+            academic_term_id,
+            current_user,
+            page=page,
+            page_size=page_size,
+        )
+
+    term = await get_term(db, school_id, academic_term_id)
+    cg_stmt = select(ClassGroup).where(
+        ClassGroup.school_id == school_id,
+        ClassGroup.academic_session_id == term.academic_session_id,
+        ClassGroup.deleted_at.is_(None),
+    )
+    if academic_level_id is not None:
+        cg_stmt = cg_stmt.where(ClassGroup.academic_level_id == academic_level_id)
+    if department_id is not None:
+        cg_stmt = cg_stmt.where(ClassGroup.department_id == department_id)
+    class_groups = list((await db.execute(cg_stmt)).scalars().all())
+    if not class_groups:
+        raise ResourceNotFoundException("class group", academic_level_id or department_id)
+
+    await _require_computation_access(db, current_user, class_groups, allow_form_master=True)
+    config = await _get_config(db, school_id)
+    academic_level = (
+        (
+            await db.execute(select(AcademicLevel).where(AcademicLevel.id == academic_level_id))
+        ).scalar_one_or_none()
+        if academic_level_id
+        else None
+    )
+    department = (
+        (
+            await db.execute(select(Department).where(Department.id == department_id))
+        ).scalar_one_or_none()
+        if department_id
+        else None
+    )
+    scope_label = " ".join(
+        part
+        for part in [
+            academic_level.name if academic_level else None,
+            department.name if department else None,
+            "(All arms)",
+        ]
+        if part
+    )
+
+    cg_by_id = {cg.id: cg for cg in class_groups}
+    context = await _get_class_subject_context(
+        db, school_id, term, None, class_group_ids=list(cg_by_id.keys())
+    )
+    if not context:
+        raise ValidationException("There are no class subjects available for this broadsheet yet.")
+    (
+        students_inputs,
+        student_metadata,
+        _,
+        student_dept_cohorts,
+        student_level_cohorts,
+    ) = await _load_computation_inputs(db, school_id, term, context)
+    if not students_inputs:
+        return BroadsheetResponse(
+            academic_term_id=term.id,
+            class_group_id=None,
+            class_group_name=scope_label,
+            academic_level_id=academic_level_id,
+            academic_level_name=academic_level.name if academic_level else None,
+            department_name=department.name if department else None,
+            academic_term_name=term.name,
+            total_students=0,
+            students=[],
+            meta=PageMeta(page=page, page_size=page_size, total=0, total_pages=0),
+        )
+
+    calculation = engine.compute_term_results(
+        students_inputs,
+        config.grading_scale_schema,
+        student_dept_cohorts=student_dept_cohorts,
+        student_level_cohorts=student_level_cohorts,
+    )
+    scoped_enrollment_ids = [UUID(sid) for sid in calculation.students]
+    subject_results = await _get_existing_subject_results(
+        db, school_id, term.id, enrollment_ids=scoped_enrollment_ids
+    )
+    report_cards = await _get_existing_report_cards(
+        db, school_id, term.id, enrollment_ids=scoped_enrollment_ids
+    )
+    rows: list[StudentBroadsheetRow] = []
+    for student_id, result in calculation.students.items():
+        student, enrollment = student_metadata[student_id]
+        enrollment_uuid = UUID(student_id)
+        card = report_cards.get(enrollment_uuid)
+        annual_score = (
+            card.cumulative_average_percentage if card and card.is_cumulative_annual else None
+        )
+        promotion = card.promotion_decision if card and card.is_cumulative_annual else None
+        cg = cg_by_id.get(enrollment.class_group_id)
+        subjects = []
+        for subject in result.subjects.values():
+            persisted_sr = subject_results.get((enrollment_uuid, UUID(subject.class_subject_id)))
+            is_sr_published = bool(persisted_sr and persisted_sr.status == "PUBLISHED")
+            subjects.append(
+                SubjectComputationResponse(
+                    class_subject_id=UUID(subject.class_subject_id),
+                    subject_code=subject.subject_code,
+                    subject_name=subject.subject_name,
+                    total_score=persisted_sr.total_score if is_sr_published else subject.total,
+                    obtainable_marks=subject.obtainable,
+                    grade=persisted_sr.grade if is_sr_published else subject.grade,
+                    grade_point=(
+                        (persisted_sr.grade_point or Decimal("0.00"))
+                        if is_sr_published
+                        else subject.grade_point
+                    ),
+                    remark=persisted_sr.remark if is_sr_published else subject.remark,
+                    subject_position=(
+                        persisted_sr.subject_position
+                        if persisted_sr and persisted_sr.subject_position is not None
+                        else subject.position
+                    ),
+                    class_highest_score=(
+                        persisted_sr.class_highest_score
+                        if persisted_sr
+                        else subject.class_highest_score
+                    ),
+                    class_lowest_score=(
+                        persisted_sr.class_lowest_score
+                        if persisted_sr
+                        else subject.class_lowest_score
+                    ),
+                    class_average_score=(
+                        persisted_sr.class_average_score
+                        if persisted_sr
+                        else subject.class_average_score
+                    ),
+                    components=[
+                        ComponentScoreResponse(
+                            code=component.code,
+                            score_status=component.score_status,
+                            raw_score=component.raw_score,
+                            scaled_score=component.scaled_score,
+                        )
+                        for component in subject.components
+                    ],
+                )
+            )
+        rows.append(
+            StudentBroadsheetRow(
+                student_enrollment_id=enrollment_uuid,
+                admission_number=student.admission_number,
+                first_name=student.first_name,
+                last_name=student.last_name,
+                class_group_name=cg.display_name if cg else None,
+                subjects=subjects,
+                total_obtained=(
+                    card.total_marks_obtained
+                    if card and card.publication_status == "PUBLISHED"
+                    else result.total_obtained
+                ),
+                total_obtainable=(
+                    card.total_obtainable_marks
+                    if card and card.publication_status == "PUBLISHED"
+                    else result.total_obtainable
+                ),
+                percentage=(
+                    card.overall_percentage
+                    if card and card.publication_status == "PUBLISHED"
+                    else result.percentage
+                ),
+                class_position=(
+                    card.class_position
+                    if card and card.class_position is not None
+                    else result.class_position
+                ),
+                total_students_in_arm=(
+                    card.total_students_in_arm if card else result.total_students_in_class
+                ),
+                level_position=(
+                    card.level_position
+                    if card and card.level_position is not None
+                    else result.level_position
+                ),
+                total_students_in_level=(
+                    card.total_students_in_level
+                    if card and card.total_students_in_level is not None
+                    else result.total_students_in_level
+                ),
+                annual_score=annual_score,
+                promotion_decision=promotion,
+            )
+        )
+    rows.sort(key=lambda row: (row.class_position, row.last_name, row.first_name))
+    total = len(rows)
+    start = (page - 1) * page_size
+    end = start + page_size
+    total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 0
+    return BroadsheetResponse(
+        academic_term_id=term.id,
+        class_group_id=None,
+        class_group_name=scope_label,
+        academic_level_id=academic_level_id,
+        academic_level_name=academic_level.name if academic_level else None,
+        department_name=department.name if department else None,
+        academic_term_name=term.name,
+        total_students=total,
+        students=rows[start:end],
+        meta=PageMeta(page=page, page_size=page_size, total=total, total_pages=total_pages),
     )
 
 
