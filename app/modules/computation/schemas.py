@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from app.modules.common.schemas import PageMeta
+
 
 class PromotionDecision(StrEnum):
     PROMOTED = "PROMOTED"
@@ -45,22 +47,30 @@ class StudentBroadsheetRow(BaseModel):
     admission_number: str
     first_name: str
     last_name: str
+    class_group_name: str | None = None
     subjects: list[SubjectComputationResponse]
     total_obtained: Decimal
     total_obtainable: Decimal
     percentage: Decimal
     class_position: int
+    total_students_in_arm: int | None = None
+    level_position: int | None = None
+    total_students_in_level: int | None = None
     annual_score: Decimal | None = None
     promotion_decision: PromotionDecision | None = None
 
 
 class BroadsheetResponse(BaseModel):
     academic_term_id: UUID
-    class_group_id: UUID
+    class_group_id: UUID | None = None
     class_group_name: str
+    academic_level_id: UUID | None = None
+    academic_level_name: str | None = None
+    department_name: str | None = None
     academic_term_name: str
     total_students: int
     students: list[StudentBroadsheetRow]
+    meta: PageMeta | None = None
 
 
 class CalculateTermResponse(BaseModel):

@@ -186,6 +186,12 @@ class StructureTemplateApplyRequest(BaseModel):
     session_start_date: date | None = None
     session_end_date: date | None = None
     include_class_groups: bool = True
+    separate_senior_departments: bool = True
+    arms_per_level: int | None = Field(None, ge=1, le=26)
+    department_arm_counts: dict[str, int] | None = None
+    level_arm_counts: dict[str, int] | None = None
+    level_department_arm_counts: dict[str, dict[str, int]] | None = None
+    selected_subject_codes: list[str] | None = None
 
     @model_validator(mode="after")
     def validate_session_details(self) -> "StructureTemplateApplyRequest":

@@ -68,6 +68,21 @@ class SchoolConfiguration(Base, TimestampMixin):
     report_card_template_id: Mapped[str] = mapped_column(
         String(64), default="default_v1", nullable=False
     )
+    show_department_position_on_report_card: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    show_level_position_on_report_card: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    show_subject_position_on_report_card: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    setup_wizard_completed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    setup_wizard_dismissed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
 
     school: Mapped["School"] = relationship("School", back_populates="configuration")
 

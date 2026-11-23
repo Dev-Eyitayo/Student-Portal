@@ -32,6 +32,7 @@ from app.modules.academic_structure.models import (
 )
 from app.modules.academic_structure.templates import (
     COMBINED_STRUCTURE_TEMPLATE_ID,
+    GENERAL_SECONDARY_STRUCTURE_TEMPLATE_ID,
     JUNIOR_SECONDARY_STRUCTURE_TEMPLATE_ID,
     PRIMARY_STRUCTURE_TEMPLATE_ID,
     SECONDARY_STRUCTURE_TEMPLATE_ID,
@@ -465,6 +466,11 @@ CONFIGURATION_FIELDS = (
     "timezone",
     "currency",
     "report_card_template_id",
+    "show_department_position_on_report_card",
+    "show_level_position_on_report_card",
+    "show_subject_position_on_report_card",
+    "setup_wizard_completed",
+    "setup_wizard_dismissed",
 )
 
 
@@ -522,17 +528,17 @@ def get_onboarding_templates() -> list[OnboardingTemplateResponse]:
             "Nigeria Secondary (JSS 1 - SS 3)",
             (
                 "Six secondary levels (JSS 1-SS 3), Science/Arts/Commercial for senior secondary, "
-                "ten arms, and 10/10/10/70 assessments."
+                "incremental arms (A, B, C...), NERDC subjects, and 10/10/10/70 assessments."
             ),
             SchoolType.SECONDARY,
-            SECONDARY_STRUCTURE_TEMPLATE_ID,
+            GENERAL_SECONDARY_STRUCTURE_TEMPLATE_ID,
         ),
         (
             "nigeria_junior_secondary_default",
             "Nigeria Junior Secondary (JSS 1 - JSS 3)",
             (
-                "Three junior secondary levels (JSS 1-3) with no departments, ten arms, "
-                "and 10/10/10/70 assessments."
+                "Three junior secondary levels (JSS 1-3) with no departments, incremental arms "
+                "(A, B, C...), NERDC junior subjects, and 10/10/10/70 assessments."
             ),
             SchoolType.SECONDARY,
             JUNIOR_SECONDARY_STRUCTURE_TEMPLATE_ID,
@@ -542,7 +548,8 @@ def get_onboarding_templates() -> list[OnboardingTemplateResponse]:
             "Nigeria Senior Secondary (SS 1 - SS 3)",
             (
                 "Three senior secondary levels (SS 1-3) with Science, Arts, and Commercial "
-                "departments, ten arms, and WAEC A1-F9 grading."
+                "departments, incremental arms (A, B, C...), NERDC core/department/trade subjects, "
+                "and WAEC A1-F9 grading."
             ),
             SchoolType.SECONDARY,
             SENIOR_SECONDARY_STRUCTURE_TEMPLATE_ID,
@@ -551,8 +558,8 @@ def get_onboarding_templates() -> list[OnboardingTemplateResponse]:
             "nigeria_primary_default",
             "Nigeria Primary (Basic 1 - 6)",
             (
-                "Basic 1-6 with arms A-D, compulsory core subjects, an A-F grading scale, "
-                "and the same 10/10/10/70 assessment pattern."
+                "Basic 1-6 with incremental arms (A, B, C...), NERDC primary subjects, "
+                "an A-F grading scale, and the 10/10/10/70 assessment pattern."
             ),
             SchoolType.PRIMARY,
             PRIMARY_STRUCTURE_TEMPLATE_ID,

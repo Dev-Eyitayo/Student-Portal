@@ -27,9 +27,12 @@ from app.modules.academic_structure.models import (
 )
 from app.modules.assessments.models import AssessmentDefinition, AssessmentScore
 from app.modules.audit.services import AuditContext, record_audit_log
+from app.modules.common.schemas import PageMeta
 from app.modules.computation.models import SubjectResult, TermReportCard
 from app.modules.distribution.models import ResultAccessToken
 from app.modules.distribution.schemas import (
+    BulkReportCardRemarksRequest,
+    BulkReportCardRemarksResponse,
     NotifyTermResultsRequest,
     NotifyTermResultsResponse,
     QrVerifyResponse,
@@ -298,8 +301,27 @@ async def verify_result_token(
     term_code = f"{session.name}-T{term.term_order}"
     qr_payload = _sign_qr_payload(student.admission_number, term_code, card.total_marks_obtained)
 
-    frozen_template = (card.frozen_config_snapshot or {}).get("report_card_template_id")
+    snapshot = card.frozen_config_snapshot or {}
+    frozen_template = snapshot.get("report_card_template_id")
     template_id = frozen_template or (config.report_card_template_id if config else "default_v1")
+    show_dept_pos = bool(
+        snapshot.get(
+            "show_department_position_on_report_card",
+            config.show_department_position_on_report_card if config else False,
+        )
+    )
+    show_level_pos = bool(
+        snapshot.get(
+            "show_level_position_on_report_card",
+            config.show_level_position_on_report_card if config else False,
+        )
+    )
+    show_subject_pos = bool(
+        snapshot.get(
+            "show_subject_position_on_report_card",
+            config.show_subject_position_on_report_card if config else False,
+        )
+    )
 
     return VerifiedReportCardResponse(
         school=ReportSchoolInfo(
@@ -332,8 +354,10 @@ async def verify_result_token(
             total_obtainable=card.total_obtainable_marks,
             total_obtained=card.total_marks_obtained,
             percentage=card.overall_percentage,
-            class_position=card.class_position,
+            class_position=card.class_position if show_dept_pos else None,
             total_students_in_arm=card.total_students_in_arm,
+            level_position=card.level_position if show_level_pos else None,
+            total_students_in_level=card.total_students_in_level if show_level_pos else None,
             class_teacher_comment=card.teacher_comment,
             principal_comment=card.principal_comment,
             annual_cumulative_score=card.cumulative_average_percentage,
@@ -348,7 +372,7 @@ async def verify_result_token(
                 total_score=res.total_score,
                 grade=res.grade,
                 remark=res.remark,
-                subject_position=res.subject_position,
+                subject_position=res.subject_position if show_subject_pos else None,
                 class_average=res.class_average_score,
                 first_term_score=res.first_term_score,
                 second_term_score=res.second_term_score,
@@ -437,6 +461,95 @@ async def update_report_card_remarks(
         academic_term_id=card.academic_term_id,
         teacher_comment=card.teacher_comment,
         principal_comment=card.principal_comment,
+    )
+
+
+async def bulk_update_report_card_remarks(
+    db: AsyncSession,
+    school_id: UUID,
+    req: BulkReportCardRemarksRequest,
+    current_user: User,
+    audit: AuditContext,
+) -> BulkReportCardRemarksResponse:
+    if req.teacher_comment is None and req.principal_comment is None:
+        raise ValidationException("Please provide a teacher remark or principal remark to apply.")
+
+    unique_ids = set(req.report_card_ids)
+    cards = list(
+        (
+            await db.execute(
+                select(TermReportCard).where(
+                    TermReportCard.id.in_(unique_ids),
+                    TermReportCard.school_id == school_id,
+                    TermReportCard.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    found_ids = {card.id for card in cards}
+    missing_ids = [rid for rid in req.report_card_ids if rid not in found_ids]
+    if missing_ids:
+        raise ResourceNotFoundException("report card", missing_ids[0])
+
+    if any(card.publication_status == "PUBLISHED" for card in cards):
+        raise ConflictException(
+            "Remarks cannot be edited because one or more selected report cards are already published."
+        )
+
+    enrollment_ids = [card.student_enrollment_id for card in cards]
+    enrollments = {
+        e.id: e
+        for e in (
+            await db.execute(
+                select(StudentEnrollment).where(StudentEnrollment.id.in_(enrollment_ids))
+            )
+        )
+        .scalars()
+        .all()
+    }
+    class_group_ids = {e.class_group_id for e in enrollments.values()}
+    class_groups = {
+        cg.id: cg
+        for cg in (await db.execute(select(ClassGroup).where(ClassGroup.id.in_(class_group_ids))))
+        .scalars()
+        .all()
+    }
+
+    for cg in class_groups.values():
+        is_class_teacher = cg.class_teacher_id == current_user.id
+        can_publish = await user_has_permission(
+            db,
+            current_user,
+            "reports:publish",
+            department_id=cg.department_id,
+            academic_level_id=cg.academic_level_id,
+            class_group_id=cg.id,
+        )
+        if not (is_class_teacher or can_publish):
+            raise InsufficientPermissionException("reports:publish")
+        if req.principal_comment is not None and not can_publish:
+            raise InsufficientPermissionException("reports:publish")
+
+    for card in cards:
+        if req.teacher_comment is not None:
+            card.teacher_comment = req.teacher_comment.strip() or None
+        if req.principal_comment is not None:
+            card.principal_comment = req.principal_comment.strip() or None
+
+    record_audit_log(
+        db,
+        audit,
+        action="REPORT_CARD_BULK_REMARKS_UPDATED",
+        resource_type="TermReportCard",
+        resource_id=cards[0].academic_term_id,
+        diff_payload={"updated_count": len(cards)},
+    )
+    await db.commit()
+    return BulkReportCardRemarksResponse(
+        updated_count=len(cards),
+        message=f"Updated remarks for {len(cards)} student(s).",
     )
 
 
@@ -533,10 +646,14 @@ async def list_report_cards(
     db: AsyncSession,
     school_id: UUID,
     academic_term_id: UUID,
-    class_group_id: UUID,
+    class_group_id: UUID | None,
     current_user: User,
     *,
+    academic_level_id: UUID | None = None,
+    department_id: UUID | None = None,
     promotion_decision: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
 ) -> ReportCardListResponse:
     term = (
         await db.execute(
@@ -550,28 +667,39 @@ async def list_report_cards(
     if term is None:
         raise ResourceNotFoundException("academic term", academic_term_id)
 
-    group = (
-        await db.execute(
-            select(ClassGroup).where(
-                ClassGroup.id == class_group_id,
-                ClassGroup.school_id == school_id,
-                ClassGroup.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
-    if group is None:
-        raise ResourceNotFoundException("class group", class_group_id)
-
-    can_publish = await user_has_permission(
-        db,
-        current_user,
-        "reports:publish",
-        department_id=group.department_id,
-        academic_level_id=group.academic_level_id,
-        class_group_id=group.id,
+    cg_stmt = select(ClassGroup).where(
+        ClassGroup.school_id == school_id,
+        ClassGroup.academic_session_id == term.academic_session_id,
+        ClassGroup.deleted_at.is_(None),
     )
-    if not can_publish and group.class_teacher_id != current_user.id:
-        raise InsufficientPermissionException(permission_code="reports:publish")
+    if class_group_id is not None:
+        cg_stmt = cg_stmt.where(ClassGroup.id == class_group_id)
+    else:
+        if academic_level_id is not None:
+            cg_stmt = cg_stmt.where(ClassGroup.academic_level_id == academic_level_id)
+        if department_id is not None:
+            cg_stmt = cg_stmt.where(ClassGroup.department_id == department_id)
+
+    groups = list((await db.execute(cg_stmt)).scalars().all())
+    if not groups:
+        raise ResourceNotFoundException(
+            "class group", class_group_id or academic_level_id or department_id
+        )
+
+    if not await user_has_permission(db, current_user, "reports:publish"):
+        for group in groups:
+            can_publish = await user_has_permission(
+                db,
+                current_user,
+                "reports:publish",
+                department_id=group.department_id,
+                academic_level_id=group.academic_level_id,
+                class_group_id=group.id,
+            )
+            if not can_publish and group.class_teacher_id != current_user.id:
+                raise InsufficientPermissionException(permission_code="reports:publish")
+
+    group_ids = [g.id for g in groups]
 
     config = (
         await db.execute(
@@ -587,13 +715,16 @@ async def list_report_cards(
 
     rows = (
         await db.execute(
-            select(TermReportCard, Student)
+            select(TermReportCard, Student, ClassGroup.display_name)
             .join(StudentEnrollment, StudentEnrollment.id == TermReportCard.student_enrollment_id)
             .join(Student, Student.id == StudentEnrollment.student_id)
+            .join(ClassGroup, ClassGroup.id == StudentEnrollment.class_group_id)
             .where(
                 TermReportCard.school_id == school_id,
                 TermReportCard.academic_term_id == term.id,
-                StudentEnrollment.class_group_id == group.id,
+                StudentEnrollment.class_group_id.in_(group_ids),
+                StudentEnrollment.deleted_at.is_(None),
+                Student.deleted_at.is_(None),
                 TermReportCard.deleted_at.is_(None),
             )
             .order_by(
@@ -605,9 +736,12 @@ async def list_report_cards(
     ).all()
 
     averages = [
-        card.cumulative_average_percentage
-        for card, _ in rows
-        if card.cumulative_average_percentage is not None
+        (
+            card.cumulative_average_percentage
+            if card.cumulative_average_percentage is not None
+            else card.overall_percentage
+        )
+        for card, _, _ in rows
     ]
     class_average = (
         str(
@@ -632,7 +766,15 @@ async def list_report_cards(
     filtered_rows = rows
     if promotion_decision:
         dec = promotion_decision.strip().upper()
-        filtered_rows = [(c, s) for c, s in rows if (c.promotion_decision or "").upper() == dec]
+        filtered_rows = [
+            (c, s, cg_name) for c, s, cg_name in rows if (c.promotion_decision or "").upper() == dec
+        ]
+
+    total = len(filtered_rows)
+    start = (page - 1) * page_size
+    end = start + page_size
+    total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 0
+    paged_rows = filtered_rows[start:end]
 
     items = [
         ReportCardListItem(
@@ -641,23 +783,28 @@ async def list_report_cards(
             student_id=student.id,
             admission_number=student.admission_number,
             student_name=f"{student.first_name} {student.last_name}".strip(),
+            class_group_name=cg_name,
+            overall_percentage=str(card.overall_percentage),
             cumulative_average_percentage=(
                 str(card.cumulative_average_percentage)
                 if card.cumulative_average_percentage is not None
                 else None
             ),
             class_position=card.class_position,
+            total_students_in_arm=card.total_students_in_arm,
+            level_position=card.level_position,
+            total_students_in_level=card.total_students_in_level,
             promotion_decision=card.promotion_decision,
             teacher_comment=card.teacher_comment,
             principal_comment=card.principal_comment,
             publication_status=card.publication_status,
         )
-        for card, student in filtered_rows
+        for card, student, cg_name in paged_rows
     ]
 
     term_status = (
         "PUBLISHED"
-        if any(card.publication_status == "PUBLISHED" for card, _ in rows)
+        if any(card.publication_status == "PUBLISHED" for card, _, _ in rows)
         else ("LOCKED" if term.is_locked_for_scoring else "DRAFT")
     )
 
@@ -669,4 +816,5 @@ async def list_report_cards(
             pass_rate=pass_rate,
             term_status=term_status,
         ),
+        meta=PageMeta(page=page, page_size=page_size, total=total, total_pages=total_pages),
     )

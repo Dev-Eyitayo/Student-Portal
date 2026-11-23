@@ -31,6 +31,7 @@ class SubjectInput:
     subject_code: str
     subject_name: str
     assessments: tuple[AssessmentInput, ...]
+    subject_rank_key: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,8 @@ class StudentTermComputation:
     percentage: Decimal
     class_position: int
     total_students_in_class: int
+    level_position: int = 1
+    total_students_in_level: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,41 +169,51 @@ def compute_subject(
 
 
 def compute_term_results(
-    students: Mapping[str, Sequence[SubjectInput]], grading_scale_schema: Mapping[str, Any]
+    students: Mapping[str, Sequence[SubjectInput]],
+    grading_scale_schema: Mapping[str, Any],
+    *,
+    student_dept_cohorts: Mapping[str, str] | None = None,
+    student_level_cohorts: Mapping[str, str] | None = None,
 ) -> TermComputation:
     computed: dict[str, dict[str, SubjectComputation]] = {}
+    rank_key_by_cs_id: dict[str, str] = {}
     for student_id, subjects in students.items():
         computed[student_id] = {
             subject.class_subject_id: compute_subject(subject, grading_scale_schema)
             for subject in subjects
         }
+        for subject in subjects:
+            rank_key_by_cs_id[subject.class_subject_id] = (
+                subject.subject_rank_key or subject.class_subject_id
+            )
 
-    subject_ids = {subject_id for subjects in computed.values() for subject_id in subjects}
+    rank_keys = set(rank_key_by_cs_id.values())
     subject_statistics: dict[str, tuple[Decimal, Decimal, Decimal]] = {}
     subject_ranks: dict[str, dict[str, int]] = {}
-    for subject_id in subject_ids:
-        candidates = {
-            student_id: subjects[subject_id]
-            for student_id, subjects in computed.items()
-            if subject_id in subjects and not is_exempt_subject(subjects[subject_id])
-        }
-        scores = {student_id: subject.total for student_id, subject in candidates.items()}
+    for rank_key in rank_keys:
+        scores: dict[str, Decimal] = {}
+        for student_id, subjects in computed.items():
+            for cs_id, subj in subjects.items():
+                if rank_key_by_cs_id.get(cs_id) == rank_key and not is_exempt_subject(subj):
+                    scores[student_id] = subj.total
+                    break
         if scores:
             highest = max(scores.values())
             lowest = min(scores.values())
             average = round_marks(sum(scores.values(), ZERO) / Decimal(len(scores)))
-            subject_ranks[subject_id] = competition_ranks(scores)
+            subject_ranks[rank_key] = competition_ranks(scores)
         else:
             highest = lowest = average = ZERO
-            subject_ranks[subject_id] = {}
-        subject_statistics[subject_id] = (highest, lowest, average)
+            subject_ranks[rank_key] = {}
+        subject_statistics[rank_key] = (highest, lowest, average)
 
     for student_id, subjects in computed.items():
         for subject_id, subject in subjects.items():
-            highest, lowest, average = subject_statistics[subject_id]
+            rank_key = rank_key_by_cs_id[subject_id]
+            highest, lowest, average = subject_statistics[rank_key]
             subjects[subject_id] = replace(
                 subject,
-                position=subject_ranks[subject_id].get(student_id, 0),
+                position=subject_ranks[rank_key].get(student_id, 0),
                 class_highest_score=highest,
                 class_lowest_score=lowest,
                 class_average_score=average,
@@ -216,8 +229,30 @@ def compute_term_results(
             round_marks(obtained / obtainable * ONE_HUNDRED) if obtainable > ZERO else ZERO
         )
 
-    positions = competition_ranks(percentages)
-    total_students = len(students)
+    dept_buckets: dict[str, dict[str, Decimal]] = {}
+    level_buckets: dict[str, dict[str, Decimal]] = {}
+    for student_id, pct in percentages.items():
+        d_key = student_dept_cohorts.get(student_id, "ALL") if student_dept_cohorts else "ALL"
+        l_key = student_level_cohorts.get(student_id, "ALL") if student_level_cohorts else "ALL"
+        dept_buckets.setdefault(d_key, {})[student_id] = pct
+        level_buckets.setdefault(l_key, {})[student_id] = pct
+
+    dept_positions: dict[str, int] = {}
+    dept_sizes: dict[str, int] = {}
+    for bucket in dept_buckets.values():
+        ranks = competition_ranks(bucket)
+        for student_id, rank in ranks.items():
+            dept_positions[student_id] = rank
+            dept_sizes[student_id] = len(bucket)
+
+    level_positions: dict[str, int] = {}
+    level_sizes: dict[str, int] = {}
+    for bucket in level_buckets.values():
+        ranks = competition_ranks(bucket)
+        for student_id, rank in ranks.items():
+            level_positions[student_id] = rank
+            level_sizes[student_id] = len(bucket)
+
     results: dict[str, StudentTermComputation] = {}
     for student_id, subjects in computed.items():
         obtained, obtainable = totals[student_id]
@@ -227,8 +262,10 @@ def compute_term_results(
             total_obtained=obtained,
             total_obtainable=obtainable,
             percentage=percentages[student_id],
-            class_position=positions[student_id],
-            total_students_in_class=total_students,
+            class_position=dept_positions[student_id],
+            total_students_in_class=dept_sizes[student_id],
+            level_position=level_positions[student_id],
+            total_students_in_level=level_sizes[student_id],
         )
     return TermComputation(students=results)
 
