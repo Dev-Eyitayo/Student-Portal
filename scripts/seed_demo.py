@@ -584,6 +584,7 @@ async def seed_demo(*, reset: bool = False) -> None:
             await db.flush()
 
         await _set_tenant_context(db, school.id)
+        print("Seeding academic levels, departments, arms, and class groups...", flush=True)
 
         # Levels: SS 1, SS 2, SS 3
         level_specs = [
@@ -591,18 +592,22 @@ async def seed_demo(*, reset: bool = False) -> None:
             ("SS 2", "SS2", 2, "SENIOR_SECONDARY"),
             ("SS 3", "SS3", 3, "SENIOR_SECONDARY"),
         ]
-        levels_by_code: dict[str, AcademicLevel] = {}
-        for name, code, order, cat in level_specs:
-            lvl = (
+        existing_levels = (
+            (
                 await db.execute(
                     select(AcademicLevel).where(
                         AcademicLevel.school_id == school.id,
-                        AcademicLevel.code == code,
                         AcademicLevel.deleted_at.is_(None),
                     )
                 )
-            ).scalar_one_or_none()
-            if lvl is None:
+            )
+            .scalars()
+            .all()
+        )
+        levels_by_code: dict[str, AcademicLevel] = {lvl.code: lvl for lvl in existing_levels}
+        new_levels: list[AcademicLevel] = []
+        for name, code, order, cat in level_specs:
+            if code not in levels_by_code:
                 lvl = AcademicLevel(
                     school_id=school.id,
                     name=name,
@@ -610,9 +615,10 @@ async def seed_demo(*, reset: bool = False) -> None:
                     level_order=order,
                     category=cat,
                 )
-                db.add(lvl)
-                await db.flush()
-            levels_by_code[code] = lvl
+                new_levels.append(lvl)
+                levels_by_code[code] = lvl
+        if new_levels:
+            db.add_all(new_levels)
 
         # Departments: Science, Arts, Commercial
         dept_specs = [
@@ -620,41 +626,54 @@ async def seed_demo(*, reset: bool = False) -> None:
             ("Arts", "ART"),
             ("Commercial", "COMM"),
         ]
-        depts_by_code: dict[str, Department] = {}
-        for name, code in dept_specs:
-            dept = (
+        existing_depts = (
+            (
                 await db.execute(
                     select(Department).where(
                         Department.school_id == school.id,
-                        Department.code == code,
                         Department.deleted_at.is_(None),
                     )
                 )
-            ).scalar_one_or_none()
-            if dept is None:
+            )
+            .scalars()
+            .all()
+        )
+        depts_by_code: dict[str, Department] = {d.code: d for d in existing_depts}
+        new_depts: list[Department] = []
+        for name, code in dept_specs:
+            if code not in depts_by_code:
                 dept = Department(school_id=school.id, name=name, code=code)
-                db.add(dept)
-                await db.flush()
-            depts_by_code[code] = dept
+                new_depts.append(dept)
+                depts_by_code[code] = dept
+        if new_depts:
+            db.add_all(new_depts)
 
         # Arms: O, L, I, V (Science), E (Commercial), T, B (Arts)
         arm_letters = ["O", "L", "I", "V", "E", "T", "B"]
-        arms_by_name: dict[str, ClassArm] = {}
-        for arm_name in arm_letters:
-            arm = (
+        existing_arms = (
+            (
                 await db.execute(
                     select(ClassArm).where(
                         ClassArm.school_id == school.id,
-                        ClassArm.name == arm_name,
                         ClassArm.deleted_at.is_(None),
                     )
                 )
-            ).scalar_one_or_none()
-            if arm is None:
+            )
+            .scalars()
+            .all()
+        )
+        arms_by_name: dict[str, ClassArm] = {a.name: a for a in existing_arms}
+        new_arms: list[ClassArm] = []
+        for arm_name in arm_letters:
+            if arm_name not in arms_by_name:
                 arm = ClassArm(school_id=school.id, name=arm_name)
-                db.add(arm)
-                await db.flush()
-            arms_by_name[arm_name] = arm
+                new_arms.append(arm)
+                arms_by_name[arm_name] = arm
+        if new_arms:
+            db.add_all(new_arms)
+
+        if new_levels or new_depts or new_arms:
+            await db.flush()
 
         # Realistic SS1-SS3 ClassGroup distribution:
         # Science -> O, L, I | Commercial -> E, V | Arts -> T, B (21 class arms total)
@@ -663,26 +682,33 @@ async def seed_demo(*, reset: bool = False) -> None:
             "COMM": ["E", "V"],
             "ART": ["T", "B"],
         }
+        existing_cgs = (
+            (
+                await db.execute(
+                    select(ClassGroup).where(
+                        ClassGroup.school_id == school.id,
+                        ClassGroup.academic_session_id == session.id,
+                        ClassGroup.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        cgs_by_key = {
+            (cg.academic_level_id, cg.department_id, cg.class_arm_id): cg for cg in existing_cgs
+        }
         class_groups: list[ClassGroup] = []
+        new_cgs: list[ClassGroup] = []
         cg_idx = 0
-        for _lvl_code, lvl in levels_by_code.items():
+        for lvl_code in ("SS1", "SS2", "SS3"):
+            lvl = levels_by_code[lvl_code]
             for dept_code, arm_list in dept_arm_map.items():
                 dept = depts_by_code[dept_code]
                 for arm_letter in arm_list:
                     arm = arms_by_name[arm_letter]
-                    display_name = f"{lvl.name} {dept.name} {arm.name}"
-                    cg = (
-                        await db.execute(
-                            select(ClassGroup).where(
-                                ClassGroup.school_id == school.id,
-                                ClassGroup.academic_session_id == session.id,
-                                ClassGroup.academic_level_id == lvl.id,
-                                ClassGroup.department_id == dept.id,
-                                ClassGroup.class_arm_id == arm.id,
-                                ClassGroup.deleted_at.is_(None),
-                            )
-                        )
-                    ).scalar_one_or_none()
+                    key = (lvl.id, dept.id, arm.id)
+                    cg = cgs_by_key.get(key)
                     if cg is None:
                         cg = ClassGroup(
                             school_id=school.id,
@@ -691,12 +717,15 @@ async def seed_demo(*, reset: bool = False) -> None:
                             department_id=dept.id,
                             class_arm_id=arm.id,
                             class_teacher_id=teachers[cg_idx % len(teachers)].id,
-                            display_name=display_name,
+                            display_name=f"{lvl.name} {dept.name} {arm.name}",
                         )
-                        db.add(cg)
-                        await db.flush()
+                        new_cgs.append(cg)
+                        cgs_by_key[key] = cg
                     class_groups.append(cg)
                     cg_idx += 1
+        if new_cgs:
+            db.add_all(new_cgs)
+            await db.flush()
 
         # ------------------------------------------------------------------
         # 3. Nigerian NERDC SS1-SS3 Subjects (General, Dept Core, Electives, Trade)
@@ -795,16 +824,18 @@ async def seed_demo(*, reset: bool = False) -> None:
             ("MKT", "Marketing", True, True, "sadiq.bello@olivet.edu.ng", ["SCI", "ART", "COMM"]),
         ]
 
-        subjects_by_code: dict[str, Subject] = {}
+        print("Seeding subjects, offerings, class subjects, and assessments...", flush=True)
+        existing_subjects = (
+            (await db.execute(select(Subject).where(Subject.school_id == school.id)))
+            .scalars()
+            .all()
+        )
+        subjects_by_code: dict[str, Subject] = {s.code: s for s in existing_subjects}
         subject_teacher_by_code: dict[str, UUID] = {}
         subject_depts_by_code: dict[str, list[str]] = {}
+        new_subjects: list[Subject] = []
         for code, name, is_elec, is_trade, t_email, depts in subject_catalog:
-            subj = (
-                await db.execute(
-                    select(Subject).where(Subject.school_id == school.id, Subject.code == code)
-                )
-            ).scalar_one_or_none()
-            if subj is None:
+            if code not in subjects_by_code:
                 subj = Subject(
                     school_id=school.id,
                     code=code,
@@ -812,11 +843,13 @@ async def seed_demo(*, reset: bool = False) -> None:
                     is_elective=is_elec,
                     is_trade_subject=is_trade,
                 )
-                db.add(subj)
-                await db.flush()
-            subjects_by_code[code] = subj
+                new_subjects.append(subj)
+                subjects_by_code[code] = subj
             subject_teacher_by_code[code] = staff_by_email[t_email].id
             subject_depts_by_code[code] = depts
+        if new_subjects:
+            db.add_all(new_subjects)
+            await db.flush()
 
         # Create SubjectOfferings + ClassSubjects + TeacherAssignments + 4 AssessmentDefinitions (10/10/10/70)
         dept_code_by_id = {d.id: code for code, d in depts_by_code.items()}
@@ -837,110 +870,139 @@ async def seed_demo(*, reset: bool = False) -> None:
             ("Terminal Examination", "EXAM", "EXAMINATION", Decimal("70.00"), Decimal("70.00"), 4),
         ]
 
-        offerings_cache: dict[tuple[UUID, UUID, UUID], SubjectOffering] = {}
+        existing_offerings = (
+            (
+                await db.execute(
+                    select(SubjectOffering).where(
+                        SubjectOffering.school_id == school.id,
+                        SubjectOffering.academic_session_id == session.id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        offerings_cache: dict[tuple[UUID, UUID | None, UUID], SubjectOffering] = {
+            (o.academic_level_id, o.department_id, o.subject_id): o for o in existing_offerings
+        }
+        new_offerings: list[SubjectOffering] = []
         for cg in class_groups:
             d_code = dept_code_by_id[cg.department_id]
             for s_code, subj in subjects_by_code.items():
-                if d_code not in subject_depts_by_code[s_code]:
+                if d_code not in subject_depts_by_code.get(s_code, []):
                     continue
-
                 off_key = (cg.academic_level_id, cg.department_id, subj.id)
-                offering = offerings_cache.get(off_key)
-                if offering is None:
-                    offering = (
-                        await db.execute(
-                            select(SubjectOffering).where(
-                                SubjectOffering.school_id == school.id,
-                                SubjectOffering.academic_session_id == session.id,
-                                SubjectOffering.academic_level_id == cg.academic_level_id,
-                                SubjectOffering.department_id == cg.department_id,
-                                SubjectOffering.subject_id == subj.id,
-                            )
-                        )
-                    ).scalar_one_or_none()
-                    if offering is None:
-                        offering = SubjectOffering(
-                            school_id=school.id,
-                            academic_session_id=session.id,
-                            academic_level_id=cg.academic_level_id,
-                            department_id=cg.department_id,
-                            subject_id=subj.id,
-                        )
-                        db.add(offering)
-                        await db.flush()
-                    offerings_cache[off_key] = offering
-
-                cs = (
-                    await db.execute(
-                        select(ClassSubject).where(
-                            ClassSubject.school_id == school.id,
-                            ClassSubject.class_group_id == cg.id,
-                            ClassSubject.subject_offering_id == offering.id,
-                        )
+                if off_key not in offerings_cache:
+                    offering = SubjectOffering(
+                        school_id=school.id,
+                        academic_session_id=session.id,
+                        academic_level_id=cg.academic_level_id,
+                        department_id=cg.department_id,
+                        subject_id=subj.id,
                     )
-                ).scalar_one_or_none()
+                    new_offerings.append(offering)
+                    offerings_cache[off_key] = offering
+        if new_offerings:
+            db.add_all(new_offerings)
+            await db.flush()
+
+        existing_class_subjects = (
+            (await db.execute(select(ClassSubject).where(ClassSubject.school_id == school.id)))
+            .scalars()
+            .all()
+        )
+        cs_cache: dict[tuple[UUID, UUID], ClassSubject] = {
+            (cs.class_group_id, cs.subject_offering_id): cs for cs in existing_class_subjects
+        }
+        new_class_subjects: list[ClassSubject] = []
+        cs_entries: list[tuple[ClassSubject, str]] = []
+        for cg in class_groups:
+            d_code = dept_code_by_id[cg.department_id]
+            for s_code, subj in subjects_by_code.items():
+                if d_code not in subject_depts_by_code.get(s_code, []):
+                    continue
+                offering = offerings_cache[(cg.academic_level_id, cg.department_id, subj.id)]
+                cs_key = (cg.id, offering.id)
+                cs = cs_cache.get(cs_key)
                 if cs is None:
                     cs = ClassSubject(
                         school_id=school.id,
                         class_group_id=cg.id,
                         subject_offering_id=offering.id,
                     )
-                    db.add(cs)
-                    await db.flush()
+                    new_class_subjects.append(cs)
+                    cs_cache[cs_key] = cs
                 cs_by_cg_and_code[(cg.id, s_code)] = cs
+                cs_entries.append((cs, s_code))
+        if new_class_subjects:
+            db.add_all(new_class_subjects)
+            await db.flush()
 
-                t_id = subject_teacher_by_code[s_code]
-                ta = (
-                    await db.execute(
-                        select(TeacherAssignment).where(
-                            TeacherAssignment.school_id == school.id,
-                            TeacherAssignment.class_subject_id == cs.id,
-                            TeacherAssignment.teacher_id == t_id,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if ta is None:
-                    db.add(
-                        TeacherAssignment(
-                            school_id=school.id,
-                            class_subject_id=cs.id,
-                            teacher_id=t_id,
-                            assigned_by_id=admin.id,
-                            is_active=True,
-                        )
-                    )
-
-                existing_defs = list(
-                    (
-                        await db.execute(
-                            select(AssessmentDefinition).where(
-                                AssessmentDefinition.school_id == school.id,
-                                AssessmentDefinition.academic_term_id == term.id,
-                                AssessmentDefinition.class_subject_id == cs.id,
-                            )
-                        )
-                    )
-                    .scalars()
-                    .all()
+        existing_tas = (
+            (
+                await db.execute(
+                    select(TeacherAssignment).where(TeacherAssignment.school_id == school.id)
                 )
-                if not existing_defs:
-                    for c_name, c_code, c_type, c_max, c_weight, c_seq in default_components:
-                        d = AssessmentDefinition(
-                            school_id=school.id,
-                            academic_term_id=term.id,
-                            class_subject_id=cs.id,
-                            name=c_name,
-                            code=c_code,
-                            assessment_type=c_type,
-                            max_score=c_max,
-                            weight_percentage=c_weight,
-                            sequence_order=c_seq,
-                        )
-                        db.add(d)
-                        existing_defs.append(d)
-                defs_by_cs_id[cs.id] = existing_defs
+            )
+            .scalars()
+            .all()
+        )
+        ta_keys = {(ta.class_subject_id, ta.teacher_id) for ta in existing_tas}
 
-        await db.flush()
+        existing_all_defs = (
+            (
+                await db.execute(
+                    select(AssessmentDefinition).where(
+                        AssessmentDefinition.school_id == school.id,
+                        AssessmentDefinition.academic_term_id == term.id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for defn in existing_all_defs:
+            defs_by_cs_id.setdefault(defn.class_subject_id, []).append(defn)
+
+        new_tas: list[TeacherAssignment] = []
+        new_defs: list[AssessmentDefinition] = []
+        for cs, s_code in cs_entries:
+            t_id = subject_teacher_by_code[s_code]
+            if (cs.id, t_id) not in ta_keys:
+                new_tas.append(
+                    TeacherAssignment(
+                        school_id=school.id,
+                        class_subject_id=cs.id,
+                        teacher_id=t_id,
+                        assigned_by_id=admin.id,
+                        is_active=True,
+                    )
+                )
+                ta_keys.add((cs.id, t_id))
+
+            if cs.id not in defs_by_cs_id:
+                cs_defs: list[AssessmentDefinition] = []
+                for c_name, c_code, c_type, c_max, c_weight, c_seq in default_components:
+                    d = AssessmentDefinition(
+                        school_id=school.id,
+                        academic_term_id=term.id,
+                        class_subject_id=cs.id,
+                        name=c_name,
+                        code=c_code,
+                        assessment_type=c_type,
+                        max_score=c_max,
+                        weight_percentage=c_weight,
+                        sequence_order=c_seq,
+                    )
+                    new_defs.append(d)
+                    cs_defs.append(d)
+                defs_by_cs_id[cs.id] = cs_defs
+        if new_tas:
+            db.add_all(new_tas)
+        if new_defs:
+            db.add_all(new_defs)
+        if new_tas or new_defs:
+            await db.flush()
 
         # ------------------------------------------------------------------
         # 4. Students (15-20 per arm), Enrollments, Subject Registrations & Scores
@@ -968,9 +1030,20 @@ async def seed_demo(*, reset: bool = False) -> None:
             levels_by_code["SS3"].id: 2008,
         }
 
+        print("Seeding students, enrollments, registrations, and scores...", flush=True)
         adm_counter = 1
         total_students = 0
         now_utc = datetime.now(UTC)
+
+        existing_students = (
+            (await db.execute(select(Student).where(Student.school_id == school.id)))
+            .scalars()
+            .all()
+        )
+        students_by_adm = {s.admission_number: s for s in existing_students}
+
+        planned_students: list[tuple[Student, ClassGroup, str, list[str], float]] = []
+        new_students: list[Student] = []
 
         for cg in class_groups:
             d_code = dept_code_by_id[cg.department_id]
@@ -990,17 +1063,9 @@ async def seed_demo(*, reset: bool = False) -> None:
                 g_name = f"{g_title} {g_fn} {ln}"
                 g_email = f"{g_fn.lower()}.{ln.lower()}.{adm_counter}@example.com"
                 g_phone = f"+23480{rng.randint(2, 9)}{adm_counter:07d}"
-
                 dob = date(base_year, rng.randint(1, 12), rng.randint(1, 28))
 
-                student = (
-                    await db.execute(
-                        select(Student).where(
-                            Student.school_id == school.id,
-                            Student.admission_number == adm_num,
-                        )
-                    )
-                ).scalar_one_or_none()
+                student = students_by_adm.get(adm_num)
                 if student is None:
                     student = Student(
                         school_id=school.id,
@@ -1015,110 +1080,140 @@ async def seed_demo(*, reset: bool = False) -> None:
                         enrollment_date=today - timedelta(days=40),
                         status="ACTIVE",
                     )
-                    db.add(student)
-                    await db.flush()
+                    new_students.append(student)
+                    students_by_adm[adm_num] = student
 
-                enrollment = (
-                    await db.execute(
-                        select(StudentEnrollment).where(
-                            StudentEnrollment.school_id == school.id,
-                            StudentEnrollment.student_id == student.id,
-                            StudentEnrollment.academic_session_id == session.id,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if enrollment is None:
-                    enrollment = StudentEnrollment(
-                        school_id=school.id,
-                        student_id=student.id,
-                        academic_session_id=session.id,
-                        class_group_id=cg.id,
-                        enrollment_status="ENROLLED",
-                    )
-                    db.add(enrollment)
-                    await db.flush()
-
-                # Choose student's subjects: Core + Dept Electives + 1 Trade Subject
                 chosen_codes = list(dept_core_codes[d_code])
                 chosen_codes.extend(rng.choice(dept_elective_pools[d_code]))
                 chosen_codes.append(rng.choice(trade_pool_by_dept[d_code]))
-
-                # Give each student a realistic ability baseline so rankings spread nicely
                 student_ability = rng.uniform(0.45, 0.92)
+                planned_students.append((student, cg, d_code, chosen_codes, student_ability))
 
-                for code in chosen_codes:
-                    cs = cs_by_cg_and_code.get((cg.id, code))
-                    if cs is None:
-                        continue
+        if new_students:
+            db.add_all(new_students)
+            await db.flush()
 
-                    reg = (
-                        await db.execute(
-                            select(StudentSubjectRegistration).where(
-                                StudentSubjectRegistration.school_id == school.id,
-                                StudentSubjectRegistration.student_enrollment_id == enrollment.id,
-                                StudentSubjectRegistration.class_subject_id == cs.id,
-                            )
-                        )
-                    ).scalar_one_or_none()
-                    if reg is None:
-                        db.add(
-                            StudentSubjectRegistration(
-                                school_id=school.id,
-                                student_enrollment_id=enrollment.id,
-                                class_subject_id=cs.id,
-                                is_active=True,
-                            )
-                        )
-
-                    # Seed realistic scores for each component
-                    t_id = subject_teacher_by_code[code]
-                    for defn in defs_by_cs_id.get(cs.id, []):
-                        existing_score = (
-                            await db.execute(
-                                select(AssessmentScore.id).where(
-                                    AssessmentScore.school_id == school.id,
-                                    AssessmentScore.assessment_definition_id == defn.id,
-                                    AssessmentScore.student_enrollment_id == enrollment.id,
-                                )
-                            )
-                        ).scalar_one_or_none()
-                        if existing_score is not None:
-                            continue
-                        max_val = float(defn.max_score)
-                        raw_val = round(
-                            max(
-                                2.0,
-                                min(
-                                    max_val, max_val * (student_ability + rng.uniform(-0.12, 0.10))
-                                ),
-                            ),
-                            1,
-                        )
-                        db.add(
-                            AssessmentScore(
-                                school_id=school.id,
-                                assessment_definition_id=defn.id,
-                                student_enrollment_id=enrollment.id,
-                                raw_score=Decimal(str(raw_val)),
-                                score_status="SCORED",
-                                recorded_by_id=t_id,
-                                last_modified_by_id=t_id,
-                            )
-                        )
-
-        # Mark all ClassSubject score sheets as APPROVED so Results & Broadsheets can be tested right away
-        for (_, _), cs in cs_by_cg_and_code.items():
-            existing_status = (
+        existing_enrollments = (
+            (
                 await db.execute(
-                    select(ScoreSheetStatus).where(
-                        ScoreSheetStatus.school_id == school.id,
-                        ScoreSheetStatus.academic_term_id == term.id,
-                        ScoreSheetStatus.class_subject_id == cs.id,
+                    select(StudentEnrollment).where(
+                        StudentEnrollment.school_id == school.id,
+                        StudentEnrollment.academic_session_id == session.id,
                     )
                 )
-            ).scalar_one_or_none()
-            if existing_status is None:
-                db.add(
+            )
+            .scalars()
+            .all()
+        )
+        enrollments_by_student_id = {e.student_id: e for e in existing_enrollments}
+        new_enrollments: list[StudentEnrollment] = []
+        enrolled_plans: list[tuple[StudentEnrollment, ClassGroup, list[str], float]] = []
+
+        for student, cg, _d_code, chosen_codes, student_ability in planned_students:
+            enrollment = enrollments_by_student_id.get(student.id)
+            if enrollment is None:
+                enrollment = StudentEnrollment(
+                    school_id=school.id,
+                    student_id=student.id,
+                    academic_session_id=session.id,
+                    class_group_id=cg.id,
+                    enrollment_status="ENROLLED",
+                )
+                new_enrollments.append(enrollment)
+                enrollments_by_student_id[student.id] = enrollment
+            enrolled_plans.append((enrollment, cg, chosen_codes, student_ability))
+
+        if new_enrollments:
+            db.add_all(new_enrollments)
+            await db.flush()
+
+        existing_regs = (
+            await db.execute(
+                select(
+                    StudentSubjectRegistration.student_enrollment_id,
+                    StudentSubjectRegistration.class_subject_id,
+                ).where(StudentSubjectRegistration.school_id == school.id)
+            )
+        ).all()
+        reg_keys = {(eid, csid) for eid, csid in existing_regs}
+
+        existing_scores = (
+            await db.execute(
+                select(
+                    AssessmentScore.assessment_definition_id,
+                    AssessmentScore.student_enrollment_id,
+                ).where(AssessmentScore.school_id == school.id)
+            )
+        ).all()
+        score_keys = {(did, eid) for did, eid in existing_scores}
+
+        new_regs: list[StudentSubjectRegistration] = []
+        new_scores: list[AssessmentScore] = []
+
+        for enrollment, cg, chosen_codes, student_ability in enrolled_plans:
+            for code in chosen_codes:
+                cs = cs_by_cg_and_code.get((cg.id, code))
+                if cs is None:
+                    continue
+                if (enrollment.id, cs.id) not in reg_keys:
+                    new_regs.append(
+                        StudentSubjectRegistration(
+                            school_id=school.id,
+                            student_enrollment_id=enrollment.id,
+                            class_subject_id=cs.id,
+                            is_active=True,
+                        )
+                    )
+                    reg_keys.add((enrollment.id, cs.id))
+
+                t_id = subject_teacher_by_code[code]
+                for defn in defs_by_cs_id.get(cs.id, []):
+                    if (defn.id, enrollment.id) in score_keys:
+                        continue
+                    max_val = float(defn.max_score)
+                    raw_val = round(
+                        max(
+                            2.0,
+                            min(max_val, max_val * (student_ability + rng.uniform(-0.12, 0.10))),
+                        ),
+                        1,
+                    )
+                    new_scores.append(
+                        AssessmentScore(
+                            school_id=school.id,
+                            assessment_definition_id=defn.id,
+                            student_enrollment_id=enrollment.id,
+                            raw_score=Decimal(str(raw_val)),
+                            score_status="SCORED",
+                            recorded_by_id=t_id,
+                            last_modified_by_id=t_id,
+                        )
+                    )
+                    score_keys.add((defn.id, enrollment.id))
+
+        if new_regs:
+            db.add_all(new_regs)
+        if new_scores:
+            db.add_all(new_scores)
+
+        # Mark all ClassSubject score sheets as APPROVED so Results & Broadsheets can be tested right away
+        existing_statuses = (
+            (
+                await db.execute(
+                    select(ScoreSheetStatus.class_subject_id).where(
+                        ScoreSheetStatus.school_id == school.id,
+                        ScoreSheetStatus.academic_term_id == term.id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        status_cs_ids = set(existing_statuses)
+        new_statuses: list[ScoreSheetStatus] = []
+        for (_, _), cs in cs_by_cg_and_code.items():
+            if cs.id not in status_cs_ids:
+                new_statuses.append(
                     ScoreSheetStatus(
                         school_id=school.id,
                         academic_term_id=term.id,
@@ -1130,6 +1225,9 @@ async def seed_demo(*, reset: bool = False) -> None:
                         approved_at=now_utc - timedelta(days=1),
                     )
                 )
+                status_cs_ids.add(cs.id)
+        if new_statuses:
+            db.add_all(new_statuses)
 
         await db.commit()
         print(
