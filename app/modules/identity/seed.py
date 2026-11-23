@@ -130,6 +130,7 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, list[str]] = {
         "scores:submit",
         "scores:approve",
         "scores:unlock",
+        "reports:publish",
         "students:register",
         "students:bulk_import",
         "students:enroll",

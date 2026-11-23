@@ -686,7 +686,10 @@ async def list_report_cards(
             "class group", class_group_id or academic_level_id or department_id
         )
 
-    if not await user_has_permission(db, current_user, "reports:publish"):
+    has_school_wide_access = await user_has_permission(
+        db, current_user, "reports:publish"
+    ) or await user_has_permission(db, current_user, "scores:approve")
+    if not has_school_wide_access:
         for group in groups:
             can_publish = await user_has_permission(
                 db,
@@ -696,8 +699,16 @@ async def list_report_cards(
                 academic_level_id=group.academic_level_id,
                 class_group_id=group.id,
             )
-            if not can_publish and group.class_teacher_id != current_user.id:
-                raise InsufficientPermissionException(permission_code="reports:publish")
+            can_approve = await user_has_permission(
+                db,
+                current_user,
+                "scores:approve",
+                department_id=group.department_id,
+                academic_level_id=group.academic_level_id,
+                class_group_id=group.id,
+            )
+            if not can_publish and not can_approve and group.class_teacher_id != current_user.id:
+                raise InsufficientPermissionException(permission_code="scores:approve")
 
     group_ids = [g.id for g in groups]
 
