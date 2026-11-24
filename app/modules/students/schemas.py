@@ -40,6 +40,7 @@ class StudentCreateRequest(BaseModel):
     guardian_name: str = Field(..., min_length=2, max_length=128)
     guardian_email: EmailStr
     guardian_phone: str = Field(..., min_length=5, max_length=32)
+    home_address: str | None = Field(None, max_length=500)
     enrollment_date: date
 
     @model_validator(mode="after")
@@ -58,6 +59,7 @@ class StudentUpdateRequest(BaseModel):
     guardian_name: str | None = Field(None, min_length=2, max_length=128)
     guardian_email: EmailStr | None = None
     guardian_phone: str | None = Field(None, min_length=5, max_length=32)
+    home_address: str | None = Field(None, max_length=500)
     enrollment_date: date | None = None
 
 
@@ -80,6 +82,7 @@ class StudentResponse(BaseModel):
     guardian_name: str
     guardian_email: EmailStr
     guardian_phone: str
+    home_address: str | None = None
     enrollment_date: date
     status: StudentStatus
     created_at: datetime

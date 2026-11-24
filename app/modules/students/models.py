@@ -35,6 +35,7 @@ class Student(Base, TenantMixin, TimestampMixin):
     guardian_name: Mapped[str] = mapped_column(String(128), nullable=False)
     guardian_email: Mapped[str] = mapped_column(String(255), nullable=False)
     guardian_phone: Mapped[str] = mapped_column(String(32), nullable=False)
+    home_address: Mapped[str | None] = mapped_column(String(500), nullable=True)
     enrollment_date: Mapped[date] = mapped_column(Date, nullable=False)
     status: Mapped[str] = mapped_column(
         String(32), default="ADMITTED", nullable=False

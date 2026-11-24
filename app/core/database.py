@@ -26,7 +26,7 @@ if settings.DB_SSL_MODE:
     _connect_args["ssl"] = settings.DB_SSL_MODE
 
 _engine_options: dict = {
-    "echo": settings.DEBUG,
+    "echo": settings.SQL_ECHO,
     "future": True,
     "pool_pre_ping": True,
     "connect_args": _connect_args,

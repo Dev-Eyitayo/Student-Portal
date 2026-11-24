@@ -116,6 +116,18 @@ SYSTEM_PERMISSIONS = [
         "category": "ADMIN",
         "description": "Review system-wide security and computation audit logs.",
     },
+    {
+        "code": "timetable:manage",
+        "name": "Manage Timetables & Schedules",
+        "category": "ADMIN",
+        "description": "Configure bell schedules, rules, sync groups, and generate draft timetables.",
+    },
+    {
+        "code": "timetable:publish",
+        "name": "Publish Timetables",
+        "category": "ADMIN",
+        "description": "Publish and archive term timetables for teachers and classes.",
+    },
 ]
 
 DEFAULT_ROLE_PERMISSIONS: dict[str, list[str]] = {
@@ -141,6 +153,8 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, list[str]] = {
         "teachers:assign",
         "users:manage",
         "audit:view",
+        "timetable:manage",
+        "timetable:publish",
     ],
 }
 
