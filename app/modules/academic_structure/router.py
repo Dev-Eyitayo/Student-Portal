@@ -890,7 +890,7 @@ async def get_admin_dashboard(
     response_model=SuccessResponse[DashboardIssuesPageResponse],
 )
 async def list_dashboard_issues(
-    issue_type: str | None = Query(None, max_length=64),
+    issue_type: str | None = Query(None, max_length=256),
     class_group_id: UUID | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
