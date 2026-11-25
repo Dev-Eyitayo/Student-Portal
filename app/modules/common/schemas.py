@@ -1,10 +1,12 @@
 from math import ceil
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, Field
 
+T = TypeVar("T")
 
-class SuccessResponse[T](BaseModel):
+
+class SuccessResponse(BaseModel, Generic[T]):
     """Standard success envelope returned by every API endpoint."""
 
     success: bool = True
@@ -43,6 +45,6 @@ class PageMeta(BaseModel):
         )
 
 
-class Page[T](BaseModel):
+class Page(BaseModel, Generic[T]):
     items: list[T]
     meta: PageMeta

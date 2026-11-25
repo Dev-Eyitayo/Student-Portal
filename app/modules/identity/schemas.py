@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.modules.common.schemas import PageMeta
+from app.modules.common.validators import validate_optional_nigerian_phone
 
 
 class UserRole(StrEnum):
@@ -118,6 +119,11 @@ class StaffInviteRequest(BaseModel):
     role: str = Field(default=StaffRole.TEACHER.value, min_length=1, max_length=32)
     staff_id_number: str = Field(..., min_length=1, max_length=64)
     specialization: str | None = Field(None, max_length=128)
+
+    @field_validator("phone_number", mode="before")
+    @classmethod
+    def validate_phone(cls, value: Any) -> str | None:
+        return validate_optional_nigerian_phone(value)
 
 
 class StaffInviteResponse(BaseModel):
@@ -503,6 +509,11 @@ class MeUpdateRequest(BaseModel):
             return cleaned
         return value
 
+    @field_validator("phone_number", mode="before")
+    @classmethod
+    def validate_phone(cls, value: Any) -> str | None:
+        return validate_optional_nigerian_phone(value)
+
 
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(..., min_length=1)
@@ -526,6 +537,11 @@ class StaffUpdateRequest(BaseModel):
                 raise ValueError("This field cannot be blank.")
             return cleaned
         return value
+
+    @field_validator("phone_number", mode="before")
+    @classmethod
+    def validate_phone(cls, value: Any) -> str | None:
+        return validate_optional_nigerian_phone(value)
 
 
 class RolePermissionsResponse(BaseModel):
@@ -553,3 +569,23 @@ class CreateSchoolRoleRequest(BaseModel):
 
 class UpdateRolePermissionsRequest(BaseModel):
     permission_codes: list[str]
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_email(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+
+class ResetPasswordVerifyResponse(BaseModel):
+    valid: bool = True
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8, max_length=128)

@@ -10,6 +10,8 @@ from typing import Any
 from openpyxl import load_workbook
 from pydantic import BaseModel, EmailStr, Field, ValidationError, field_validator
 
+from app.modules.common.validators import validate_optional_nigerian_phone
+
 MAX_STAFF_IMPORT_BYTES = 5 * 1024 * 1024
 MAX_STAFF_IMPORT_ROWS = 2000
 ALLOWED_STAFF_ROLES = {"TEACHER", "ACADEMIC_OFFICER", "SCHOOL_ADMIN"}
@@ -52,13 +54,18 @@ class StaffBulkImportRow(BaseModel):
             return value
         return str(value).strip()
 
-    @field_validator("phone_number", "specialization", mode="before")
+    @field_validator("specialization", mode="before")
     @classmethod
     def blank_optional_text(cls, value: Any) -> str | None:
         if value is None:
             return None
         text = str(value).strip()
         return text or None
+
+    @field_validator("phone_number", mode="before")
+    @classmethod
+    def validate_phone(cls, value: Any) -> str | None:
+        return validate_optional_nigerian_phone(value)
 
     @field_validator("role", mode="before")
     @classmethod

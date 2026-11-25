@@ -47,6 +47,7 @@ from app.modules.identity.schemas import (
     ChangePasswordRequest,
     CreateSchoolRoleRequest,
     DeactivateUserResponse,
+    ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
     MeResponse,
@@ -55,6 +56,8 @@ from app.modules.identity.schemas import (
     PermissionCatalogItemResponse,
     PermissionGrantRequest,
     RefreshTokenRequest,
+    ResetPasswordRequest,
+    ResetPasswordVerifyResponse,
     RolePermissionsResponse,
     SchoolConfigurationResponse,
     SchoolConfigurationUpdateRequest,
@@ -349,6 +352,78 @@ async def logout(
     response.delete_cookie(REFRESH_COOKIE_NAME, path=REFRESH_COOKIE_PATH)
     return SuccessResponse[MessageResponse](
         data=MessageResponse(message="You have been successfully signed out.")
+    )
+
+
+@router.post(
+    "/forgot-password",
+    response_model=SuccessResponse[MessageResponse],
+    status_code=status.HTTP_200_OK,
+)
+async def forgot_password(
+    req: ForgotPasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Initiates a secure, single-use password reset flow.
+    Always returns HTTP 200 with an identical message to prevent account enumeration.
+    """
+    await services.request_password_reset(db, req.email, _client_ip(request))
+    return SuccessResponse[MessageResponse](
+        data=MessageResponse(
+            message="If an account exists for that email address, we've sent password reset instructions."
+        )
+    )
+
+
+@router.get(
+    "/reset-password/verify",
+    response_model=SuccessResponse[ResetPasswordVerifyResponse],
+    status_code=status.HTTP_200_OK,
+)
+async def verify_reset_password_token(
+    request: Request,
+    token: str = Query(..., min_length=1, description="The password reset token to verify"),
+):
+    """
+    Verifies that a password reset token exists and is valid without consuming it.
+    Does not leak PII.
+    """
+    await services.verify_password_reset_token(token, _client_ip(request))
+    return SuccessResponse[ResetPasswordVerifyResponse](
+        data=ResetPasswordVerifyResponse(valid=True)
+    )
+
+
+@router.post(
+    "/reset-password",
+    response_model=SuccessResponse[MessageResponse],
+    status_code=status.HTTP_200_OK,
+)
+async def reset_password(
+    req: ResetPasswordRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Atomically consumes the single-use reset token, sets the new password,
+    invalidates existing sessions, and clears any active refresh token cookie.
+    """
+    user_agent = request.headers.get("user-agent", "")
+    await services.complete_password_reset(
+        db,
+        token=req.token,
+        new_password=req.new_password,
+        client_ip=_client_ip(request),
+        user_agent=user_agent,
+    )
+    response.delete_cookie(REFRESH_COOKIE_NAME, path=REFRESH_COOKIE_PATH)
+    return SuccessResponse[MessageResponse](
+        data=MessageResponse(
+            message="Your password has been reset. You can now sign in with your new password."
+        )
     )
 
 

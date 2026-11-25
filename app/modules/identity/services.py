@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import logging
 import secrets
 from copy import deepcopy
 from dataclasses import dataclass
@@ -13,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
-from app.core.exceptions import ConflictException, ResourceNotFoundException
+from app.core.exceptions import ConflictException, ResourceNotFoundException, ValidationException
+from app.core.redis import get_redis
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -71,6 +74,8 @@ from app.modules.identity.schemas import (
     StaffVerifyInviteResponse,
     TokenResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def _commit_or_conflict(
@@ -2191,3 +2196,238 @@ async def update_school_user(
         "last_login_at": target.last_login_at,
         "created_at": target.created_at,
     }
+
+
+async def _enforce_forgot_password_rate_limit(client_ip: str | None, email: str) -> None:
+    try:
+        redis = get_redis()
+    except Exception:
+        return
+
+    # 1. IP rate limiting: max 10 requests / 15 minutes (900 seconds)
+    if client_ip:
+        ip_key = f"rl:pwd_reset:ip:{client_ip}"
+        try:
+            count = await redis.incr(ip_key)
+            if count == 1:
+                await redis.expire(ip_key, 900)
+            if count > 10:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many password reset requests from this network. Please wait a few minutes before trying again.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    # 2. Email rate limiting
+    email_hash = hashlib.sha256(email.lower().strip().encode("utf-8")).hexdigest()
+
+    # Per-email cooldown (configurable, default 60s)
+    cooldown_secs = settings.PASSWORD_RESET_COOLDOWN_SECONDS
+    if cooldown_secs > 0:
+        cooldown_key = f"rl:pwd_reset:cooldown:{email_hash}"
+        try:
+            is_new = await redis.set(cooldown_key, "1", ex=cooldown_secs, nx=True)
+            if not is_new:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="A password reset request was recently sent for this account. Please wait a minute before requesting another.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    # Per-email hourly limit: max 5 requests / 1 hour (3600 seconds)
+    hour_key = f"rl:pwd_reset:hour:{email_hash}"
+    try:
+        count = await redis.incr(hour_key)
+        if count == 1:
+            await redis.expire(hour_key, 3600)
+        if count > 5:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many password reset requests for this account. Please wait an hour before trying again.",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+
+async def _enforce_reset_verify_rate_limit(client_ip: str | None) -> None:
+    if not client_ip:
+        return
+    try:
+        redis = get_redis()
+        key = f"rl:pwd_reset_verify:ip:{client_ip}"
+        count = await redis.incr(key)
+        if count == 1:
+            await redis.expire(key, 60)
+        if count > 20:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many verification attempts. Please wait a minute and try again.",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+
+async def request_password_reset(
+    db: AsyncSession,
+    email: str,
+    client_ip: str | None = None,
+) -> None:
+    normalized_email = email.strip().lower()
+    await _enforce_forgot_password_rate_limit(client_ip, normalized_email)
+
+    stmt = select(User).where(func.lower(User.email) == normalized_email)
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+
+    # Anti-enumeration & timing safety:
+    # If user does not exist, user is deleted, or user is inactive:
+    # Do not generate token or send email, perform constant-time dummy op and return.
+    if not user or user.deleted_at is not None or not user.is_active:
+        secrets.token_urlsafe(32)
+        hashlib.sha256(b"dummy_timing_mitigation_token").hexdigest()
+        return
+
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    ttl_seconds = settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES * 60
+
+    try:
+        redis = get_redis()
+        user_key = f"pwd_reset:user:{user.id}"
+        old_token_hash = await redis.get(user_key)
+        if old_token_hash:
+            await redis.delete(f"pwd_reset:token:{old_token_hash}")
+
+        token_key = f"pwd_reset:token:{token_hash}"
+        await redis.set(token_key, str(user.id), ex=ttl_seconds)
+        await redis.set(user_key, token_hash, ex=ttl_seconds)
+    except Exception:
+        logger.exception("Failed to persist password reset token in Redis for user %s", user.id)
+        return
+
+    from app.modules.identity.tasks import send_password_reset_email
+
+    send_password_reset_email.delay(user.email, user.first_name, raw_token)
+
+
+async def verify_password_reset_token(token: str, client_ip: str | None = None) -> bool:
+    await _enforce_reset_verify_rate_limit(client_ip)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    token_key = f"pwd_reset:token:{token_hash}"
+
+    try:
+        redis = get_redis()
+        user_id_str = await redis.get(token_key)
+    except Exception:
+        user_id_str = None
+
+    if not user_id_str:
+        raise ValidationException(
+            "This password reset link is invalid or has expired. Please request a new password reset."
+        )
+
+    return True
+
+
+async def _atomic_consume_reset_token(redis: Any, token_hash: str) -> str | None:
+    token_key = f"pwd_reset:token:{token_hash}"
+    try:
+        return await redis.getdel(token_key)
+    except Exception:
+        lua_script = """
+        local val = redis.call('GET', KEYS[1])
+        if val then
+            redis.call('DEL', KEYS[1])
+        end
+        return val
+        """
+        try:
+            return await redis.eval(lua_script, 1, token_key)
+        except Exception:
+            return None
+
+
+async def complete_password_reset(
+    db: AsyncSession,
+    token: str,
+    new_password: str,
+    client_ip: str | None = None,
+    user_agent: str | None = None,
+) -> None:
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    try:
+        redis = get_redis()
+        user_id_str = await _atomic_consume_reset_token(redis, token_hash)
+    except Exception:
+        user_id_str = None
+
+    if not user_id_str:
+        raise ValidationException(
+            "This password reset link is invalid or has expired. Please request a new password reset."
+        )
+
+    try:
+        user_id = UUID(user_id_str)
+    except (ValueError, TypeError):
+        raise ValidationException(
+            "This password reset link is invalid or has expired. Please request a new password reset."
+        ) from None
+
+    try:
+        await redis.delete(f"pwd_reset:user:{user_id}")
+    except Exception:
+        pass
+
+    stmt = (
+        select(User)
+        .options(selectinload(User.school), selectinload(User.staff_profile))
+        .where(User.id == user_id)
+    )
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+
+    if not user or not user.is_active or user.deleted_at is not None:
+        raise ValidationException(
+            "This account is not eligible for password reset. Please contact your administrator."
+        )
+
+    user.password_hash = await asyncio.to_thread(hash_password, new_password)
+    user.token_valid_after = datetime.now(UTC)
+
+    await db.flush()
+
+    if user.school_id is not None:
+        await _scope_audit_to_school(db, user.school_id)
+
+    record_audit_log(
+        db,
+        AuditContext(
+            school_id=user.school_id,
+            actor_id=user.id,
+            actor_ip=client_ip or "0.0.0.0",
+        ),
+        action="PASSWORD_RESET_COMPLETED",
+        resource_type="User",
+        resource_id=user.id,
+        diff_payload={
+            "action": "PASSWORD_RESET_COMPLETED",
+            "actor_ip": client_ip or "0.0.0.0",
+            "user_agent": user_agent or "",
+        },
+    )
+
+    await db.commit()
+
+    from app.modules.identity.tasks import send_password_changed_alert_email
+
+    send_password_changed_alert_email.delay(user.email, user.first_name)
