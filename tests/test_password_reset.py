@@ -470,3 +470,49 @@ async def test_password_reset_rate_limiting():
         assert last_resp.status_code == 429
         assert last_resp.json()["error"]["code"] == "RATE_LIMITED"
         assert "Too many password reset requests" in last_resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_request_password_reset_aborts_email_on_redis_failure(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.modules.identity import services as identity_services
+
+    queued_resets: list[tuple] = []
+
+    class FakeResetEmailTask:
+        def delay(self, *args, **kwargs):
+            queued_resets.append(args)
+
+    monkeypatch.setattr(identity_tasks, "send_password_reset_email", FakeResetEmailTask())
+
+    class BrokenRedis:
+        async def incr(self, *args, **kwargs):
+            return 1
+
+        async def expire(self, *args, **kwargs):
+            return True
+
+        async def set(self, key, *args, **kwargs):
+            if str(key).startswith("pwd_reset:"):
+                raise ConnectionError("Redis unavailable")
+            return True
+
+        async def get(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(identity_services, "get_redis", lambda: BrokenRedis())
+
+    fake_user = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="teacher@olivet-test.edu.ng",
+        first_name="Funke",
+        is_active=True,
+        deleted_at=None,
+    )
+    fake_result = SimpleNamespace(scalar_one_or_none=lambda: fake_user)
+    fake_db = SimpleNamespace(execute=AsyncMock(return_value=fake_result))
+
+    await identity_services.request_password_reset(fake_db, fake_user.email, "10.0.0.6")
+    assert queued_resets == []

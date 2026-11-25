@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 import secrets
 from copy import deepcopy
 from dataclasses import dataclass
@@ -73,6 +74,8 @@ from app.modules.identity.schemas import (
     StaffVerifyInviteResponse,
     TokenResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def _commit_or_conflict(
@@ -2309,7 +2312,8 @@ async def request_password_reset(
         await redis.set(token_key, str(user.id), ex=ttl_seconds)
         await redis.set(user_key, token_hash, ex=ttl_seconds)
     except Exception:
-        pass
+        logger.exception("Failed to persist password reset token in Redis for user %s", user.id)
+        return
 
     from app.modules.identity.tasks import send_password_reset_email
 
