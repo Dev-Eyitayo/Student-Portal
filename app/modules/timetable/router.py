@@ -546,9 +546,7 @@ async def apply_relaxation_suggestion(
 ):
     school_id = require_school_id(current_user)
     await services._get_timetable_or_404(db, school_id, timetable_id)
-    result = await services.apply_relaxation(
-        db, school_id, req, _audit(current_user, request)
-    )
+    result = await services.apply_relaxation(db, school_id, req, _audit(current_user, request))
     return SuccessResponse[dict](data=result)
 
 

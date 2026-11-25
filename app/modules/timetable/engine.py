@@ -341,7 +341,15 @@ class _RoomBooking:
     class_subject_id: UUID
 
 
-_DAY_NAMES = {1: "Monday", 2: "Tuesday", 3: "Wednesday", 4: "Thursday", 5: "Friday", 6: "Saturday", 7: "Sunday"}
+_DAY_NAMES = {
+    1: "Monday",
+    2: "Tuesday",
+    3: "Wednesday",
+    4: "Thursday",
+    5: "Friday",
+    6: "Saturday",
+    7: "Sunday",
+}
 
 
 def _fmt_slot(s: SlotSpec) -> str:
@@ -686,13 +694,20 @@ def _solve_once(
             )
             teacher_bookings.setdefault(tid, []).append(
                 _TeacherBooking(
-                    s, cs.level_category, e.sync_group_id, cs.class_group_name, cs.subject_name,
-                    cs.class_subject_id, cs.subject_code,
+                    s,
+                    cs.level_category,
+                    e.sync_group_id,
+                    cs.class_group_name,
+                    cs.subject_name,
+                    cs.class_subject_id,
+                    cs.subject_code,
                 )
             )
         if e.room_id:
             room_bookings.setdefault(e.room_id, []).append(
-                _RoomBooking(s, e.sync_group_id, cs.class_group_name, cs.subject_name, cs.class_subject_id)
+                _RoomBooking(
+                    s, e.sync_group_id, cs.class_group_name, cs.subject_name, cs.class_subject_id
+                )
             )
 
     rng = random.Random(seed)
@@ -792,7 +807,10 @@ def _solve_once(
                             valid = False
                             break
                     for b in teacher_bookings.get(tid, []):
-                        if unit.sync_type == "JOINT_CLASS" and b.sync_group_id == unit.sync_group_id:
+                        if (
+                            unit.sync_type == "JOINT_CLASS"
+                            and b.sync_group_id == unit.sync_group_id
+                        ):
                             continue
                         gap = (
                             tc.min_gap_minutes_between_categories
@@ -822,7 +840,10 @@ def _solve_once(
                 r_id = unit.room_by_member.get(m.class_subject_id)
                 if r_id is not None:
                     for b in room_bookings.get(r_id, []):
-                        if unit.sync_type == "JOINT_CLASS" and b.sync_group_id == unit.sync_group_id:
+                        if (
+                            unit.sync_type == "JOINT_CLASS"
+                            and b.sync_group_id == unit.sync_group_id
+                        ):
                             continue
                         if any(
                             intervals_overlap(
@@ -914,13 +935,24 @@ def _solve_once(
             )
             teacher_bookings.setdefault(tid, []).append(
                 _TeacherBooking(
-                    slot, m.level_category, entry.sync_group_id, m.class_group_name, m.subject_name,
-                    m.class_subject_id, m.subject_code,
+                    slot,
+                    m.level_category,
+                    entry.sync_group_id,
+                    m.class_group_name,
+                    m.subject_name,
+                    m.class_subject_id,
+                    m.subject_code,
                 )
             )
         if entry.room_id is not None:
             room_bookings.setdefault(entry.room_id, []).append(
-                _RoomBooking(slot, entry.sync_group_id, m.class_group_name, m.subject_name, m.class_subject_id)
+                _RoomBooking(
+                    slot,
+                    entry.sync_group_id,
+                    m.class_group_name,
+                    m.subject_name,
+                    m.class_subject_id,
+                )
             )
 
     def _uncommit_entry(entry: SolvedEntry, slot: SlotSpec, m: ClassSubjectSpec) -> None:
@@ -938,13 +970,20 @@ def _solve_once(
             )
             if tid in teacher_bookings:
                 booking = _TeacherBooking(
-                    slot, m.level_category, entry.sync_group_id, m.class_group_name, m.subject_name,
-                    m.class_subject_id, m.subject_code,
+                    slot,
+                    m.level_category,
+                    entry.sync_group_id,
+                    m.class_group_name,
+                    m.subject_name,
+                    m.class_subject_id,
+                    m.subject_code,
                 )
                 if booking in teacher_bookings[tid]:
                     teacher_bookings[tid].remove(booking)
         if entry.room_id is not None and entry.room_id in room_bookings:
-            rbooking = _RoomBooking(slot, entry.sync_group_id, m.class_group_name, m.subject_name, m.class_subject_id)
+            rbooking = _RoomBooking(
+                slot, entry.sync_group_id, m.class_group_name, m.subject_name, m.class_subject_id
+            )
             if rbooking in room_bookings[entry.room_id]:
                 room_bookings[entry.room_id].remove(rbooking)
 
@@ -1270,7 +1309,10 @@ def _solve_once(
                     _note(
                         "CLASS_ARM_BUSY",
                         f"{m.class_group_name} already has {busy_with} at {_fmt_slot(ms1)}.",
-                        {"bell_schedule_id": str(m.bell_schedule_id), "class_group_id": str(m.class_group_id)},
+                        {
+                            "bell_schedule_id": str(m.bell_schedule_id),
+                            "class_group_id": str(m.class_group_id),
+                        },
                     )
                     break
 
@@ -1291,12 +1333,21 @@ def _solve_once(
                         continue
                     if any(
                         intervals_overlap(
-                            ns.day_of_week, ns.start_time, ns.end_time, os.day_of_week, os.start_time, os.end_time
+                            ns.day_of_week,
+                            ns.start_time,
+                            ns.end_time,
+                            os.day_of_week,
+                            os.start_time,
+                            os.end_time,
                         )
                         for ns in needed_slots
                         for os in other_slots
                     ):
-                        other_name = cs_by_id[other_csid].subject_name if other_csid in cs_by_id else "a linked elective"
+                        other_name = (
+                            cs_by_id[other_csid].subject_name
+                            if other_csid in cs_by_id
+                            else "a linked elective"
+                        )
                         _note(
                             "DISJOINT_ELECTIVE_CONFLICT",
                             f"{m.subject_name} clashes with {other_name} (students take both) at {_fmt_slot(ms1)}.",
@@ -1335,9 +1386,16 @@ def _solve_once(
                             teacher_hit = True
                             break
                     for b in teacher_bookings.get(tid, []):
-                        if unit.sync_type == "JOINT_CLASS" and b.sync_group_id == unit.sync_group_id:
+                        if (
+                            unit.sync_type == "JOINT_CLASS"
+                            and b.sync_group_id == unit.sync_group_id
+                        ):
                             continue
-                        gap = tc.min_gap_minutes_between_categories if (tc and b.level_category != m.level_category) else 0
+                        gap = (
+                            tc.min_gap_minutes_between_categories
+                            if (tc and b.level_category != m.level_category)
+                            else 0
+                        )
                         if any(
                             intervals_overlap(
                                 ns.day_of_week,
@@ -1373,11 +1431,19 @@ def _solve_once(
                 if r_id is not None:
                     room_hit = False
                     for b in room_bookings.get(r_id, []):
-                        if unit.sync_type == "JOINT_CLASS" and b.sync_group_id == unit.sync_group_id:
+                        if (
+                            unit.sync_type == "JOINT_CLASS"
+                            and b.sync_group_id == unit.sync_group_id
+                        ):
                             continue
                         if any(
                             intervals_overlap(
-                                ns.day_of_week, ns.start_time, ns.end_time, b.slot.day_of_week, b.slot.start_time, b.slot.end_time
+                                ns.day_of_week,
+                                ns.start_time,
+                                ns.end_time,
+                                b.slot.day_of_week,
+                                b.slot.start_time,
+                                b.slot.end_time,
                             )
                             for ns in needed_slots
                         ):
@@ -1395,14 +1461,21 @@ def _solve_once(
 
         subj = anchor.subject_name
         cgname = ", ".join(sorted({m.class_group_name for m in unit.members}))
-        header = f"Could not place {'a double period of ' if unit.is_double else ''}{subj} for {cgname}."
+        header = (
+            f"Could not place {'a double period of ' if unit.is_double else ''}{subj} for {cgname}."
+        )
         ranked = sorted(reason_counts.items(), key=lambda kv: -kv[1])
         if not ranked:
-            lines = [header, "No teaching periods in this bell schedule were even tried (the schedule may have zero teaching slots)."]
+            lines = [
+                header,
+                "No teaching periods in this bell schedule were even tried (the schedule may have zero teaching slots).",
+            ]
         else:
             lines = [header]
             for code, count in ranked[:3]:
-                lines.append(f"- {reason_examples[code]} ({count} of {total_tried} weekly slot(s) blocked this way)")
+                lines.append(
+                    f"- {reason_examples[code]} ({count} of {total_tried} weekly slot(s) blocked this way)"
+                )
         message = "\n".join(lines)
         details: dict[str, object] = {
             "class_subject_ids": [str(m.class_subject_id) for m in unit.members],

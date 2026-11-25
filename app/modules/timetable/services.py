@@ -1334,12 +1334,18 @@ async def _resolve_class_subject_context(
     if cs is None:
         return None
     off = (
-        await db.execute(select(SubjectOffering).where(SubjectOffering.id == cs.subject_offering_id))
+        await db.execute(
+            select(SubjectOffering).where(SubjectOffering.id == cs.subject_offering_id)
+        )
     ).scalar_one_or_none()
-    cg = (await db.execute(select(ClassGroup).where(ClassGroup.id == cs.class_group_id))).scalar_one_or_none()
+    cg = (
+        await db.execute(select(ClassGroup).where(ClassGroup.id == cs.class_group_id))
+    ).scalar_one_or_none()
     if off is None or cg is None:
         return None
-    subj = (await db.execute(select(Subject).where(Subject.id == off.subject_id))).scalar_one_or_none()
+    subj = (
+        await db.execute(select(Subject).where(Subject.id == off.subject_id))
+    ).scalar_one_or_none()
     if subj is None:
         return None
     return cs, off, subj, cg
@@ -1606,7 +1612,9 @@ async def build_relaxation_suggestions(
                 picked_code, picked_data = candidate_code, rdata
                 break
             suggestion = (
-                await _build_suggestion_for_reason(db, school_id, idx, code, message, picked_code, picked_data)
+                await _build_suggestion_for_reason(
+                    db, school_id, idx, code, message, picked_code, picked_data
+                )
                 if picked_code
                 else None
             )
@@ -1624,10 +1632,16 @@ async def build_relaxation_suggestions(
             suggestions.append(suggestion)
             continue
 
-        if code in ("CLASS_CAPACITY_EXCEEDED", "ROOM_CAPACITY_EXCEEDED", "TEACHER_WEEKLY_LOAD_EXCEEDED"):
+        if code in (
+            "CLASS_CAPACITY_EXCEEDED",
+            "ROOM_CAPACITY_EXCEEDED",
+            "TEACHER_WEEKLY_LOAD_EXCEEDED",
+        ):
             data = dict(details)
             data.setdefault("academic_session_id", session_id)
-            suggestion = await _build_suggestion_for_reason(db, school_id, idx, code, message, code, data)
+            suggestion = await _build_suggestion_for_reason(
+                db, school_id, idx, code, message, code, data
+            )
             if suggestion is None:
                 suggestion = RelaxationSuggestion(
                     id=f"{idx}:none",
@@ -1879,7 +1893,8 @@ async def apply_relaxation(
             (
                 r
                 for r in rows
-                if (r.max_periods_per_day if cap_type == "day" else r.max_periods_per_week) is not None
+                if (r.max_periods_per_day if cap_type == "day" else r.max_periods_per_week)
+                is not None
             ),
             None,
         )
@@ -1940,7 +1955,9 @@ async def apply_relaxation(
             .scalars()
             .all()
         )
-        match = next((r for r in rows if r.day_of_week is None or r.day_of_week == day_of_week), None)
+        match = next(
+            (r for r in rows if r.day_of_week is None or r.day_of_week == day_of_week), None
+        )
         if match is None:
             raise ResourceNotFoundException("teacher availability window", teacher_id)
         now = _now_utc()
