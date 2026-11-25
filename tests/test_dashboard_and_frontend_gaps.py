@@ -271,7 +271,16 @@ async def test_dashboard_staff_filters_attendance_sheets_and_report_cards(
             headers=headers,
         )
         assert issues_resp.status_code == 200, issues_resp.text
-        assert len(issues_resp.json()["data"]["items"]) > 0
+        issue_items = issues_resp.json()["data"]["items"]
+        assert len(issue_items) > 0
+        assert issue_items[0]["target_route"].startswith("/classes-terms")
+
+        multi_issues_resp = await client.get(
+            "/api/v1/structure/dashboard/issues?issue_type=MISSING_CLASS_TEACHER,UNASSIGNED_SUBJECT",
+            headers=headers,
+        )
+        assert multi_issues_resp.status_code == 200, multi_issues_resp.text
+        assert len(multi_issues_resp.json()["data"]["items"]) >= len(issue_items)
 
         teacher_dash = await client.get("/api/v1/structure/dashboard/teacher", headers=headers)
         assert teacher_dash.status_code == 200, teacher_dash.text

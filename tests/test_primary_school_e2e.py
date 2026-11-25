@@ -150,11 +150,11 @@ async def test_primary_school_e2e_full_lifecycle():
         tpl_data = apply_resp.json()["data"]
         assert tpl_data["levels_created"] == 6
         assert tpl_data["departments_created"] == 0
-        assert tpl_data["arms_created"] == 4
-        assert tpl_data["class_groups_created"] == 24
-        assert tpl_data["subjects_created"] == 10
-        assert tpl_data["subject_offerings_created"] == 60
-        assert tpl_data["class_subjects_created"] == 240
+        assert tpl_data["arms_created"] == 3
+        assert tpl_data["class_groups_created"] == 18
+        assert tpl_data["subjects_created"] == 13
+        assert tpl_data["subject_offerings_created"] == 78
+        assert tpl_data["class_subjects_created"] == 234
 
         # Fetch class groups to find Basic 1 A
         levels_resp = await client.get("/api/v1/structure/levels", headers=headers)
@@ -179,14 +179,16 @@ async def test_primary_school_e2e_full_lifecycle():
         # 3. Enroll a student in Basic 1-A
         enrollment = await _enroll_student(client, headers, suffix, basic_1_a["id"])
 
-        # 4. Verify automatic compulsory subject registration for all 10 primary subjects
+        # 4. Verify automatic compulsory subject registration for the 8 non-elective primary subjects
+        # (the template also provisions 5 elective subjects, but electives are never
+        # auto-registered -- a student must explicitly register for those).
         reg_resp = await client.get(
             f"/api/v1/enrollments/{enrollment['id']}/subject-registrations",
             headers=headers,
         )
         assert reg_resp.status_code == 200, reg_resp.text
         registrations = reg_resp.json()["data"]["items"]
-        assert len(registrations) == 10
+        assert len(registrations) == 8
         assert all(reg["subject_category"] == "COMPULSORY_CORE" for reg in registrations)
         assert all(reg["is_active"] is True for reg in registrations)
 
@@ -236,46 +238,56 @@ async def test_primary_school_e2e_full_lifecycle():
         )
 
         # 6. Test score entry, submission, approval, computation, and broadsheet
+        # The template offers 13 class subjects for this arm (8 compulsory + 5
+        # electives), but the student only registered for the 8 compulsory ones.
+        # calculate-term requires every offered class subject's score sheet to be
+        # resolved, so the 5 electives still need a (trivial, zero-student) approval.
         cs_resp = await client.get(
             "/api/v1/class-subjects",
             params={"class_group_id": basic_1_a["id"], "page_size": 20},
             headers=headers,
         )
         assert cs_resp.status_code == 200, cs_resp.text
-        class_subjects = cs_resp.json()["data"]["items"]
-        assert len(class_subjects) == 10
+        all_class_subjects = cs_resp.json()["data"]["items"]
+        assert len(all_class_subjects) == 13
+        registered_ids = {reg["class_subject_id"] for reg in registrations}
+        registered_class_subjects = [cs for cs in all_class_subjects if cs["id"] in registered_ids]
+        assert len(registered_class_subjects) == 8
 
-        # Enter scores, submit, and approve all 10 primary class subjects
         scores_map = {"TEST1": 8, "TEST2": 9, "ASSIGN": 8, "EXAM": 55}  # Total = 80 -> Grade A
-        for cs in class_subjects:
-            defs_resp = await client.get(
-                "/api/v1/assessments/definitions",
-                params={"academic_term_id": term_id, "class_subject_id": cs["id"]},
-                headers=headers,
-            )
-            assert defs_resp.status_code == 200, defs_resp.text
-            definitions = {d["code"]: d for d in defs_resp.json()["data"]["items"]}
-            assert set(definitions.keys()) == {"TEST1", "TEST2", "ASSIGN", "EXAM"}
-
-            for code, raw_score in scores_map.items():
-                defn = definitions[code]
-                score_entry_resp = await client.post(
-                    "/api/v1/assessments/scores/bulk-entry",
-                    json={
-                        "class_subject_id": cs["id"],
-                        "assessment_definition_id": defn["id"],
-                        "scores": [
-                            {
-                                "student_enrollment_id": enrollment["id"],
-                                "score_status": "SCORED",
-                                "raw_score": raw_score,
-                            }
-                        ],
-                    },
+        for cs in all_class_subjects:
+            if cs["id"] in registered_ids:
+                defs_resp = await client.get(
+                    "/api/v1/assessments/definitions",
+                    params={"academic_term_id": term_id, "class_subject_id": cs["id"]},
                     headers=headers,
                 )
-                assert score_entry_resp.status_code == 200, score_entry_resp.text
+                assert defs_resp.status_code == 200, defs_resp.text
+                definitions = {d["code"]: d for d in defs_resp.json()["data"]["items"]}
+                assert set(definitions.keys()) == {"TEST1", "TEST2", "ASSIGN", "EXAM"}
 
+                for code, raw_score in scores_map.items():
+                    defn = definitions[code]
+                    score_entry_resp = await client.post(
+                        "/api/v1/assessments/scores/bulk-entry",
+                        json={
+                            "class_subject_id": cs["id"],
+                            "assessment_definition_id": defn["id"],
+                            "scores": [
+                                {
+                                    "student_enrollment_id": enrollment["id"],
+                                    "score_status": "SCORED",
+                                    "raw_score": raw_score,
+                                }
+                            ],
+                        },
+                        headers=headers,
+                    )
+                    assert score_entry_resp.status_code == 200, score_entry_resp.text
+
+            # Every offered class subject's score sheet must be submitted & approved
+            # before calculate-term will run for this class group -- for the 5
+            # electives nobody registered for, this is a trivial zero-student approval.
             submit_resp = await client.post(
                 "/api/v1/assessments/submit",
                 json={"academic_term_id": term_id, "class_subject_id": cs["id"]},
@@ -299,7 +311,7 @@ async def test_primary_school_e2e_full_lifecycle():
         assert calc_resp.status_code == 200, calc_resp.text
         calc_data = calc_resp.json()["data"]
         assert calc_data["students_calculated"] == 1
-        assert calc_data["subject_results_upserted"] == 10
+        assert calc_data["subject_results_upserted"] == 8
 
         # Check broadsheet
         bs_resp = await client.get(
@@ -312,7 +324,7 @@ async def test_primary_school_e2e_full_lifecycle():
         student_bs = bs_data["students"][0]
         subjects_by_id = {s["class_subject_id"]: s for s in student_bs["subjects"]}
         # In primary grading scale (A: 70-100), 80/100 must yield grade "A", NOT secondary "A1"
-        for cs in class_subjects:
+        for cs in registered_class_subjects:
             subj_result = subjects_by_id[cs["id"]]
             assert subj_result["total_score"] == "80.00"
             assert subj_result["grade"] == "A"
@@ -332,7 +344,7 @@ async def test_primary_school_e2e_full_lifecycle():
 @pytest.mark.asyncio
 async def test_primary_compulsory_registration_backfill():
     """Verify that when a student is already enrolled in a class before template
-    subjects are applied, applying the primary template backfills all 10 compulsory
+    subjects are applied, applying the primary template backfills all 8 compulsory
     subject registrations for that student."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -404,16 +416,16 @@ async def test_primary_compulsory_registration_backfill():
         assert apply_resp.status_code == 201, apply_resp.text
         apply_data = apply_resp.json()["data"]
         # Backfill should have created subject registrations for the enrolled student!
-        assert apply_data["subject_registrations_created"] == 10
+        assert apply_data["subject_registrations_created"] == 8
 
-        # 4. Verify student now has all 10 compulsory registrations
+        # 4. Verify student now has all 8 compulsory registrations
         reg_after = await client.get(
             f"/api/v1/enrollments/{enrollment['id']}/subject-registrations",
             headers=headers,
         )
         assert reg_after.status_code == 200, reg_after.text
         items = reg_after.json()["data"]["items"]
-        assert len(items) == 10
+        assert len(items) == 8
         assert all(item["subject_category"] == "COMPULSORY_CORE" for item in items)
 
         # 5. Create a term AFTER template application and verify assessment definitions are seeded

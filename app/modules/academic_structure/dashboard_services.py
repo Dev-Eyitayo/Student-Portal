@@ -110,7 +110,7 @@ async def _collect_term_issues(
                     "title": f"{cg.display_name} — No Class Teacher assigned",
                     "subtitle": "Assign a Class Teacher to manage attendance and remarks.",
                     "action_label": "Assign Class Teacher",
-                    "target_route": f"/structure/classes/{cg.id}",
+                    "target_route": f"/classes-terms?class_group_id={cg.id}",
                     "class_group_id": cg.id,
                     "class_subject_id": None,
                     "academic_term_id": term.id if term else None,
@@ -178,7 +178,7 @@ async def _collect_term_issues(
                     "title": f"{cg_name} {subj_name} — No Subject Teacher",
                     "subtitle": "Assign a teacher so scores can be entered.",
                     "action_label": "Assign Teacher",
-                    "target_route": f"/structure/classes/{cg_id}",
+                    "target_route": f"/classes-terms?class_group_id={cg_id}",
                     "class_group_id": cg_id,
                     "class_subject_id": cs_id,
                     "academic_term_id": term.id if term else None,
@@ -195,7 +195,7 @@ async def _collect_term_issues(
                         "subtitle": "Submitted by teacher and ready for review.",
                         "action_label": "Review scores",
                         "target_route": (
-                            f"/assessments?tab=approvals&term_id={term.id}"
+                            f"/scores-ca?tab=approvals&term_id={term.id}"
                             f"&class_group_id={cg_id}&class_subject_id={cs_id}"
                         ),
                         "class_group_id": cg_id,
@@ -212,7 +212,7 @@ async def _collect_term_issues(
                         "subtitle": "Scores are still in draft.",
                         "action_label": "View sheet",
                         "target_route": (
-                            f"/assessments?tab=enter-scores&term_id={term.id}"
+                            f"/scores-ca?tab=enter-scores&term_id={term.id}"
                             f"&class_group_id={cg_id}&class_subject_id={cs_id}"
                         ),
                         "class_group_id": cg_id,
@@ -393,8 +393,9 @@ async def list_dashboard_issues(
     issues, _, _ = await _collect_term_issues(db, school_id, session, term)
 
     if issue_type:
-        norm = issue_type.strip().upper()
-        issues = [i for i in issues if i["issue_type"] == norm]
+        allowed_types = {t.strip().upper() for t in issue_type.split(",") if t.strip()}
+        if allowed_types:
+            issues = [i for i in issues if i["issue_type"] in allowed_types]
     if class_group_id is not None:
         issues = [i for i in issues if i["class_group_id"] == class_group_id]
 
@@ -540,7 +541,7 @@ async def get_teacher_dashboard(
                 "subject_name": s_name,
                 "subject_code": s_code,
                 "approval_status": st,
-                "target_route": f"/assessments?tab=enter-scores{term_q}&class_subject_id={cs_id}",
+                "target_route": f"/scores-ca?tab=enter-scores{term_q}&class_subject_id={cs_id}",
             }
         )
 

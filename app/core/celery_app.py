@@ -14,6 +14,7 @@ celery_app = Celery(
         "app.modules.identity.tasks",
         "app.modules.students.tasks",
         "app.modules.distribution.tasks",
+        "app.modules.timetable.tasks",
     ],
 )
 
@@ -30,12 +31,14 @@ celery_app.conf.update(
     task_track_started=True,
     task_always_eager=settings.CELERY_TASK_ALWAYS_EAGER,
     task_store_eager_result=settings.CELERY_TASK_ALWAYS_EAGER,
+    task_default_queue="default",
     broker_transport_options={"visibility_timeout": 3600},
     task_routes={
         "app.modules.identity.tasks.process_staff_bulk_import": {"queue": "bulk_imports"},
         "app.modules.identity.tasks.send_staff_invitation_email": {"queue": "notifications"},
         "app.modules.distribution.tasks.send_term_result_notifications": {"queue": "notifications"},
         "app.modules.students.tasks.process_student_bulk_import": {"queue": "bulk_imports"},
+        "app.modules.timetable.tasks.generate_timetable_task": {"queue": "default"},
     },
 )
 

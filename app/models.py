@@ -15,5 +15,6 @@ from app.modules.distribution import models as distribution_models  # noqa: F401
 from app.modules.identity import models as identity_models  # noqa: F401
 from app.modules.students import models as student_models  # noqa: F401
 from app.modules.subjects import models as subject_models  # noqa: F401
+from app.modules.timetable import models as timetable_models  # noqa: F401
 
 __all__ = ["Base"]

@@ -456,6 +456,38 @@ async def _validate_offering_department(
     return department
 
 
+async def _validate_offering_scope_exclusivity(
+    db: AsyncSession,
+    school_id: UUID,
+    subject_id: UUID,
+    session_id: UUID,
+    level_id: UUID,
+    department_id: UUID | None,
+    exclude_offering_id: UUID | None = None,
+) -> None:
+    """Prevent mixing a General (department=NULL) offering with department-specific ones."""
+    stmt = select(SubjectOffering).where(
+        SubjectOffering.school_id == school_id,
+        SubjectOffering.subject_id == subject_id,
+        SubjectOffering.academic_session_id == session_id,
+        SubjectOffering.academic_level_id == level_id,
+        SubjectOffering.deleted_at.is_(None),
+    )
+    if exclude_offering_id is not None:
+        stmt = stmt.where(SubjectOffering.id != exclude_offering_id)
+    existing = (await db.execute(stmt)).scalars().all()
+    if department_id is None and any(o.department_id is not None for o in existing):
+        raise ValidationException(
+            "This subject already has department-specific offerings for this level. "
+            "Please retire them before creating a General offering."
+        )
+    if department_id is not None and any(o.department_id is None for o in existing):
+        raise ValidationException(
+            "This subject is already offered as General (all departments) for this level, "
+            "so separate department offerings are not needed."
+        )
+
+
 async def create_offering(
     db: AsyncSession,
     school_id: UUID,
@@ -484,6 +516,14 @@ async def create_offering(
         raise ResourceNotFoundException("academic level", req.academic_level_id)
 
     department = await _validate_offering_department(db, school_id, level, req.department_id)
+    await _validate_offering_scope_exclusivity(
+        db,
+        school_id,
+        subject.id,
+        session.id,
+        level.id,
+        department.id if department else None,
+    )
     await require_scoped_permission(
         db,
         current_user,
@@ -573,7 +613,17 @@ async def update_offering(
 
     level_stmt = select(AcademicLevel).where(AcademicLevel.id == offering.academic_level_id)
     level = (await db.execute(level_stmt)).scalar_one()
+
     department = await _validate_offering_department(db, school_id, level, req.department_id)
+    await _validate_offering_scope_exclusivity(
+        db,
+        school_id,
+        offering.subject_id,
+        offering.academic_session_id,
+        offering.academic_level_id,
+        department.id if department else None,
+        exclude_offering_id=offering.id,
+    )
 
     changes = req.model_dump(exclude_unset=True)
     offering.department_id = department.id if department else None
