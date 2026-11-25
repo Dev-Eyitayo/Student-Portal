@@ -16,12 +16,14 @@ from app.modules.common.schemas import SuccessResponse
 from app.modules.identity.models import User
 from app.modules.timetable import services
 from app.modules.timetable.schemas import (
+    ApplyRelaxationRequest,
     AssistantActionPreview,
     AssistantParseRequest,
     BellScheduleCreateRequest,
     BellScheduleResponse,
     BellScheduleSlotsReplaceRequest,
     BellScheduleUpdateRequest,
+    RelaxationSuggestion,
     RoomCreateRequest,
     RoomResponse,
     RoomUpdateRequest,
@@ -512,6 +514,42 @@ async def get_generation_job_status(
             generation_summary=tt.generation_summary,
         )
     )
+
+
+@router.get(
+    "/schedules/{timetable_id}/relaxation-suggestions",
+    response_model=SuccessResponse[list[RelaxationSuggestion]],
+    dependencies=[Depends(require_permission("timetable:manage"))],
+)
+async def get_relaxation_suggestions(
+    timetable_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    school_id = require_school_id(current_user)
+    tt = await services._get_timetable_or_404(db, school_id, timetable_id)
+    suggestions = await services.build_relaxation_suggestions(db, school_id, tt)
+    return SuccessResponse[list[RelaxationSuggestion]](data=suggestions)
+
+
+@router.post(
+    "/schedules/{timetable_id}/relaxation-suggestions/apply",
+    response_model=SuccessResponse[dict],
+    dependencies=[Depends(require_permission("timetable:manage"))],
+)
+async def apply_relaxation_suggestion(
+    timetable_id: UUID,
+    req: ApplyRelaxationRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    school_id = require_school_id(current_user)
+    await services._get_timetable_or_404(db, school_id, timetable_id)
+    result = await services.apply_relaxation(
+        db, school_id, req, _audit(current_user, request)
+    )
+    return SuccessResponse[dict](data=result)
 
 
 @router.post(

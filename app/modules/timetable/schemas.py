@@ -322,3 +322,20 @@ class AssistantActionPreview(BaseModel):
     confidence: str
     payload: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+
+
+class RelaxationSuggestion(BaseModel):
+    id: str
+    diagnostic_index: int
+    diagnostic_code: str
+    diagnostic_message: str
+    auto_fixable: bool
+    title: str
+    description: str
+    action_type: str | None = None
+    action_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ApplyRelaxationRequest(BaseModel):
+    action_type: str
+    action_payload: dict[str, Any] = Field(default_factory=dict)

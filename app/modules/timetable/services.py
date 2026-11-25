@@ -1,9 +1,9 @@
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -53,19 +53,24 @@ from app.modules.timetable.models import (
     TimetableSyncGroupItem,
 )
 from app.modules.timetable.schemas import (
+    ApplyRelaxationRequest,
     AssistantActionPreview,
+    AvailabilityType,
     BellScheduleCreateRequest,
     BellScheduleResponse,
     BellScheduleSlotsReplaceRequest,
     BellScheduleUpdateRequest,
+    RelaxationSuggestion,
     RoomCreateRequest,
     RoomResponse,
     RoomUpdateRequest,
+    SlotType,
     SubjectSchedulingRuleResponse,
     SubjectSchedulingRuleUpsertRequest,
     SyncGroupCreateRequest,
     SyncGroupResponse,
     SyncGroupUpdateRequest,
+    SyncType,
     TeacherAvailabilityResponse,
     TeacherAvailabilityUpsertRequest,
     TimetableCreateRequest,
@@ -76,6 +81,7 @@ from app.modules.timetable.schemas import (
     TimetableGridResponse,
     TimetableMasterGridResponse,
     TimetableResponse,
+    TimetableSlotCreate,
     TimetableSlotResponse,
 )
 
@@ -1254,6 +1260,721 @@ _CATEGORY_LABELS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Relaxation suggestions: map a solver diagnostic's structured reason data
+# back to one concrete, reversible rule change the admin can accept.
+# ---------------------------------------------------------------------------
+
+# Reasons are ranked by how many weekly slots they blocked, but the most
+# *frequent* reason isn't always the best fix: "this class arm is busy most
+# of the week" is just normal fullness and fixing it means reshaping the
+# whole bell schedule, whereas "the same teacher already teaches this exact
+# subject to another arm" is a precise, zero-side-effect merge. Prefer the
+# surgical fixes first regardless of raw count.
+_UNPLACED_FIX_PRIORITY = [
+    "TEACHER_BOOKED",
+    "ROOM_BOOKED",
+    "MAX_PER_DAY",
+    "TEACHER_MAX_PER_DAY",
+    "TEACHER_UNAVAILABLE",
+    "CLASS_ARM_BUSY",
+]
+
+_MANUAL_REVIEW_EXPLANATIONS = {
+    "TEACHER_BOOKED": (
+        "This teacher is double-booked across two different subjects, not two arms of the "
+        "same one -- relaxing this automatically risks a real clash. Reassign one of the two "
+        "classes to another qualified teacher."
+    ),
+    "DISJOINT_ELECTIVE_CONFLICT": (
+        "These are two electives the same students are registered for -- forcing them into "
+        "the same slot would create a real clash in those students' own timetables. Combine "
+        "them under Simultaneous Electives if they can share a room, or adjust registrations."
+    ),
+    "NO_ADJACENT_DOUBLE_SLOT": (
+        "There's no free back-to-back pair of periods for this double period. Add an extra "
+        "period to the bell schedule or free up an adjacent slot manually."
+    ),
+    "NO_MATCHING_SLOT_OTHER_SCHEDULE": (
+        "The paired class arm uses a different bell schedule with no matching period -- align "
+        "both schedules' period times first."
+    ),
+    "INVALID_DOUBLE_PERIOD_RULE": (
+        "This subject's own rule asks for more double periods than its total weekly periods "
+        "allow -- fix the rule directly in Subjects & Double Periods."
+    ),
+    "INVALID_MAX_PER_DAY": (
+        "This subject requires double periods but its daily cap is below 2 -- fix the rule "
+        "directly in Subjects & Double Periods."
+    ),
+    "MISSING_BELL_SCHEDULE": "Create a bell schedule for this category first.",
+}
+
+
+def _manual_review_reason(code: str | None) -> str:
+    return _MANUAL_REVIEW_EXPLANATIONS.get(
+        code or "",
+        "This needs a manual decision -- there's no change we can make automatically "
+        "without risking a different conflict.",
+    )
+
+
+async def _resolve_class_subject_context(
+    db: AsyncSession, school_id: UUID, class_subject_id: UUID
+) -> tuple[ClassSubject, SubjectOffering, Subject, ClassGroup] | None:
+    cs = (
+        await db.execute(
+            select(ClassSubject).where(
+                ClassSubject.id == class_subject_id,
+                ClassSubject.school_id == school_id,
+                ClassSubject.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if cs is None:
+        return None
+    off = (
+        await db.execute(select(SubjectOffering).where(SubjectOffering.id == cs.subject_offering_id))
+    ).scalar_one_or_none()
+    cg = (await db.execute(select(ClassGroup).where(ClassGroup.id == cs.class_group_id))).scalar_one_or_none()
+    if off is None or cg is None:
+        return None
+    subj = (await db.execute(select(Subject).where(Subject.id == off.subject_id))).scalar_one_or_none()
+    if subj is None:
+        return None
+    return cs, off, subj, cg
+
+
+def _effective_rule_values(rule: SubjectSchedulingRule | None, subj: Subject) -> dict[str, Any]:
+    # Mirrors the same defaults `_load_solver_context` feeds the solver, so a
+    # relaxation always starts from exactly what the last generation actually used.
+    default_periods = 4 if subj.code in ("ENG", "MTH") else 2
+    default_doubles = 1 if subj.code in ("ENG", "MTH", "PHY", "CHM", "BIO") else 0
+    return {
+        "periods_per_week": rule.periods_per_week if rule else default_periods,
+        "double_periods_per_week": rule.double_periods_per_week if rule else default_doubles,
+        "allow_double_period_split": rule.allow_double_period_split if rule else False,
+        "max_periods_per_day": rule.max_periods_per_day if rule else 2,
+        "prefer_morning": (
+            rule.prefer_morning if rule else subj.code in ("ENG", "MTH", "PHY", "CHM", "BIO")
+        ),
+        "preferred_room_id": rule.preferred_room_id if rule else None,
+        "room_only_for_double_periods": rule.room_only_for_double_periods if rule else True,
+    }
+
+
+async def _find_alternate_room(
+    db: AsyncSession, school_id: UUID, current_room_id: str | None
+) -> Room | None:
+    if not current_room_id:
+        return None
+    current = (
+        await db.execute(select(Room).where(Room.id == UUID(current_room_id)))
+    ).scalar_one_or_none()
+    if current is None:
+        return None
+    candidates = (
+        (
+            await db.execute(
+                select(Room).where(
+                    Room.school_id == school_id,
+                    Room.room_type == current.room_type,
+                    Room.id != current.id,
+                    Room.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not candidates:
+        return None
+    usage = dict(
+        (
+            await db.execute(
+                select(SubjectSchedulingRule.preferred_room_id, func.count())
+                .where(
+                    SubjectSchedulingRule.school_id == school_id,
+                    SubjectSchedulingRule.preferred_room_id.isnot(None),
+                    SubjectSchedulingRule.deleted_at.is_(None),
+                )
+                .group_by(SubjectSchedulingRule.preferred_room_id)
+            )
+        ).all()
+    )
+    candidates.sort(key=lambda r: usage.get(r.id, 0))
+    return candidates[0]
+
+
+async def _build_suggestion_for_reason(
+    db: AsyncSession,
+    school_id: UUID,
+    idx: int,
+    diagnostic_code: str,
+    diagnostic_message: str,
+    reason_code: str,
+    data: dict[str, Any],
+) -> RelaxationSuggestion | None:
+    if reason_code == "TEACHER_BOOKED":
+        this_id = data.get("class_subject_id")
+        other_id = data.get("other_class_subject_id")
+        if not this_id or not other_id:
+            return None
+        ctx = await _resolve_class_subject_context(db, school_id, UUID(this_id))
+        other_ctx = await _resolve_class_subject_context(db, school_id, UUID(other_id))
+        if ctx is None or other_ctx is None:
+            return None
+        _, _, subj, cg = ctx
+        _, _, _, other_cg = other_ctx
+        return RelaxationSuggestion(
+            id=f"{idx}:{reason_code}",
+            diagnostic_index=idx,
+            diagnostic_code=diagnostic_code,
+            diagnostic_message=diagnostic_message,
+            auto_fixable=True,
+            title=f"Combine into a shared {subj.name} session",
+            description=(
+                f"{cg.display_name} and {other_cg.display_name} will share the same teacher, "
+                f"room and time slot for {subj.name} -- one joint session instead of two "
+                "separate ones that can't both fit the same teacher's week."
+            ),
+            action_type="MERGE_SYNC_GROUP",
+            action_payload={"class_subject_id": this_id, "other_class_subject_id": other_id},
+        )
+
+    if reason_code in ("ROOM_BOOKED", "ROOM_CAPACITY_EXCEEDED"):
+        csid = data.get("class_subject_id")
+        if not csid:
+            return None
+        ctx = await _resolve_class_subject_context(db, school_id, UUID(csid))
+        if ctx is None:
+            return None
+        _, _, subj, cg = ctx
+        alt = await _find_alternate_room(db, school_id, data.get("room_id"))
+        if alt is None:
+            return None
+        return RelaxationSuggestion(
+            id=f"{idx}:{reason_code}",
+            diagnostic_index=idx,
+            diagnostic_code=diagnostic_code,
+            diagnostic_message=diagnostic_message,
+            auto_fixable=True,
+            title=f"Move {subj.name} to {alt.name}",
+            description=(
+                f"{cg.display_name}'s {subj.name} will use {alt.name} instead -- the same kind "
+                "of room, with less competing demand."
+            ),
+            action_type="CHANGE_ROOM",
+            action_payload={"class_subject_id": csid, "room_id": str(alt.id)},
+        )
+
+    if reason_code in ("CLASS_ARM_BUSY", "CLASS_CAPACITY_EXCEEDED"):
+        bell_schedule_id = data.get("bell_schedule_id")
+        if not bell_schedule_id:
+            return None
+        schedule = await _get_bell_schedule_or_404(db, school_id, UUID(bell_schedule_id))
+        cg_name = ""
+        class_group_id = data.get("class_group_id")
+        if class_group_id:
+            cg = (
+                await db.execute(select(ClassGroup).where(ClassGroup.id == UUID(class_group_id)))
+            ).scalar_one_or_none()
+            cg_name = cg.display_name if cg else ""
+        return RelaxationSuggestion(
+            id=f"{idx}:{reason_code}",
+            diagnostic_index=idx,
+            diagnostic_code=diagnostic_code,
+            diagnostic_message=diagnostic_message,
+            auto_fixable=True,
+            title="Add one more teaching period to the week",
+            description=(
+                f"{schedule.name}{f' ({cg_name})' if cg_name else ''} doesn't have a free period "
+                "left this week. This adds one more teaching period (un-truncating Friday if "
+                "it's the short day, otherwise appending to the lightest day)."
+            ),
+            action_type="ADD_BELL_CAPACITY",
+            action_payload={"bell_schedule_id": bell_schedule_id},
+        )
+
+    if reason_code == "MAX_PER_DAY":
+        csid = data.get("class_subject_id")
+        if not csid:
+            return None
+        ctx = await _resolve_class_subject_context(db, school_id, UUID(csid))
+        if ctx is None:
+            return None
+        _, _, subj, cg = ctx
+        return RelaxationSuggestion(
+            id=f"{idx}:{reason_code}",
+            diagnostic_index=idx,
+            diagnostic_code=diagnostic_code,
+            diagnostic_message=diagnostic_message,
+            auto_fixable=True,
+            title=f"Allow one more {subj.name} period per day",
+            description=f"Raises {subj.name}'s daily limit for {cg.display_name} by 1 period.",
+            action_type="RAISE_SUBJECT_DAILY_CAP",
+            action_payload={"class_subject_id": csid},
+        )
+
+    if reason_code in ("TEACHER_MAX_PER_DAY", "TEACHER_WEEKLY_LOAD_EXCEEDED"):
+        tid = data.get("teacher_id")
+        session_id = data.get("academic_session_id")
+        if not tid or not session_id:
+            return None
+        teacher = (await db.execute(select(User).where(User.id == UUID(tid)))).scalar_one_or_none()
+        tname = f"{teacher.first_name} {teacher.last_name}" if teacher else "This teacher"
+        cap_type = "day" if reason_code == "TEACHER_MAX_PER_DAY" else "week"
+        return RelaxationSuggestion(
+            id=f"{idx}:{reason_code}",
+            diagnostic_index=idx,
+            diagnostic_code=diagnostic_code,
+            diagnostic_message=diagnostic_message,
+            auto_fixable=True,
+            title=f"Raise {tname}'s {'daily' if cap_type == 'day' else 'weekly'} period limit",
+            description=(
+                f"Increases {tname}'s {'daily' if cap_type == 'day' else 'weekly'} teaching cap "
+                "by the minimum needed to fit this class."
+            ),
+            action_type="RAISE_TEACHER_CAP",
+            action_payload={
+                "teacher_id": tid,
+                "academic_session_id": session_id,
+                "cap_type": cap_type,
+                "needed_weekly_cap": data.get("needed_weekly_cap"),
+            },
+        )
+
+    if reason_code == "TEACHER_UNAVAILABLE":
+        tid = data.get("teacher_id")
+        session_id = data.get("academic_session_id")
+        if not tid or not session_id:
+            return None
+        teacher = (await db.execute(select(User).where(User.id == UUID(tid)))).scalar_one_or_none()
+        tname = f"{teacher.first_name} {teacher.last_name}" if teacher else "This teacher"
+        return RelaxationSuggestion(
+            id=f"{idx}:{reason_code}",
+            diagnostic_index=idx,
+            diagnostic_code=diagnostic_code,
+            diagnostic_message=diagnostic_message,
+            auto_fixable=True,
+            title=f"Soften {tname}'s unavailability to a preference",
+            description=(
+                f"{tname} will only be *avoided* at that time instead of being hard-blocked -- "
+                "they may occasionally still be scheduled then if nothing else fits."
+            ),
+            action_type="SOFTEN_TEACHER_AVAILABILITY",
+            action_payload={
+                "teacher_id": tid,
+                "academic_session_id": session_id,
+                "day_of_week": data.get("day_of_week"),
+            },
+        )
+
+    return None
+
+
+async def build_relaxation_suggestions(
+    db: AsyncSession, school_id: UUID, tt: Timetable
+) -> list[RelaxationSuggestion]:
+    term = (
+        await db.execute(select(AcademicTerm).where(AcademicTerm.id == tt.academic_term_id))
+    ).scalar_one()
+    session_id = str(term.academic_session_id)
+
+    summary = tt.generation_summary or {}
+    diagnostics = summary.get("diagnostics") or []
+    suggestions: list[RelaxationSuggestion] = []
+
+    for idx, diag in enumerate(diagnostics):
+        code = diag.get("code") or "UNKNOWN"
+        message = diag.get("message", "")
+        details = diag.get("details") or {}
+
+        if code == "UNPLACED_PERIOD":
+            reasons = details.get("reasons") or []
+            reasons_by_code = {r.get("code"): r for r in reasons}
+            picked_code: str | None = None
+            picked_data: dict[str, Any] = {}
+            for candidate_code in _UNPLACED_FIX_PRIORITY:
+                reason = reasons_by_code.get(candidate_code)
+                if reason is None:
+                    continue
+                rdata = dict(reason.get("data") or {})
+                if candidate_code == "TEACHER_BOOKED" and not rdata.get("same_subject"):
+                    continue
+                rdata.setdefault("academic_session_id", session_id)
+                picked_code, picked_data = candidate_code, rdata
+                break
+            suggestion = (
+                await _build_suggestion_for_reason(db, school_id, idx, code, message, picked_code, picked_data)
+                if picked_code
+                else None
+            )
+            if suggestion is None:
+                fallback_code = reasons[0].get("code") if reasons else None
+                suggestion = RelaxationSuggestion(
+                    id=f"{idx}:none",
+                    diagnostic_index=idx,
+                    diagnostic_code=code,
+                    diagnostic_message=message,
+                    auto_fixable=False,
+                    title="Needs your judgement",
+                    description=_manual_review_reason(fallback_code),
+                )
+            suggestions.append(suggestion)
+            continue
+
+        if code in ("CLASS_CAPACITY_EXCEEDED", "ROOM_CAPACITY_EXCEEDED", "TEACHER_WEEKLY_LOAD_EXCEEDED"):
+            data = dict(details)
+            data.setdefault("academic_session_id", session_id)
+            suggestion = await _build_suggestion_for_reason(db, school_id, idx, code, message, code, data)
+            if suggestion is None:
+                suggestion = RelaxationSuggestion(
+                    id=f"{idx}:none",
+                    diagnostic_index=idx,
+                    diagnostic_code=code,
+                    diagnostic_message=message,
+                    auto_fixable=False,
+                    title="Needs your judgement",
+                    description=_manual_review_reason(code),
+                )
+            suggestions.append(suggestion)
+            continue
+
+        suggestions.append(
+            RelaxationSuggestion(
+                id=f"{idx}:none",
+                diagnostic_index=idx,
+                diagnostic_code=code,
+                diagnostic_message=message,
+                auto_fixable=False,
+                title="Needs your judgement",
+                description=_manual_review_reason(code),
+            )
+        )
+
+    return suggestions
+
+
+async def _add_bell_capacity(
+    db: AsyncSession, school_id: UUID, schedule_id: UUID, audit: AuditContext
+) -> None:
+    schedule = await _get_bell_schedule_or_404(db, school_id, schedule_id)
+    active_slots = [s for s in schedule.slots if s.deleted_at is None]
+    by_day: dict[int, list[TimetableSlot]] = {}
+    for s in active_slots:
+        by_day.setdefault(s.day_of_week, []).append(s)
+    for day_slots in by_day.values():
+        day_slots.sort(key=lambda s: s.period_order)
+
+    weekdays = [d for d in (1, 2, 3, 4, 5) if d in by_day]
+    if not weekdays:
+        return
+    teaching_counts = {d: sum(1 for s in by_day[d] if s.slot_type == "TEACHING") for d in weekdays}
+    other_counts = [teaching_counts[d] for d in weekdays if d != 5]
+    if 5 in teaching_counts and other_counts and teaching_counts[5] < min(other_counts):
+        target_day = 5
+    else:
+        target_day = min(weekdays, key=lambda d: teaching_counts.get(d, 0))
+
+    day_slots = by_day[target_day]
+    last = day_slots[-1]
+    teaching_on_day = [s for s in day_slots if s.slot_type == "TEACHING"]
+    period_len_minutes = 40
+    if teaching_on_day:
+        t0 = teaching_on_day[0]
+        computed = (t0.end_time.hour * 60 + t0.end_time.minute) - (
+            t0.start_time.hour * 60 + t0.start_time.minute
+        )
+        if computed > 0:
+            period_len_minutes = computed
+
+    new_start = last.end_time
+    new_end_total = new_start.hour * 60 + new_start.minute + period_len_minutes
+    new_end = time(hour=(new_end_total // 60) % 24, minute=new_end_total % 60)
+
+    existing_slot_ins = [
+        TimetableSlotCreate(
+            day_of_week=s.day_of_week,
+            period_order=s.period_order,
+            label=s.label,
+            start_time=s.start_time,
+            end_time=s.end_time,
+            slot_type=SlotType(s.slot_type),
+        )
+        for s in active_slots
+    ]
+    new_slot_in = TimetableSlotCreate(
+        day_of_week=target_day,
+        period_order=last.period_order + 1,
+        label=f"Period {len(teaching_on_day) + 1}",
+        start_time=new_start,
+        end_time=new_end,
+        slot_type=SlotType.TEACHING,
+    )
+    await replace_bell_schedule_slots(
+        db,
+        school_id,
+        schedule_id,
+        BellScheduleSlotsReplaceRequest(slots=[*existing_slot_ins, new_slot_in]),
+        audit,
+    )
+
+
+async def apply_relaxation(
+    db: AsyncSession, school_id: UUID, req: ApplyRelaxationRequest, audit: AuditContext
+) -> dict[str, Any]:
+    payload = req.action_payload
+
+    if req.action_type == "MERGE_SYNC_GROUP":
+        this_id = UUID(payload["class_subject_id"])
+        other_id = UUID(payload["other_class_subject_id"])
+        existing_item = (
+            await db.execute(
+                select(TimetableSyncGroupItem).where(
+                    TimetableSyncGroupItem.school_id == school_id,
+                    TimetableSyncGroupItem.class_subject_id == other_id,
+                    TimetableSyncGroupItem.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_item is not None:
+            sg = (
+                await db.execute(
+                    select(TimetableSyncGroup)
+                    .options(selectinload(TimetableSyncGroup.items))
+                    .where(TimetableSyncGroup.id == existing_item.sync_group_id)
+                )
+            ).scalar_one()
+            existing_ids = [i.class_subject_id for i in sg.items if i.deleted_at is None]
+            await update_sync_group(
+                db,
+                school_id,
+                sg.id,
+                SyncGroupUpdateRequest(
+                    class_subject_ids=list(dict.fromkeys([*existing_ids, this_id]))
+                ),
+                audit,
+            )
+        else:
+            ctx = await _resolve_class_subject_context(db, school_id, this_id)
+            if ctx is None:
+                raise ResourceNotFoundException("class subject", this_id)
+            _, _, subj, cg = ctx
+            await create_sync_group(
+                db,
+                school_id,
+                SyncGroupCreateRequest(
+                    academic_session_id=cg.academic_session_id,
+                    name=f"{subj.name} (auto-merged)",
+                    sync_type=SyncType.JOINT_CLASS,
+                    class_subject_ids=[this_id, other_id],
+                ),
+                audit,
+            )
+        return {"applied": True}
+
+    if req.action_type == "CHANGE_ROOM":
+        csid = UUID(payload["class_subject_id"])
+        room_id = UUID(payload["room_id"])
+        ctx = await _resolve_class_subject_context(db, school_id, csid)
+        if ctx is None:
+            raise ResourceNotFoundException("class subject", csid)
+        _, _, subj, cg = ctx
+        rules = list(
+            (
+                await db.execute(
+                    select(SubjectSchedulingRule).where(
+                        SubjectSchedulingRule.school_id == school_id,
+                        SubjectSchedulingRule.academic_session_id == cg.academic_session_id,
+                        SubjectSchedulingRule.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        rule = _resolve_rule_for_class_subject(
+            rules, level_id=cg.academic_level_id, department_id=cg.department_id, subject_id=subj.id
+        )
+        values = _effective_rule_values(rule, subj)
+        values["preferred_room_id"] = room_id
+        await upsert_scheduling_rule(
+            db,
+            school_id,
+            SubjectSchedulingRuleUpsertRequest(
+                academic_session_id=cg.academic_session_id,
+                academic_level_id=rule.academic_level_id if rule else cg.academic_level_id,
+                department_id=rule.department_id if rule else cg.department_id,
+                subject_id=subj.id,
+                **values,
+            ),
+            audit,
+        )
+        return {"applied": True}
+
+    if req.action_type == "ADD_BELL_CAPACITY":
+        await _add_bell_capacity(db, school_id, UUID(payload["bell_schedule_id"]), audit)
+        return {"applied": True}
+
+    if req.action_type == "RAISE_SUBJECT_DAILY_CAP":
+        csid = UUID(payload["class_subject_id"])
+        ctx = await _resolve_class_subject_context(db, school_id, csid)
+        if ctx is None:
+            raise ResourceNotFoundException("class subject", csid)
+        _, _, subj, cg = ctx
+        rules = list(
+            (
+                await db.execute(
+                    select(SubjectSchedulingRule).where(
+                        SubjectSchedulingRule.school_id == school_id,
+                        SubjectSchedulingRule.academic_session_id == cg.academic_session_id,
+                        SubjectSchedulingRule.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        rule = _resolve_rule_for_class_subject(
+            rules, level_id=cg.academic_level_id, department_id=cg.department_id, subject_id=subj.id
+        )
+        values = _effective_rule_values(rule, subj)
+        values["max_periods_per_day"] = min(6, values["max_periods_per_day"] + 1)
+        await upsert_scheduling_rule(
+            db,
+            school_id,
+            SubjectSchedulingRuleUpsertRequest(
+                academic_session_id=cg.academic_session_id,
+                academic_level_id=rule.academic_level_id if rule else cg.academic_level_id,
+                department_id=rule.department_id if rule else cg.department_id,
+                subject_id=subj.id,
+                **values,
+            ),
+            audit,
+        )
+        return {"applied": True}
+
+    if req.action_type == "RAISE_TEACHER_CAP":
+        teacher_id = UUID(payload["teacher_id"])
+        session_id = UUID(payload["academic_session_id"])
+        cap_type = payload.get("cap_type", "day")
+        needed_weekly_cap = payload.get("needed_weekly_cap")
+        rows = (
+            (
+                await db.execute(
+                    select(TeacherAvailability).where(
+                        TeacherAvailability.school_id == school_id,
+                        TeacherAvailability.academic_session_id == session_id,
+                        TeacherAvailability.teacher_id == teacher_id,
+                        TeacherAvailability.availability_type == "LOAD_CAP",
+                        TeacherAvailability.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        existing = next(
+            (
+                r
+                for r in rows
+                if (r.max_periods_per_day if cap_type == "day" else r.max_periods_per_week) is not None
+            ),
+            None,
+        )
+        new_day = existing.max_periods_per_day if existing else None
+        new_week = existing.max_periods_per_week if existing else None
+        if cap_type == "day":
+            new_day = (new_day or 0) + 1
+        else:
+            new_week = needed_weekly_cap if needed_weekly_cap is not None else (new_week or 0) + 1
+        now = _now_utc()
+        if existing is not None:
+            existing.deleted_at = now
+            await db.flush()
+        db.add(
+            TeacherAvailability(
+                school_id=school_id,
+                academic_session_id=session_id,
+                teacher_id=teacher_id,
+                day_of_week=existing.day_of_week if existing else None,
+                start_time=existing.start_time if existing else None,
+                end_time=existing.end_time if existing else None,
+                availability_type=AvailabilityType.LOAD_CAP.value,
+                max_periods_per_day=new_day,
+                max_periods_per_week=new_week,
+                max_consecutive_periods=existing.max_consecutive_periods if existing else None,
+                min_gap_minutes_between_categories=(
+                    existing.min_gap_minutes_between_categories if existing else 0
+                ),
+            )
+        )
+        record_audit_log(
+            db,
+            audit,
+            action="TEACHER_AVAILABILITY_RELAXED",
+            resource_type="TeacherAvailability",
+            resource_id=teacher_id,
+            diff_payload={"cap_type": cap_type},
+        )
+        await db.commit()
+        return {"applied": True}
+
+    if req.action_type == "SOFTEN_TEACHER_AVAILABILITY":
+        teacher_id = UUID(payload["teacher_id"])
+        session_id = UUID(payload["academic_session_id"])
+        day_of_week = payload.get("day_of_week")
+        rows = (
+            (
+                await db.execute(
+                    select(TeacherAvailability).where(
+                        TeacherAvailability.school_id == school_id,
+                        TeacherAvailability.academic_session_id == session_id,
+                        TeacherAvailability.teacher_id == teacher_id,
+                        TeacherAvailability.availability_type == "UNAVAILABLE",
+                        TeacherAvailability.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        match = next((r for r in rows if r.day_of_week is None or r.day_of_week == day_of_week), None)
+        if match is None:
+            raise ResourceNotFoundException("teacher availability window", teacher_id)
+        now = _now_utc()
+        match.deleted_at = now
+        await db.flush()
+        db.add(
+            TeacherAvailability(
+                school_id=school_id,
+                academic_session_id=session_id,
+                teacher_id=teacher_id,
+                day_of_week=match.day_of_week,
+                start_time=match.start_time,
+                end_time=match.end_time,
+                availability_type=AvailabilityType.AVOID.value,
+                max_periods_per_day=None,
+                max_periods_per_week=None,
+                max_consecutive_periods=None,
+                min_gap_minutes_between_categories=match.min_gap_minutes_between_categories,
+            )
+        )
+        record_audit_log(
+            db,
+            audit,
+            action="TEACHER_AVAILABILITY_SOFTENED",
+            resource_type="TeacherAvailability",
+            resource_id=teacher_id,
+            diff_payload={},
+        )
+        await db.commit()
+        return {"applied": True}
+
+    raise ValidationException(f"Unsupported relaxation action: {req.action_type}")
+
+
 async def run_timetable_generation(
     db: AsyncSession, school_id: UUID, timetable_id: UUID
 ) -> dict[str, Any]:
@@ -1362,7 +2083,9 @@ async def run_timetable_generation(
         "entries_placed": len(result.entries),
         "unplaced_count": result.unplaced_count,
         "soft_score": result.soft_score,
-        "diagnostics": [{"code": d.code, "message": d.message} for d in result.diagnostics],
+        "diagnostics": [
+            {"code": d.code, "message": d.message, "details": d.details} for d in result.diagnostics
+        ],
     }
     await db.commit()
     return tt.generation_summary

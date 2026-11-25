@@ -174,6 +174,89 @@ def test_solver_handles_cross_category_teacher_breaks_double_periods_and_joint_c
     assert any(d.code == "NON_TEACHING_SLOT" for d in eng_diags)
 
 
+def test_unplaced_diagnostic_carries_structured_reason_data():
+    """A teacher double-booked across two class-subjects, with only enough slots
+    for one of them, must report *which* teacher/class/time blocked placement
+    as structured `details`, not just free text -- the relaxation-suggestion
+    feature depends on these exact fields to propose a concrete fix."""
+    bell_id = _uuid()
+    teacher_id = _uuid()
+    room_id = _uuid()
+
+    slots = [
+        SlotSpec(_uuid(), bell_id, 1, 1, "Period 1", time(8, 0), time(8, 40), "TEACHING"),
+        SlotSpec(_uuid(), bell_id, 1, 2, "Period 2", time(8, 40), time(9, 20), "TEACHING"),
+    ]
+
+    cs_math = ClassSubjectSpec(
+        class_subject_id=_uuid(),
+        class_group_id=_uuid(),
+        class_group_name="SS3 Commercial E",
+        level_category="SENIOR_SECONDARY",
+        bell_schedule_id=bell_id,
+        subject_id=_uuid(),
+        subject_code="MTH",
+        subject_name="Mathematics",
+        teacher_ids=(teacher_id,),
+        periods_per_week=1,
+        room_only_for_double_periods=False,
+    )
+    cs_catering_other_arm = ClassSubjectSpec(
+        class_subject_id=_uuid(),
+        class_group_id=_uuid(),
+        class_group_name="SS2 Science O",
+        level_category="SENIOR_SECONDARY",
+        bell_schedule_id=bell_id,
+        subject_id=_uuid(),
+        subject_code="CAT",
+        subject_name="Catering Craft Practice",
+        teacher_ids=(teacher_id,),
+        periods_per_week=1,
+        preferred_room_id=room_id,
+        room_only_for_double_periods=False,
+    )
+    cs_catering_same_subject = ClassSubjectSpec(
+        class_subject_id=_uuid(),
+        class_group_id=_uuid(),
+        class_group_name="SS3 Commercial E",
+        level_category="SENIOR_SECONDARY",
+        bell_schedule_id=bell_id,
+        subject_id=_uuid(),
+        subject_code="CAT",
+        subject_name="Catering Craft Practice",
+        teacher_ids=(teacher_id,),
+        periods_per_week=1,
+        preferred_room_id=room_id,
+        room_only_for_double_periods=False,
+    )
+
+    result = solve_timetable(
+        slots=slots,
+        class_subjects=[cs_math, cs_catering_other_arm, cs_catering_same_subject],
+        rooms={room_id: RoomSpec(room_id, "Catering Kitchen", "CAT-KITCHEN", capacity=20)},
+        teacher_constraints={teacher_id: TeacherConstraintSpec(teacher_id, "Mrs. Funke Ajayi")},
+        restarts=1,
+        max_time_in_seconds=2.0,
+    )
+
+    all_cs_ids = {
+        str(cs.class_subject_id)
+        for cs in (cs_math, cs_catering_other_arm, cs_catering_same_subject)
+    }
+
+    assert result.unplaced_count == 1
+    diag = next(d for d in result.diagnostics if d.code == "UNPLACED_PERIOD")
+    reasons = diag.details["reasons"]
+    teacher_booked = next(r for r in reasons if r["code"] == "TEACHER_BOOKED")
+    data = teacher_booked["data"]
+    assert data["teacher_id"] == str(teacher_id)
+    assert data["class_subject_id"] in all_cs_ids
+    assert data["other_class_subject_id"] in all_cs_ids
+    assert data["class_subject_id"] != data["other_class_subject_id"]
+    assert data["other_subject_code"] in ("MTH", "CAT")
+    assert isinstance(data["same_subject"], bool)
+
+
 @pytest.mark.asyncio
 async def test_timetable_api_end_to_end_and_tenant_isolation():
     transport = ASGITransport(app=app)
@@ -389,6 +472,15 @@ async def test_timetable_api_end_to_end_and_tenant_isolation():
         assert master_resp.status_code == 200, master_resp.text
         entries = master_resp.json()["data"]["entries"]
         assert len(entries) > 0
+
+        # This scenario generates cleanly, so relaxation-suggestions should
+        # just come back empty rather than error -- smoke-checks the new
+        # endpoint end-to-end against a real generation_summary shape.
+        suggestions_resp = await client.get(
+            f"/api/v1/timetable/schedules/{tt_id}/relaxation-suggestions", headers=headers
+        )
+        assert suggestions_resp.status_code == 200, suggestions_resp.text
+        assert suggestions_resp.json()["data"] == []
 
         # Regression check: a single class arm's grid must only show its own
         # bell schedule's slots, even though a second, unrelated-category bell
