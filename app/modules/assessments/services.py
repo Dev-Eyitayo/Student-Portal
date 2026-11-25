@@ -1073,6 +1073,22 @@ async def bulk_score_entry(
     )
     registered_ids = set((await db.execute(registered_stmt)).scalars().all())
 
+    target_enrollment_ids = [
+        item.student_enrollment_id
+        for item in unique_scores
+        if item.student_enrollment_id in registered_ids
+        and not (item.raw_score is not None and item.raw_score > definition.max_score)
+    ]
+    existing_scores_by_enrollment: dict[UUID, AssessmentScore] = {}
+    if target_enrollment_ids:
+        existing_stmt = select(AssessmentScore).where(
+            AssessmentScore.assessment_definition_id == definition.id,
+            AssessmentScore.student_enrollment_id.in_(target_enrollment_ids),
+        )
+        existing_scores_by_enrollment = {
+            sc.student_enrollment_id: sc for sc in (await db.execute(existing_stmt)).scalars().all()
+        }
+
     errors: list[ScoreEntryError] = []
     updated_count = 0
     for item in unique_scores:
@@ -1096,11 +1112,7 @@ async def bulk_score_entry(
             )
             continue
 
-        existing_stmt = select(AssessmentScore).where(
-            AssessmentScore.assessment_definition_id == definition.id,
-            AssessmentScore.student_enrollment_id == item.student_enrollment_id,
-        )
-        existing = (await db.execute(existing_stmt)).scalar_one_or_none()
+        existing = existing_scores_by_enrollment.get(item.student_enrollment_id)
         if existing:
             existing.score_status = item.score_status.value
             existing.raw_score = item.raw_score

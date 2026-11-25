@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from uuid import UUID
@@ -6,8 +7,10 @@ from fastapi import Depends, Request
 from sqlalchemy import ColumnElement, and_, false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.dependencies import get_current_authenticated_user, get_tenant_db
 from app.core.exceptions import InsufficientPermissionException
+from app.core.redis import get_redis
 from app.modules.identity.models import (
     Permission,
     RoleDefaultPermission,
@@ -17,6 +20,11 @@ from app.modules.identity.models import (
 )
 
 
+def _use_permission_cache() -> bool:
+    settings = get_settings()
+    return not (settings.ENVIRONMENT in ("testing", "test") or os.getenv("TESTING") == "1")
+
+
 async def role_has_permission(
     db: AsyncSession,
     school_id: UUID,
@@ -24,6 +32,15 @@ async def role_has_permission(
     permission_code: str,
 ) -> bool:
     """Checks school-specific role overrides first, falling back to global role defaults."""
+    cache_key = f"perm:role:{school_id}:{role}:{permission_code}"
+    if _use_permission_cache():
+        try:
+            cached = await get_redis().get(cache_key)
+            if cached is not None:
+                return cached == "1"
+        except Exception:
+            pass
+
     override_exists = (
         await db.execute(
             select(SchoolRolePermission.id)
@@ -46,14 +63,21 @@ async def role_has_permission(
                 Permission.code == permission_code,
             )
         )
-        return (await db.execute(stmt_school_role)).scalar_one_or_none() is not None
+        allowed = (await db.execute(stmt_school_role)).scalar_one_or_none() is not None
+    else:
+        stmt_role = (
+            select(Permission.id)
+            .join(RoleDefaultPermission, RoleDefaultPermission.permission_id == Permission.id)
+            .where(RoleDefaultPermission.role == role, Permission.code == permission_code)
+        )
+        allowed = (await db.execute(stmt_role)).scalar_one_or_none() is not None
 
-    stmt_role = (
-        select(Permission.id)
-        .join(RoleDefaultPermission, RoleDefaultPermission.permission_id == Permission.id)
-        .where(RoleDefaultPermission.role == role, Permission.code == permission_code)
-    )
-    return (await db.execute(stmt_role)).scalar_one_or_none() is not None
+    if _use_permission_cache():
+        try:
+            await get_redis().set(cache_key, "1" if allowed else "0", ex=60)
+        except Exception:
+            pass
+    return allowed
 
 
 async def user_has_permission(

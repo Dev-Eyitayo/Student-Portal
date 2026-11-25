@@ -267,7 +267,6 @@ async def authenticate_user(db: AsyncSession, email: str, password: str) -> User
 
     user.last_login_at = datetime.now(UTC)
     await db.commit()
-    await db.refresh(user)
     return user
 
 

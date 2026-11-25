@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -20,7 +20,19 @@ from app.modules.identity.models import User
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/identity/login")
 
 
-async def get_current_authenticated_user(token: str = Depends(oauth2_scheme)) -> User:
+async def _get_request_db() -> AsyncGenerator[AsyncSession, None]:
+    """Single request-scoped AsyncSession shared between auth resolution and route handlers."""
+    async with async_session_factory() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+
+
+async def get_current_authenticated_user(
+    token: str = Depends(oauth2_scheme),
+    session: AsyncSession = Depends(_get_request_db),
+) -> User:
     try:
         payload = decode_access_token(token)
         user_id_str: str = payload.get("sub")
@@ -46,30 +58,29 @@ async def get_current_authenticated_user(token: str = Depends(oauth2_scheme)) ->
             detail="This session has been signed out. Please sign in again to continue.",
         )
 
-    async with async_session_factory() as session:
-        stmt = (
-            select(User)
-            .options(selectinload(User.staff_profile), selectinload(User.school))
-            .where(User.id == user_id, User.is_active.is_(True))
+    stmt = (
+        select(User)
+        .options(selectinload(User.staff_profile), selectinload(User.school))
+        .where(User.id == user_id, User.is_active.is_(True))
+    )
+    result = await session.execute(stmt)
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="This account could not be found or has been deactivated. Please contact your school administrator.",
         )
-        result = await session.execute(stmt)
-        user = result.scalar_one_or_none()
-        if not user:
+
+    # 2. Global Invalidation Check (e.g. password reset or admin deactivation)
+    if iat_ts is not None and user.token_valid_after:
+        token_issued_at = datetime.fromtimestamp(iat_ts, tz=UTC)
+        if token_issued_at < user.token_valid_after.replace(microsecond=0):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="This account could not be found or has been deactivated. Please contact your school administrator.",
+                detail="You have been signed out because your account details or password were updated. Please sign in again.",
             )
 
-        # 2. Global Invalidation Check (e.g. password reset or admin deactivation)
-        if iat_ts is not None and user.token_valid_after:
-            token_issued_at = datetime.fromtimestamp(iat_ts, tz=UTC)
-            if token_issued_at < user.token_valid_after.replace(microsecond=0):
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="You have been signed out because your account details or password were updated. Please sign in again.",
-                )
-
-        return user
+    return user
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -83,6 +94,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 async def get_tenant_db(
     current_user: User = Depends(get_current_authenticated_user),
+    session: AsyncSession = Depends(_get_request_db),
 ) -> AsyncGenerator[AsyncSession, None]:
     """
     Yields an AsyncSession with PostgreSQL Row-Level Security (RLS)
@@ -96,8 +108,18 @@ async def get_tenant_db(
 
     tokens = set_tenant_scope(current_user.school_id, current_user.role == "SUPER_ADMIN")
     try:
-        async with async_session_factory() as session:
-            yield session
+        # Apply RLS settings to the already-open transaction from auth lookup
+        await session.execute(
+            text(
+                "SELECT set_config('app.current_school_id', :school_id, true), "
+                "set_config('app.is_super_admin', :is_super_admin, true)"
+            ),
+            {
+                "school_id": str(current_user.school_id) if current_user.school_id else "",
+                "is_super_admin": "true" if current_user.role == "SUPER_ADMIN" else "false",
+            },
+        )
+        yield session
     finally:
         reset_tenant_scope(tokens)
 
