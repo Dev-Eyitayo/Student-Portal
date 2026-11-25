@@ -949,7 +949,6 @@ async def get_enrollment_subjects(
                     StudentSubjectRegistration.school_id == school_id,
                     StudentSubjectRegistration.student_enrollment_id == enrollment.id,
                     StudentSubjectRegistration.is_active.is_(True),
-                    StudentSubjectRegistration.deleted_at.is_(None),
                 )
             )
         )
@@ -960,16 +959,17 @@ async def get_enrollment_subjects(
 
     core_subjects: list[EnrollmentSubjectItem] = []
     elective_subjects: list[EnrollmentSubjectItem] = []
-    for cs, offering, subject in cs_rows:
+    for cs, _offering, subject in cs_rows:
+        is_compulsory = not (subject.is_elective or subject.is_trade_subject)
         item = EnrollmentSubjectItem(
             class_subject_id=cs.id,
             subject_id=subject.id,
             subject_name=subject.name,
             subject_code=subject.code,
-            is_compulsory=offering.is_compulsory,
-            is_registered=True if offering.is_compulsory else cs.id in registered_ids,
+            is_compulsory=is_compulsory,
+            is_registered=True if is_compulsory else cs.id in registered_ids,
         )
-        if offering.is_compulsory:
+        if is_compulsory:
             core_subjects.append(item)
         else:
             elective_subjects.append(item)
@@ -1006,12 +1006,14 @@ async def update_enrollment_electives(
             await db.execute(
                 select(ClassSubject.id)
                 .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+                .join(Subject, Subject.id == SubjectOffering.subject_id)
                 .where(
                     ClassSubject.school_id == school_id,
                     ClassSubject.class_group_id == enrollment.class_group_id,
                     ClassSubject.deleted_at.is_(None),
-                    SubjectOffering.is_compulsory.is_(False),
                     SubjectOffering.deleted_at.is_(None),
+                    Subject.deleted_at.is_(None),
+                    or_(Subject.is_elective.is_(True), Subject.is_trade_subject.is_(True)),
                 )
             )
         )
@@ -1034,7 +1036,6 @@ async def update_enrollment_electives(
                     StudentSubjectRegistration.school_id == school_id,
                     StudentSubjectRegistration.student_enrollment_id == enrollment.id,
                     StudentSubjectRegistration.class_subject_id.in_(valid_elective_ids),
-                    StudentSubjectRegistration.deleted_at.is_(None),
                 )
             )
         )
