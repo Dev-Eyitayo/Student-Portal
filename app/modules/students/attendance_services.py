@@ -128,6 +128,87 @@ def _validate_attendance_date(
         )
 
 
+async def _sync_daily_summaries_bulk(
+    db: AsyncSession,
+    school_id: UUID,
+    enrollment_ids: list[UUID],
+    term_id: UUID,
+    actor_id: UUID,
+) -> None:
+    if not enrollment_ids:
+        return
+
+    existing_summaries = {
+        s.student_enrollment_id: s
+        for s in (
+            await db.execute(
+                select(AttendanceSummary).where(
+                    AttendanceSummary.school_id == school_id,
+                    AttendanceSummary.student_enrollment_id.in_(enrollment_ids),
+                    AttendanceSummary.academic_term_id == term_id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    }
+
+    target_ids = [
+        eid
+        for eid in enrollment_ids
+        if existing_summaries.get(eid) is None or existing_summaries[eid].source != "MANUAL"
+    ]
+    if not target_ids:
+        return
+
+    rows = (
+        await db.execute(
+            select(
+                AttendanceRecord.student_enrollment_id,
+                AttendanceRecord.status,
+                func.count(AttendanceRecord.id),
+            )
+            .where(
+                AttendanceRecord.school_id == school_id,
+                AttendanceRecord.student_enrollment_id.in_(target_ids),
+                AttendanceRecord.academic_term_id == term_id,
+                AttendanceRecord.deleted_at.is_(None),
+            )
+            .group_by(AttendanceRecord.student_enrollment_id, AttendanceRecord.status)
+        )
+    ).all()
+
+    counts_by_eid: dict[UUID, dict[str, int]] = {}
+    for eid, status, count in rows:
+        counts_by_eid.setdefault(eid, {})[status] = count
+
+    for eid in target_ids:
+        counts = counts_by_eid.get(eid, {})
+        present = counts.get("PRESENT", 0) + counts.get("LATE", 0)
+        absent = counts.get("ABSENT", 0)
+        opened = present + absent
+        summary = existing_summaries.get(eid)
+        if summary is None:
+            db.add(
+                AttendanceSummary(
+                    school_id=school_id,
+                    student_enrollment_id=eid,
+                    academic_term_id=term_id,
+                    times_school_opened=opened,
+                    times_present=present,
+                    times_absent=absent,
+                    source="DAILY",
+                    updated_by_id=actor_id,
+                )
+            )
+        else:
+            summary.times_school_opened = opened
+            summary.times_present = present
+            summary.times_absent = absent
+            summary.deleted_at = None
+            summary.updated_by_id = actor_id
+
+
 async def _sync_daily_summary(
     db: AsyncSession,
     school_id: UUID,
@@ -135,53 +216,7 @@ async def _sync_daily_summary(
     term_id: UUID,
     actor_id: UUID,
 ) -> None:
-    summary = (
-        await db.execute(
-            select(AttendanceSummary).where(
-                AttendanceSummary.school_id == school_id,
-                AttendanceSummary.student_enrollment_id == enrollment_id,
-                AttendanceSummary.academic_term_id == term_id,
-            )
-        )
-    ).scalar_one_or_none()
-    if summary is not None and summary.source == "MANUAL":
-        return
-
-    rows = (
-        await db.execute(
-            select(AttendanceRecord.status, func.count(AttendanceRecord.id))
-            .where(
-                AttendanceRecord.school_id == school_id,
-                AttendanceRecord.student_enrollment_id == enrollment_id,
-                AttendanceRecord.academic_term_id == term_id,
-                AttendanceRecord.deleted_at.is_(None),
-            )
-            .group_by(AttendanceRecord.status)
-        )
-    ).all()
-    counts = {status: count for status, count in rows}
-    present = counts.get("PRESENT", 0) + counts.get("LATE", 0)
-    absent = counts.get("ABSENT", 0)
-    opened = present + absent
-
-    if summary is None:
-        summary = AttendanceSummary(
-            school_id=school_id,
-            student_enrollment_id=enrollment_id,
-            academic_term_id=term_id,
-            times_school_opened=opened,
-            times_present=present,
-            times_absent=absent,
-            source="DAILY",
-            updated_by_id=actor_id,
-        )
-        db.add(summary)
-    else:
-        summary.times_school_opened = opened
-        summary.times_present = present
-        summary.times_absent = absent
-        summary.deleted_at = None
-        summary.updated_by_id = actor_id
+    await _sync_daily_summaries_bulk(db, school_id, [enrollment_id], term_id, actor_id)
 
 
 async def mark_class_attendance(
@@ -270,8 +305,9 @@ async def mark_class_attendance(
             existing.recorded_by_id = current_user.id
 
     await db.flush()
-    for enrollment_id in valid_enrollments:
-        await _sync_daily_summary(db, school_id, enrollment_id, term.id, current_user.id)
+    await _sync_daily_summaries_bulk(
+        db, school_id, list(valid_enrollments), term.id, current_user.id
+    )
 
     record_audit_log(
         db,

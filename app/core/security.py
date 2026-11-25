@@ -25,7 +25,14 @@ if is_testing:
         argon2__parallelism=1,
     )
 else:
-    pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
+    # OWASP-recommended interactive Argon2id parameters (19 MiB, t=2, p=1)
+    pwd_context = CryptContext(
+        schemes=["argon2"],
+        deprecated="auto",
+        argon2__time_cost=2,
+        argon2__memory_cost=19456,
+        argon2__parallelism=1,
+    )
 
 # In-memory revocation cache for testing or when Redis is offline
 _in_memory_revoked_tokens: set[str] = set()

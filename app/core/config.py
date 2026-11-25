@@ -59,8 +59,8 @@ class Settings(BaseSettings):
 
     # Connection pool. Keep these small when connecting through a managed
     # transaction pooler such as Neon's PgBouncer endpoint.
-    DB_POOL_SIZE: int = 5
-    DB_MAX_OVERFLOW: int = 5
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 10
     DB_POOL_RECYCLE_SECONDS: int = 300
     DB_SSL_MODE: str | None = None
     # None = auto-detect (0 when the URL contains '-pooler', otherwise 100).

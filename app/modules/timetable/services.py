@@ -2498,86 +2498,226 @@ async def _build_entry_views(
         stmt = stmt.where(TimetableEntry.teacher_id == teacher_id)
 
     entries = (await db.execute(stmt)).scalars().all()
-    cgs = {
-        cg.id: cg
-        for cg in (
-            await db.execute(
-                select(ClassGroup).where(
-                    ClassGroup.school_id == school_id,
-                    ClassGroup.academic_session_id == term.academic_session_id,
-                    ClassGroup.deleted_at.is_(None),
+    if (class_group_id is not None or teacher_id is not None) and not entries:
+        cgs = {}
+        levels = {}
+        cs_map = {}
+        off_map = {}
+        subj_map = {}
+        users = {}
+        rooms = {}
+    elif class_group_id is not None or teacher_id is not None:
+        entry_cg_ids = list({e.class_group_id for e in entries})
+        entry_cs_ids = list({e.class_subject_id for e in entries})
+        entry_room_ids = list({e.room_id for e in entries if e.room_id is not None})
+        entry_user_ids = list(
+            {e.teacher_id for e in entries}
+            | {et.teacher_id for e in entries for et in e.entry_teachers}
+        )
+        cgs = {
+            cg.id: cg
+            for cg in (
+                await db.execute(
+                    select(ClassGroup).where(
+                        ClassGroup.school_id == school_id,
+                        ClassGroup.id.in_(entry_cg_ids),
+                        ClassGroup.deleted_at.is_(None),
+                    )
                 )
             )
+            .scalars()
+            .all()
+        }
+        entry_level_ids = list({cg.academic_level_id for cg in cgs.values()})
+        levels = (
+            {
+                lvl.id: lvl
+                for lvl in (
+                    await db.execute(
+                        select(AcademicLevel).where(
+                            AcademicLevel.school_id == school_id,
+                            AcademicLevel.id.in_(entry_level_ids),
+                            AcademicLevel.deleted_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            }
+            if entry_level_ids
+            else {}
         )
-        .scalars()
-        .all()
-    }
-    levels = {
-        lvl.id: lvl
-        for lvl in (
-            await db.execute(
-                select(AcademicLevel).where(
-                    AcademicLevel.school_id == school_id, AcademicLevel.deleted_at.is_(None)
+        cs_map = {
+            cs.id: cs
+            for cs in (
+                await db.execute(
+                    select(ClassSubject).where(
+                        ClassSubject.school_id == school_id,
+                        ClassSubject.id.in_(entry_cs_ids),
+                        ClassSubject.deleted_at.is_(None),
+                    )
                 )
             )
+            .scalars()
+            .all()
+        }
+        entry_off_ids = list({cs.subject_offering_id for cs in cs_map.values()})
+        off_map = (
+            {
+                o.id: o
+                for o in (
+                    await db.execute(
+                        select(SubjectOffering).where(
+                            SubjectOffering.school_id == school_id,
+                            SubjectOffering.id.in_(entry_off_ids),
+                            SubjectOffering.deleted_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            }
+            if entry_off_ids
+            else {}
         )
-        .scalars()
-        .all()
-    }
-    cs_map = {
-        cs.id: cs
-        for cs in (
-            await db.execute(
-                select(ClassSubject).where(
-                    ClassSubject.school_id == school_id, ClassSubject.deleted_at.is_(None)
+        entry_subj_ids = list({o.subject_id for o in off_map.values()})
+        subj_map = (
+            {
+                s.id: s
+                for s in (
+                    await db.execute(
+                        select(Subject).where(
+                            Subject.school_id == school_id,
+                            Subject.id.in_(entry_subj_ids),
+                            Subject.deleted_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            }
+            if entry_subj_ids
+            else {}
+        )
+        users = (
+            {
+                u.id: u
+                for u in (
+                    await db.execute(
+                        select(User).where(
+                            User.school_id == school_id,
+                            User.id.in_(entry_user_ids),
+                            User.deleted_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            }
+            if entry_user_ids
+            else {}
+        )
+        rooms = (
+            {
+                r.id: r
+                for r in (
+                    await db.execute(
+                        select(Room).where(
+                            Room.school_id == school_id,
+                            Room.id.in_(entry_room_ids),
+                            Room.deleted_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            }
+            if entry_room_ids
+            else {}
+        )
+    else:
+        cgs = {
+            cg.id: cg
+            for cg in (
+                await db.execute(
+                    select(ClassGroup).where(
+                        ClassGroup.school_id == school_id,
+                        ClassGroup.academic_session_id == term.academic_session_id,
+                        ClassGroup.deleted_at.is_(None),
+                    )
                 )
             )
-        )
-        .scalars()
-        .all()
-    }
-    off_map = {
-        o.id: o
-        for o in (
-            await db.execute(
-                select(SubjectOffering).where(
-                    SubjectOffering.school_id == school_id, SubjectOffering.deleted_at.is_(None)
+            .scalars()
+            .all()
+        }
+        levels = {
+            lvl.id: lvl
+            for lvl in (
+                await db.execute(
+                    select(AcademicLevel).where(
+                        AcademicLevel.school_id == school_id, AcademicLevel.deleted_at.is_(None)
+                    )
                 )
             )
-        )
-        .scalars()
-        .all()
-    }
-    subj_map = {
-        s.id: s
-        for s in (
-            await db.execute(
-                select(Subject).where(Subject.school_id == school_id, Subject.deleted_at.is_(None))
+            .scalars()
+            .all()
+        }
+        cs_map = {
+            cs.id: cs
+            for cs in (
+                await db.execute(
+                    select(ClassSubject).where(
+                        ClassSubject.school_id == school_id, ClassSubject.deleted_at.is_(None)
+                    )
+                )
             )
-        )
-        .scalars()
-        .all()
-    }
-    users = {
-        u.id: u
-        for u in (
-            await db.execute(
-                select(User).where(User.school_id == school_id, User.deleted_at.is_(None))
+            .scalars()
+            .all()
+        }
+        off_map = {
+            o.id: o
+            for o in (
+                await db.execute(
+                    select(SubjectOffering).where(
+                        SubjectOffering.school_id == school_id, SubjectOffering.deleted_at.is_(None)
+                    )
+                )
             )
-        )
-        .scalars()
-        .all()
-    }
-    rooms = {
-        r.id: r
-        for r in (
-            await db.execute(
-                select(Room).where(Room.school_id == school_id, Room.deleted_at.is_(None))
+            .scalars()
+            .all()
+        }
+        subj_map = {
+            s.id: s
+            for s in (
+                await db.execute(
+                    select(Subject).where(
+                        Subject.school_id == school_id, Subject.deleted_at.is_(None)
+                    )
+                )
             )
-        )
-        .scalars()
-        .all()
-    }
+            .scalars()
+            .all()
+        }
+        users = {
+            u.id: u
+            for u in (
+                await db.execute(
+                    select(User).where(User.school_id == school_id, User.deleted_at.is_(None))
+                )
+            )
+            .scalars()
+            .all()
+        }
+        rooms = {
+            r.id: r
+            for r in (
+                await db.execute(
+                    select(Room).where(Room.school_id == school_id, Room.deleted_at.is_(None))
+                )
+            )
+            .scalars()
+            .all()
+        }
     # A single class arm follows exactly one bell schedule: the academic-level
     # override if one exists, else the category-wide default (same precedence
     # used when solving). Without this, two different schedules' independently

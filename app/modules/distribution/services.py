@@ -96,7 +96,7 @@ async def _enforce_verify_rate_limit(client_ip: str | None) -> None:
     if not client_ip:
         return
     try:
-        redis = await get_redis()
+        redis = get_redis()
     except Exception:
         return
     key = f"rl:results_verify:{client_ip}"
@@ -215,6 +215,16 @@ async def verify_result_token(
             detail="This result link has reached its maximum view limit.",
         )
 
+    if card.publication_status == "PUBLISHED":
+        cache_key = f"report_card:verified:{card.id}"
+        try:
+            cached = await get_redis().get(cache_key)
+            if cached:
+                await db.commit()
+                return VerifiedReportCardResponse.model_validate_json(cached)
+        except Exception:
+            pass
+
     school = (await db.execute(select(School).where(School.id == token.school_id))).scalar_one()
     config = (
         await db.execute(
@@ -232,84 +242,34 @@ async def verify_result_token(
         config=config,
         now=now,
     )
+    if card.publication_status == "PUBLISHED":
+        try:
+            await get_redis().set(
+                f"report_card:verified:{card.id}",
+                response.model_dump_json(),
+                ex=3600,
+            )
+        except Exception:
+            pass
     await db.commit()
     return response
 
 
-async def _build_verified_report_card_response(
-    db: AsyncSession,
-    school_id: UUID,
+def _assemble_verified_report_card_response(
+    *,
     card: TermReportCard,
     student: Student,
-    enrollment: StudentEnrollment,
-    *,
     school: School,
     config: SchoolConfiguration | None,
+    term: AcademicTerm,
+    session: AcademicSession,
+    class_group: ClassGroup,
+    level: AcademicLevel,
+    department_name: str | None,
+    subject_rows: list[tuple[SubjectResult, Subject]],
+    score_rows: list[tuple[UUID, str, Decimal, Decimal, str, Decimal | None]],
     now: datetime,
-) -> tuple[
-    VerifiedReportCardResponse, AcademicSession, AcademicTerm, ClassGroup, AcademicLevel, str | None
-]:
-    term = (
-        await db.execute(select(AcademicTerm).where(AcademicTerm.id == card.academic_term_id))
-    ).scalar_one()
-    session = (
-        await db.execute(
-            select(AcademicSession).where(AcademicSession.id == term.academic_session_id)
-        )
-    ).scalar_one()
-    class_group = (
-        await db.execute(select(ClassGroup).where(ClassGroup.id == enrollment.class_group_id))
-    ).scalar_one()
-    level = (
-        await db.execute(
-            select(AcademicLevel).where(AcademicLevel.id == class_group.academic_level_id)
-        )
-    ).scalar_one()
-    department_name: str | None = None
-    if class_group.department_id is not None:
-        dept = (
-            await db.execute(select(Department).where(Department.id == class_group.department_id))
-        ).scalar_one_or_none()
-        department_name = dept.name if dept else None
-
-    subject_rows = (
-        await db.execute(
-            select(SubjectResult, Subject)
-            .join(ClassSubject, ClassSubject.id == SubjectResult.class_subject_id)
-            .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
-            .join(Subject, Subject.id == SubjectOffering.subject_id)
-            .where(
-                SubjectResult.school_id == school_id,
-                SubjectResult.academic_term_id == card.academic_term_id,
-                SubjectResult.student_enrollment_id == card.student_enrollment_id,
-                SubjectResult.deleted_at.is_(None),
-            )
-            .order_by(Subject.name.asc())
-        )
-    ).all()
-
-    score_rows = (
-        await db.execute(
-            select(
-                AssessmentDefinition.class_subject_id,
-                AssessmentDefinition.assessment_type,
-                AssessmentDefinition.max_score,
-                AssessmentDefinition.weight_percentage,
-                AssessmentScore.score_status,
-                AssessmentScore.raw_score,
-            )
-            .join(
-                AssessmentDefinition,
-                AssessmentDefinition.id == AssessmentScore.assessment_definition_id,
-            )
-            .where(
-                AssessmentScore.school_id == school_id,
-                AssessmentScore.student_enrollment_id == card.student_enrollment_id,
-                AssessmentDefinition.academic_term_id == card.academic_term_id,
-            )
-        )
-    ).all()
-
+) -> VerifiedReportCardResponse:
     ca_totals: dict[UUID, Decimal] = {}
     exam_totals: dict[UUID, Decimal] = {}
     for cs_id, assessment_type, max_score, weight_percentage, score_status, raw_score in score_rows:
@@ -352,7 +312,7 @@ async def _build_verified_report_card_response(
         )
     )
 
-    response = VerifiedReportCardResponse(
+    return VerifiedReportCardResponse(
         school=ReportSchoolInfo(
             name=school.name,
             school_type=school.school_type,
@@ -416,6 +376,100 @@ async def _build_verified_report_card_response(
             issued_at=card.published_at or now,
             is_authentic=card.publication_status == "PUBLISHED",
         ),
+    )
+
+
+async def _build_verified_report_card_response(
+    db: AsyncSession,
+    school_id: UUID,
+    card: TermReportCard,
+    student: Student,
+    enrollment: StudentEnrollment,
+    *,
+    school: School,
+    config: SchoolConfiguration | None,
+    now: datetime,
+) -> tuple[
+    VerifiedReportCardResponse, AcademicSession, AcademicTerm, ClassGroup, AcademicLevel, str | None
+]:
+    term = (
+        await db.execute(select(AcademicTerm).where(AcademicTerm.id == card.academic_term_id))
+    ).scalar_one()
+    session = (
+        await db.execute(
+            select(AcademicSession).where(AcademicSession.id == term.academic_session_id)
+        )
+    ).scalar_one()
+    class_group = (
+        await db.execute(select(ClassGroup).where(ClassGroup.id == enrollment.class_group_id))
+    ).scalar_one()
+    level = (
+        await db.execute(
+            select(AcademicLevel).where(AcademicLevel.id == class_group.academic_level_id)
+        )
+    ).scalar_one()
+    department_name: str | None = None
+    if class_group.department_id is not None:
+        dept = (
+            await db.execute(select(Department).where(Department.id == class_group.department_id))
+        ).scalar_one_or_none()
+        department_name = dept.name if dept else None
+
+    subject_rows = list(
+        (
+            await db.execute(
+                select(SubjectResult, Subject)
+                .join(ClassSubject, ClassSubject.id == SubjectResult.class_subject_id)
+                .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+                .join(Subject, Subject.id == SubjectOffering.subject_id)
+                .where(
+                    SubjectResult.school_id == school_id,
+                    SubjectResult.academic_term_id == card.academic_term_id,
+                    SubjectResult.student_enrollment_id == card.student_enrollment_id,
+                    SubjectResult.deleted_at.is_(None),
+                )
+                .order_by(Subject.name.asc())
+            )
+        ).all()
+    )
+
+    score_rows = list(
+        (
+            await db.execute(
+                select(
+                    AssessmentDefinition.class_subject_id,
+                    AssessmentDefinition.assessment_type,
+                    AssessmentDefinition.max_score,
+                    AssessmentDefinition.weight_percentage,
+                    AssessmentScore.score_status,
+                    AssessmentScore.raw_score,
+                )
+                .join(
+                    AssessmentDefinition,
+                    AssessmentDefinition.id == AssessmentScore.assessment_definition_id,
+                )
+                .where(
+                    AssessmentScore.school_id == school_id,
+                    AssessmentScore.student_enrollment_id == card.student_enrollment_id,
+                    AssessmentDefinition.academic_term_id == card.academic_term_id,
+                )
+            )
+        ).all()
+    )
+
+    response = _assemble_verified_report_card_response(
+        card=card,
+        student=student,
+        school=school,
+        config=config,
+        term=term,
+        session=session,
+        class_group=class_group,
+        level=level,
+        department_name=department_name,
+        subject_rows=subject_rows,
+        score_rows=score_rows,
+        now=now,
     )
     return response, session, term, class_group, level, department_name
 
@@ -957,40 +1011,153 @@ async def get_student_transcript(
         )
 
         now = datetime.now(UTC)
-        for card in card_rows:
-            enrollment = enrollment_by_id[card.student_enrollment_id]
-            (
-                report_card,
-                session,
-                term,
-                class_group,
-                level,
-                dept_name,
-            ) = await _build_verified_report_card_response(
-                db,
-                school_id,
-                card,
-                student,
-                enrollment,
-                school=school,
-                config=config,
-                now=now,
-            )
-            terms.append(
-                TranscriptTermItem(
-                    report_card_id=card.id,
-                    academic_session_id=session.id,
-                    session_name=session.name,
-                    academic_term_id=term.id,
-                    term_name=term.name,
-                    term_order=term.term_order,
-                    class_group_name=class_group.display_name,
-                    academic_level_name=level.name,
-                    department_name=dept_name,
-                    publication_status=card.publication_status,
-                    report_card=report_card,
+        if card_rows:
+            term_ids = list({c.academic_term_id for c in card_rows})
+            enr_ids = list({c.student_enrollment_id for c in card_rows})
+            cg_ids = list({enrollment_by_id[eid].class_group_id for eid in enr_ids})
+
+            terms_by_id = {
+                t.id: t
+                for t in (
+                    await db.execute(select(AcademicTerm).where(AcademicTerm.id.in_(term_ids)))
                 )
-            )
+                .scalars()
+                .all()
+            }
+            session_ids = list({t.academic_session_id for t in terms_by_id.values()})
+            sessions_by_id = {
+                s.id: s
+                for s in (
+                    await db.execute(
+                        select(AcademicSession).where(AcademicSession.id.in_(session_ids))
+                    )
+                )
+                .scalars()
+                .all()
+            }
+            cgs_by_id = {
+                cg.id: cg
+                for cg in (await db.execute(select(ClassGroup).where(ClassGroup.id.in_(cg_ids))))
+                .scalars()
+                .all()
+            }
+            level_ids = list({cg.academic_level_id for cg in cgs_by_id.values()})
+            levels_by_id = {
+                lvl.id: lvl
+                for lvl in (
+                    await db.execute(select(AcademicLevel).where(AcademicLevel.id.in_(level_ids)))
+                )
+                .scalars()
+                .all()
+            }
+            dept_ids = list({cg.department_id for cg in cgs_by_id.values() if cg.department_id})
+            depts_by_id: dict[UUID, Department] = {}
+            if dept_ids:
+                depts_by_id = {
+                    d.id: d
+                    for d in (
+                        await db.execute(select(Department).where(Department.id.in_(dept_ids)))
+                    )
+                    .scalars()
+                    .all()
+                }
+
+            all_subject_rows = (
+                await db.execute(
+                    select(SubjectResult, Subject)
+                    .join(ClassSubject, ClassSubject.id == SubjectResult.class_subject_id)
+                    .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+                    .join(Subject, Subject.id == SubjectOffering.subject_id)
+                    .where(
+                        SubjectResult.school_id == school_id,
+                        SubjectResult.academic_term_id.in_(term_ids),
+                        SubjectResult.student_enrollment_id.in_(enr_ids),
+                        SubjectResult.deleted_at.is_(None),
+                    )
+                    .order_by(Subject.name.asc())
+                )
+            ).all()
+            subjects_by_key: dict[tuple[UUID, UUID], list[tuple[SubjectResult, Subject]]] = {}
+            for res, subj in all_subject_rows:
+                subjects_by_key.setdefault(
+                    (res.academic_term_id, res.student_enrollment_id), []
+                ).append((res, subj))
+
+            all_score_rows = (
+                await db.execute(
+                    select(
+                        AssessmentDefinition.academic_term_id,
+                        AssessmentScore.student_enrollment_id,
+                        AssessmentDefinition.class_subject_id,
+                        AssessmentDefinition.assessment_type,
+                        AssessmentDefinition.max_score,
+                        AssessmentDefinition.weight_percentage,
+                        AssessmentScore.score_status,
+                        AssessmentScore.raw_score,
+                    )
+                    .join(
+                        AssessmentDefinition,
+                        AssessmentDefinition.id == AssessmentScore.assessment_definition_id,
+                    )
+                    .where(
+                        AssessmentScore.school_id == school_id,
+                        AssessmentScore.student_enrollment_id.in_(enr_ids),
+                        AssessmentDefinition.academic_term_id.in_(term_ids),
+                    )
+                )
+            ).all()
+            scores_by_key: dict[
+                tuple[UUID, UUID], list[tuple[UUID, str, Decimal, Decimal, str, Decimal | None]]
+            ] = {}
+            for tid, eid, cs_id, atype, max_s, weight_p, s_status, raw_s in all_score_rows:
+                scores_by_key.setdefault((tid, eid), []).append(
+                    (cs_id, atype, max_s, weight_p, s_status, raw_s)
+                )
+
+            for card in card_rows:
+                enrollment = enrollment_by_id[card.student_enrollment_id]
+                term = terms_by_id[card.academic_term_id]
+                session = sessions_by_id[term.academic_session_id]
+                class_group = cgs_by_id[enrollment.class_group_id]
+                level = levels_by_id[class_group.academic_level_id]
+                dept_name = (
+                    depts_by_id[class_group.department_id].name
+                    if class_group.department_id and class_group.department_id in depts_by_id
+                    else None
+                )
+                report_card = _assemble_verified_report_card_response(
+                    card=card,
+                    student=student,
+                    school=school,
+                    config=config,
+                    term=term,
+                    session=session,
+                    class_group=class_group,
+                    level=level,
+                    department_name=dept_name,
+                    subject_rows=subjects_by_key.get(
+                        (card.academic_term_id, card.student_enrollment_id), []
+                    ),
+                    score_rows=scores_by_key.get(
+                        (card.academic_term_id, card.student_enrollment_id), []
+                    ),
+                    now=now,
+                )
+                terms.append(
+                    TranscriptTermItem(
+                        report_card_id=card.id,
+                        academic_session_id=session.id,
+                        session_name=session.name,
+                        academic_term_id=term.id,
+                        term_name=term.name,
+                        term_order=term.term_order,
+                        class_group_name=class_group.display_name,
+                        academic_level_name=level.name,
+                        department_name=dept_name,
+                        publication_status=card.publication_status,
+                        report_card=report_card,
+                    )
+                )
 
     cumulative_average: Decimal | None = None
     if terms:
