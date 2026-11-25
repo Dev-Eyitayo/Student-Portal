@@ -3,6 +3,7 @@ import os
 # Set testing environment variables before any app modules load
 os.environ["ENVIRONMENT"] = "testing"
 os.environ["TESTING"] = "1"
+os.environ["CELERY_TASK_ALWAYS_EAGER"] = "true"
 
 from hypothesis import HealthCheck, settings
 

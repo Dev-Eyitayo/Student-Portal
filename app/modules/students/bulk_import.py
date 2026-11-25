@@ -43,6 +43,8 @@ HEADER_ALIASES = {
     "parent_email": "guardian_email",
     "guardian_phone_number": "guardian_phone",
     "parent_phone": "guardian_phone",
+    "address": "home_address",
+    "homeaddress": "home_address",
     "admission_date": "enrollment_date",
     "enrollmentdate": "enrollment_date",
 }
@@ -60,6 +62,7 @@ class StudentBulkImportRow(BaseModel):
     guardian_name: str = Field(..., min_length=2, max_length=128)
     guardian_email: EmailStr
     guardian_phone: str = Field(..., min_length=5, max_length=32)
+    home_address: str | None = Field(None, max_length=500)
     enrollment_date: date
 
     @field_validator("admission_number", mode="before")
@@ -81,7 +84,7 @@ class StudentBulkImportRow(BaseModel):
     def validate_guardian_phone(cls, value: Any) -> str:
         return validate_nigerian_phone(value)
 
-    @field_validator("middle_name", mode="before")
+    @field_validator("middle_name", "home_address", mode="before")
     @classmethod
     def blank_optional_text(cls, value: Any) -> str | None:
         if value is None:

@@ -28,6 +28,7 @@ def normalize_asyncpg_url(url: str) -> str:
 class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
+    SQL_ECHO: bool = False
     APP_NAME: str = "Olivet Academic Records Platform"
     APP_URL: str = "http://localhost:8000"
 

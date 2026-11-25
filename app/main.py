@@ -36,6 +36,7 @@ from app.modules.subjects.router import (
     enrollment_registrations_router,
 )
 from app.modules.subjects.router import router as subjects_router
+from app.modules.timetable.router import router as timetable_router
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -104,6 +105,7 @@ def create_app() -> FastAPI:
     app.include_router(publication_distribution_router, prefix="/api/v1")
     app.include_router(results_router, prefix="/api/v1")
     app.include_router(audit_router, prefix="/api/v1")
+    app.include_router(timetable_router, prefix="/api/v1")
 
     # Healthcheck
     @app.get("/api/v1/health", tags=["System"])

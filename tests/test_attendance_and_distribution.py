@@ -261,39 +261,52 @@ async def test_attendance_marking_summary_and_report_card_verification_lifecycle
         )
         assert iso_resp.status_code == 404, iso_resp.text
 
-        # Enter, submit, approve scores for all 10 core subjects, calculate & publish
+        # Enter, submit, approve scores for all 8 core subjects, calculate & publish
         regs_resp = await client.get(
             f"/api/v1/enrollments/{enrollment_id}/subject-registrations?page_size=50",
             headers=headers,
         )
         assert regs_resp.status_code == 200, regs_resp.text
         cs_ids = [item["class_subject_id"] for item in regs_resp.json()["data"]["items"]]
-        assert len(cs_ids) == 10
+        assert len(cs_ids) == 8
+        registered_ids = set(cs_ids)
 
-        for cs_id in cs_ids:
-            defs_resp = await client.get(
-                f"/api/v1/assessments/definitions?academic_term_id={term_id}&class_subject_id={cs_id}",
-                headers=headers,
-            )
-            assert defs_resp.status_code == 200, defs_resp.text
-            for d in defs_resp.json()["data"]["items"]:
-                score_val = "60" if d["code"] == "EXAM" else "8"
-                bulk_resp = await client.post(
-                    "/api/v1/assessments/scores/bulk-entry",
-                    json={
-                        "class_subject_id": cs_id,
-                        "assessment_definition_id": d["id"],
-                        "scores": [
-                            {
-                                "student_enrollment_id": enrollment_id,
-                                "score_status": "SCORED",
-                                "raw_score": score_val,
-                            }
-                        ],
-                    },
+        # The template also offers 5 electives nobody registered for. calculate-term
+        # requires every offered class subject's score sheet to be resolved, so those
+        # still need a trivial (zero-student) submit & approve.
+        all_cs_resp = await client.get(
+            f"/api/v1/class-subjects?class_group_id={cg_id}&page_size=50",
+            headers=headers,
+        )
+        assert all_cs_resp.status_code == 200, all_cs_resp.text
+        all_cs_ids = [item["id"] for item in all_cs_resp.json()["data"]["items"]]
+        assert len(all_cs_ids) == 13
+
+        for cs_id in all_cs_ids:
+            if cs_id in registered_ids:
+                defs_resp = await client.get(
+                    f"/api/v1/assessments/definitions?academic_term_id={term_id}&class_subject_id={cs_id}",
                     headers=headers,
                 )
-                assert bulk_resp.status_code == 200, bulk_resp.text
+                assert defs_resp.status_code == 200, defs_resp.text
+                for d in defs_resp.json()["data"]["items"]:
+                    score_val = "60" if d["code"] == "EXAM" else "8"
+                    bulk_resp = await client.post(
+                        "/api/v1/assessments/scores/bulk-entry",
+                        json={
+                            "class_subject_id": cs_id,
+                            "assessment_definition_id": d["id"],
+                            "scores": [
+                                {
+                                    "student_enrollment_id": enrollment_id,
+                                    "score_status": "SCORED",
+                                    "raw_score": score_val,
+                                }
+                            ],
+                        },
+                        headers=headers,
+                    )
+                    assert bulk_resp.status_code == 200, bulk_resp.text
 
             sub_resp = await client.post(
                 "/api/v1/assessments/submit",
@@ -381,7 +394,7 @@ async def test_attendance_marking_summary_and_report_card_verification_lifecycle
         }
         assert report["summary"]["class_teacher_comment"] == "Diligent pupil."
         assert report["summary"]["principal_comment"] == "Keep it up."
-        assert len(report["subject_breakdown"]) == 10
+        assert len(report["subject_breakdown"]) == 8
         assert report["subject_breakdown"][0]["grade"] == "A"
 
         # QR verification

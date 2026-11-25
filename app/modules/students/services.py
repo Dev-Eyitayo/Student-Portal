@@ -415,6 +415,7 @@ async def create_student(
         guardian_name=req.guardian_name.strip(),
         guardian_email=str(req.guardian_email).lower(),
         guardian_phone=req.guardian_phone.strip(),
+        home_address=req.home_address.strip() if req.home_address else None,
         enrollment_date=req.enrollment_date,
         status="ADMITTED",
     )
@@ -478,6 +479,8 @@ async def update_student(
         student.guardian_email = str(req.guardian_email).lower()
     if "guardian_phone" in fields_set and req.guardian_phone is not None:
         student.guardian_phone = req.guardian_phone.strip()
+    if "home_address" in fields_set:
+        student.home_address = req.home_address.strip() if req.home_address else None
     if "enrollment_date" in fields_set and req.enrollment_date is not None:
         student.enrollment_date = req.enrollment_date
 
@@ -839,6 +842,7 @@ async def provision_student_batch(
                     guardian_name=row.guardian_name,
                     guardian_email=str(row.guardian_email).lower(),
                     guardian_phone=row.guardian_phone,
+                    home_address=row.home_address,
                     enrollment_date=row.enrollment_date,
                     status="ADMITTED",
                 )

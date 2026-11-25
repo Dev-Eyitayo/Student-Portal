@@ -16,6 +16,7 @@ ALLOWED_DOMAINS = {
     "results",
     "audit",
     "health",
+    "timetable",
 }
 
 
