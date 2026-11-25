@@ -11,6 +11,8 @@ from typing import Any
 from openpyxl import load_workbook
 from pydantic import BaseModel, EmailStr, Field, ValidationError, field_validator, model_validator
 
+from app.modules.common.validators import validate_nigerian_phone
+
 MAX_STUDENT_IMPORT_BYTES = 5 * 1024 * 1024
 MAX_STUDENT_IMPORT_ROWS = 5000
 REQUIRED_COLUMNS = (
@@ -67,12 +69,17 @@ class StudentBulkImportRow(BaseModel):
             return value
         return str(value).strip().upper()
 
-    @field_validator("first_name", "last_name", "guardian_name", "guardian_phone", mode="before")
+    @field_validator("first_name", "last_name", "guardian_name", mode="before")
     @classmethod
     def strip_required_text(cls, value: Any) -> Any:
         if value is None:
             return value
         return str(value).strip()
+
+    @field_validator("guardian_phone", mode="before")
+    @classmethod
+    def validate_guardian_phone(cls, value: Any) -> str:
+        return validate_nigerian_phone(value)
 
     @field_validator("middle_name", mode="before")
     @classmethod

@@ -34,6 +34,8 @@ celery_app.conf.update(
     task_routes={
         "app.modules.identity.tasks.process_staff_bulk_import": {"queue": "bulk_imports"},
         "app.modules.identity.tasks.send_staff_invitation_email": {"queue": "notifications"},
+        "app.modules.identity.tasks.send_password_reset_email": {"queue": "notifications"},
+        "app.modules.identity.tasks.send_password_changed_alert_email": {"queue": "notifications"},
         "app.modules.distribution.tasks.send_term_result_notifications": {"queue": "notifications"},
         "app.modules.students.tasks.process_student_bulk_import": {"queue": "bulk_imports"},
     },

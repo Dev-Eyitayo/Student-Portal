@@ -16,7 +16,7 @@ from app.modules.identity.models import User
 
 @dataclass(frozen=True)
 class AuditContext:
-    school_id: UUID
+    school_id: UUID | None
     actor_id: UUID
     actor_ip: str
 

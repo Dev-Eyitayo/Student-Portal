@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
+from app.modules.common.validators import validate_nigerian_phone
+
 
 class Gender(StrEnum):
     M = "M"
@@ -42,6 +44,11 @@ class StudentCreateRequest(BaseModel):
     guardian_phone: str = Field(..., min_length=5, max_length=32)
     enrollment_date: date
 
+    @field_validator("guardian_phone", mode="before")
+    @classmethod
+    def validate_guardian_phone(cls, value: Any) -> str:
+        return validate_nigerian_phone(value)
+
     @model_validator(mode="after")
     def validate_dates(self) -> "StudentCreateRequest":
         if self.date_of_birth >= self.enrollment_date:
@@ -59,6 +66,13 @@ class StudentUpdateRequest(BaseModel):
     guardian_email: EmailStr | None = None
     guardian_phone: str | None = Field(None, min_length=5, max_length=32)
     enrollment_date: date | None = None
+
+    @field_validator("guardian_phone", mode="before")
+    @classmethod
+    def validate_guardian_phone(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        return validate_nigerian_phone(value)
 
 
 class StudentStatusUpdateRequest(BaseModel):

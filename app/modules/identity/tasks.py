@@ -62,6 +62,70 @@ def send_staff_invitation_email(
 
 @celery_app.task(
     bind=True,
+    name="app.modules.identity.tasks.send_password_reset_email",
+    autoretry_for=(EmailDeliveryError,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def send_password_reset_email(
+    self,
+    email: str,
+    first_name: str,
+    reset_token: str,
+) -> dict[str, Any]:
+    settings = get_settings()
+    reset_base_url = (
+        settings.FRONTEND_RESET_PASSWORD_URL or f"{settings.APP_URL.rstrip('/')}/reset-password"
+    )
+    sep = "&" if "?" in reset_base_url else "?"
+    reset_url = f"{reset_base_url}{sep}token={reset_token}"
+    safe_name = escape(first_name)
+    html = (
+        f"<p>Hello {safe_name},</p>"
+        f"<p>We received a request to reset the password for your account.</p>"
+        f'<p><a href="{escape(reset_url)}">Reset your password</a></p>'
+        f"<p>This link will expire in {settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES} minutes. "
+        f"If you did not request this, please disregard this email.</p>"
+    )
+    message_id = mail_client.send_sync(
+        to_email=email,
+        to_name=first_name,
+        subject="Password Reset Request",
+        html=html,
+    )
+    return {"status": "sent", "email": email, "message_id": message_id}
+
+
+@celery_app.task(
+    bind=True,
+    name="app.modules.identity.tasks.send_password_changed_alert_email",
+    autoretry_for=(EmailDeliveryError,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def send_password_changed_alert_email(
+    self,
+    email: str,
+    first_name: str,
+) -> dict[str, Any]:
+    safe_name = escape(first_name)
+    html = (
+        f"<p>Hello {safe_name},</p>"
+        f"<p>The password for your account was recently changed.</p>"
+        f"<p>If you made this change, you can safely ignore this notification. "
+        f"If you did not change your password, please contact your school administrator or academic officer immediately.</p>"
+    )
+    message_id = mail_client.send_sync(
+        to_email=email,
+        to_name=first_name,
+        subject="Security Alert: Password Changed",
+        html=html,
+    )
+    return {"status": "sent", "email": email, "message_id": message_id}
+
+
+@celery_app.task(
+    bind=True,
     name="app.modules.identity.tasks.process_staff_bulk_import",
 )
 def process_staff_bulk_import(
