@@ -740,6 +740,14 @@ async def update_enrollment(
                 "Class arm transfers must be within the same academic session. "
                 "Use promotion or repeating for a new academic session."
             )
+        if (
+            enrollment.class_group is not None
+            and target_class_group.academic_level_id != enrollment.class_group.academic_level_id
+        ):
+            raise ValidationException(
+                "Class arm transfers must be within the same academic level. "
+                "Use promotion to move a student to a different level."
+            )
         if target_class_group.id == enrollment.class_group_id:
             raise ValidationException("The student is already placed in the selected class arm.")
         await require_scoped_permission(
