@@ -15,7 +15,10 @@ from app.core.exceptions import (
     ValidationException,
 )
 from app.core.permissions import build_scope_filter, get_permission_scope, require_scoped_permission
-from app.modules.academic_structure.models import AcademicSession, ClassGroup
+from app.modules.academic_structure.models import (
+    AcademicSession,
+    ClassGroup,
+)
 from app.modules.audit.services import AuditContext, record_audit_log
 from app.modules.common.models import generate_uuid7
 from app.modules.common.pagination import paginate
@@ -25,10 +28,18 @@ from app.modules.students.bulk_import import ParsedStudentRow
 from app.modules.students.models import Student, StudentEnrollment
 from app.modules.students.schemas import (
     EnrollmentCreateRequest,
+    EnrollmentSubjectItem,
+    EnrollmentSubjectsResponse,
     EnrollmentUpdateRequest,
     StudentCreateRequest,
     StudentStatusUpdateRequest,
     StudentUpdateRequest,
+)
+from app.modules.subjects.models import (
+    ClassSubject,
+    StudentSubjectRegistration,
+    Subject,
+    SubjectOffering,
 )
 from app.modules.subjects.services import auto_register_compulsory_subjects
 
@@ -195,8 +206,10 @@ def _enrollment_query(school_id: UUID) -> Select[tuple[StudentEnrollment]]:
     return (
         select(StudentEnrollment)
         .options(
-            selectinload(StudentEnrollment.class_group),
+            selectinload(StudentEnrollment.class_group).selectinload(ClassGroup.academic_level),
+            selectinload(StudentEnrollment.class_group).selectinload(ClassGroup.department),
             selectinload(StudentEnrollment.academic_session),
+            selectinload(StudentEnrollment.student),
         )
         .where(StudentEnrollment.school_id == school_id)
     )
@@ -221,7 +234,11 @@ async def _get_active_class_group(
 ) -> ClassGroup:
     stmt = (
         select(ClassGroup)
-        .options(selectinload(ClassGroup.academic_session))
+        .options(
+            selectinload(ClassGroup.academic_session),
+            selectinload(ClassGroup.academic_level),
+            selectinload(ClassGroup.department),
+        )
         .where(
             ClassGroup.id == class_group_id,
             ClassGroup.school_id == school_id,
@@ -702,6 +719,70 @@ async def update_enrollment(
             "Please choose a valid enrollment status: ENROLLED, PROMOTED, REPEATING, "
             "TRANSFERRED, or WITHDRAWN."
         )
+
+    student = enrollment.student
+    if student is None or student.deleted_at is not None or student.status != "ACTIVE":
+        raise ValidationException(
+            "Only active students can have their class placement or promotion updated."
+        )
+
+    # Same-session class arm transfer (ENROLLED -> ENROLLED with transfer_to_class_group_id)
+    if req.transfer_to_class_group_id is not None:
+        if target_status != "ENROLLED" or enrollment.enrollment_status != "ENROLLED":
+            raise ValidationException(
+                "Class arm transfers can only be performed on an active ENROLLED placement."
+            )
+        target_class_group = await _get_active_class_group(
+            db, school_id, req.transfer_to_class_group_id
+        )
+        if target_class_group.academic_session_id != enrollment.academic_session_id:
+            raise ValidationException(
+                "Class arm transfers must be within the same academic session. "
+                "Use promotion or repeating for a new academic session."
+            )
+        if (
+            enrollment.class_group is not None
+            and target_class_group.academic_level_id != enrollment.class_group.academic_level_id
+        ):
+            raise ValidationException(
+                "Class arm transfers must be within the same academic level. "
+                "Use promotion to move a student to a different level."
+            )
+        if target_class_group.id == enrollment.class_group_id:
+            raise ValidationException("The student is already placed in the selected class arm.")
+        await require_scoped_permission(
+            db,
+            current_user,
+            "students:enroll",
+            department_id=target_class_group.department_id,
+            academic_level_id=target_class_group.academic_level_id,
+            class_group_id=target_class_group.id,
+        )
+        previous_cg_id = enrollment.class_group_id
+        enrollment.class_group_id = target_class_group.id
+        await db.flush()
+        await auto_register_compulsory_subjects(
+            db, school_id, enrollment, target_class_group, audit
+        )
+        record_audit_log(
+            db,
+            audit,
+            action="ENROLLMENT_TRANSFERRED",
+            resource_type="StudentEnrollment",
+            resource_id=enrollment.id,
+            diff_payload={
+                "before": {"class_group_id": str(previous_cg_id)},
+                "after": {"class_group_id": str(target_class_group.id)},
+                "reason": req.reason.strip() if req.reason else None,
+            },
+        )
+        await _commit_or_conflict(
+            db,
+            message="This enrollment transfer could not be saved. Please try again.",
+            code="ENROLLMENT_CONFLICT",
+        )
+        return await _get_enrollment(db, school_id, enrollment.id)
+
     if target_status == enrollment.enrollment_status:
         raise ValidationException("This enrollment is already in the selected status.")
     if target_status not in ENROLLMENT_STATUS_TRANSITIONS[enrollment.enrollment_status]:
@@ -710,8 +791,17 @@ async def update_enrollment(
             f"be changed to {target_status.lower()}. Please choose a valid next status."
         )
 
+    if target_status in {"WITHDRAWN", "TRANSFERRED"} and (
+        not req.reason or len(req.reason.strip()) < 5
+    ):
+        raise ValidationException(
+            "Please provide a brief administrative reason (at least 5 characters) for "
+            f"marking this enrollment as {target_status.lower()}."
+        )
+
     previous_status = enrollment.enrollment_status
     promoted_to_class_group_id: UUID | None = None
+    next_class_group: ClassGroup | None = None
 
     if target_status in {"PROMOTED", "REPEATING"}:
         if target_status == "PROMOTED" and req.promoted_to_class_group_id is None:
@@ -719,25 +809,81 @@ async def update_enrollment(
                 "Please select the class group the student is being promoted into."
             )
         if req.promoted_to_class_group_id is not None:
-            target_class_group = await _get_active_class_group(
+            next_class_group = await _get_active_class_group(
                 db,
                 school_id,
                 req.promoted_to_class_group_id,
             )
             if (
-                target_class_group.academic_session.start_date
+                next_class_group.academic_session.start_date
                 <= enrollment.academic_session.start_date
             ):
                 raise ValidationException(
-                    "The promotion class must belong to a later academic session than the "
+                    "The destination class must belong to a later academic session than the "
                     "student's current enrollment."
                 )
-            promoted_to_class_group_id = target_class_group.id
+            current_level_order = (
+                enrollment.class_group.academic_level.level_order
+                if enrollment.class_group and enrollment.class_group.academic_level
+                else None
+            )
+            target_level_order = (
+                next_class_group.academic_level.level_order
+                if next_class_group.academic_level
+                else None
+            )
+            if (
+                target_status == "PROMOTED"
+                and current_level_order is not None
+                and target_level_order is not None
+                and target_level_order < current_level_order
+            ):
+                raise ValidationException(
+                    "A promoted student cannot be placed into a lower academic level than their "
+                    "current class."
+                )
+            if (
+                target_status == "REPEATING"
+                and current_level_order is not None
+                and target_level_order is not None
+                and target_level_order != current_level_order
+            ):
+                raise ValidationException(
+                    "A repeating student must remain in the same academic level."
+                )
+            await require_scoped_permission(
+                db,
+                current_user,
+                "students:enroll",
+                department_id=next_class_group.department_id,
+                academic_level_id=next_class_group.academic_level_id,
+                class_group_id=next_class_group.id,
+            )
+            promoted_to_class_group_id = next_class_group.id
 
     enrollment.promoted_to_class_group_id = promoted_to_class_group_id
     enrollment.enrollment_status = target_status
 
     await db.flush()
+
+    if (
+        req.create_next_enrollment
+        and next_class_group is not None
+        and not await _enrollment_exists(db, student.id, next_class_group.academic_session_id)
+    ):
+        next_enrollment = StudentEnrollment(
+            school_id=school_id,
+            student_id=student.id,
+            academic_session_id=next_class_group.academic_session_id,
+            class_group_id=next_class_group.id,
+            enrollment_status="ENROLLED",
+        )
+        db.add(next_enrollment)
+        await db.flush()
+        await auto_register_compulsory_subjects(
+            db, school_id, next_enrollment, next_class_group, audit
+        )
+
     record_audit_log(
         db,
         audit,
@@ -748,7 +894,9 @@ async def update_enrollment(
             "before": {"enrollment_status": previous_status},
             "after": {
                 "enrollment_status": target_status,
-                "promoted_to_class_group_id": promoted_to_class_group_id,
+                "promoted_to_class_group_id": (
+                    str(promoted_to_class_group_id) if promoted_to_class_group_id else None
+                ),
             },
             "reason": req.reason.strip() if req.reason else None,
         },
@@ -759,6 +907,170 @@ async def update_enrollment(
         code="ENROLLMENT_CONFLICT",
     )
     return await _get_enrollment(db, school_id, enrollment.id)
+
+
+async def get_enrollment_subjects(
+    db: AsyncSession,
+    school_id: UUID,
+    enrollment_id: UUID,
+    current_user: User,
+) -> EnrollmentSubjectsResponse:
+    enrollment = await _get_enrollment(db, school_id, enrollment_id)
+    # Allow enrollment managers, subject managers, or student viewers
+    has_access = False
+    for perm in ("students:enroll", "students:register", "subjects:manage"):
+        scope = await get_permission_scope(db, current_user, perm)
+        if scope.has_any_access:
+            has_access = True
+            break
+    if not has_access:
+        raise InsufficientPermissionException(permission_code="students:enroll")
+
+    cs_rows = (
+        await db.execute(
+            select(ClassSubject, SubjectOffering, Subject)
+            .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+            .join(Subject, Subject.id == SubjectOffering.subject_id)
+            .where(
+                ClassSubject.school_id == school_id,
+                ClassSubject.class_group_id == enrollment.class_group_id,
+                ClassSubject.deleted_at.is_(None),
+                SubjectOffering.deleted_at.is_(None),
+                Subject.deleted_at.is_(None),
+            )
+            .order_by(Subject.name.asc())
+        )
+    ).all()
+
+    reg_rows = (
+        (
+            await db.execute(
+                select(StudentSubjectRegistration.class_subject_id).where(
+                    StudentSubjectRegistration.school_id == school_id,
+                    StudentSubjectRegistration.student_enrollment_id == enrollment.id,
+                    StudentSubjectRegistration.is_active.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    registered_ids = set(reg_rows)
+
+    core_subjects: list[EnrollmentSubjectItem] = []
+    elective_subjects: list[EnrollmentSubjectItem] = []
+    for cs, _offering, subject in cs_rows:
+        is_compulsory = not (subject.is_elective or subject.is_trade_subject)
+        item = EnrollmentSubjectItem(
+            class_subject_id=cs.id,
+            subject_id=subject.id,
+            subject_name=subject.name,
+            subject_code=subject.code,
+            is_compulsory=is_compulsory,
+            is_registered=True if is_compulsory else cs.id in registered_ids,
+        )
+        if is_compulsory:
+            core_subjects.append(item)
+        else:
+            elective_subjects.append(item)
+
+    cg = enrollment.class_group
+    return EnrollmentSubjectsResponse(
+        enrollment_id=enrollment.id,
+        class_group_id=enrollment.class_group_id,
+        class_group_name=cg.display_name if cg else "",
+        academic_session_id=enrollment.academic_session_id,
+        academic_level_name=cg.academic_level.name if cg and cg.academic_level else "",
+        department_name=cg.department.name if cg and cg.department else None,
+        core_subjects=core_subjects,
+        elective_subjects=elective_subjects,
+    )
+
+
+async def update_enrollment_electives(
+    db: AsyncSession,
+    school_id: UUID,
+    enrollment_id: UUID,
+    class_subject_ids: list[UUID],
+    current_user: User,
+    audit: AuditContext,
+) -> EnrollmentSubjectsResponse:
+    enrollment = await _get_enrollment(db, school_id, enrollment_id)
+    try:
+        await _require_enrollment_scope(db, current_user, enrollment, "subjects:manage")
+    except InsufficientPermissionException:
+        await _require_enrollment_scope(db, current_user, enrollment, "students:enroll")
+
+    elective_rows = (
+        (
+            await db.execute(
+                select(ClassSubject.id)
+                .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+                .join(Subject, Subject.id == SubjectOffering.subject_id)
+                .where(
+                    ClassSubject.school_id == school_id,
+                    ClassSubject.class_group_id == enrollment.class_group_id,
+                    ClassSubject.deleted_at.is_(None),
+                    SubjectOffering.deleted_at.is_(None),
+                    Subject.deleted_at.is_(None),
+                    or_(Subject.is_elective.is_(True), Subject.is_trade_subject.is_(True)),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    valid_elective_ids = set(elective_rows)
+
+    selected_ids = set(class_subject_ids)
+    invalid_ids = selected_ids - valid_elective_ids
+    if invalid_ids:
+        raise ValidationException(
+            "One or more selected subjects are not valid electives for this student's class arm."
+        )
+
+    existing_regs = (
+        (
+            await db.execute(
+                select(StudentSubjectRegistration).where(
+                    StudentSubjectRegistration.school_id == school_id,
+                    StudentSubjectRegistration.student_enrollment_id == enrollment.id,
+                    StudentSubjectRegistration.class_subject_id.in_(valid_elective_ids),
+                )
+            )
+        )
+        .scalars()
+        .all()
+        if valid_elective_ids
+        else []
+    )
+
+    existing_by_cs = {reg.class_subject_id: reg for reg in existing_regs}
+    for cs_id in valid_elective_ids:
+        reg = existing_by_cs.get(cs_id)
+        should_be_active = cs_id in selected_ids
+        if reg is not None:
+            reg.is_active = should_be_active
+        elif should_be_active:
+            db.add(
+                StudentSubjectRegistration(
+                    school_id=school_id,
+                    student_enrollment_id=enrollment.id,
+                    class_subject_id=cs_id,
+                    is_active=True,
+                )
+            )
+
+    record_audit_log(
+        db,
+        audit,
+        action="STUDENT_ELECTIVES_UPDATED",
+        resource_type="StudentEnrollment",
+        resource_id=enrollment.id,
+        diff_payload={"elective_class_subject_ids": [str(cid) for cid in sorted(selected_ids)]},
+    )
+    await db.commit()
+    return await get_enrollment_subjects(db, school_id, enrollment_id, current_user)
 
 
 @dataclass

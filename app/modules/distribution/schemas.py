@@ -159,3 +159,33 @@ class ReportCardListResponse(BaseModel):
     items: list[ReportCardListItem]
     summary: ReportCardListSummary
     meta: PageMeta | None = None
+
+
+class TranscriptStudentInfo(BaseModel):
+    id: UUID
+    admission_number: str
+    full_name: str
+    gender: str
+    status: str
+    current_class_name: str | None = None
+
+
+class TranscriptTermItem(BaseModel):
+    report_card_id: UUID
+    academic_session_id: UUID
+    session_name: str
+    academic_term_id: UUID
+    term_name: str
+    term_order: int
+    class_group_name: str
+    academic_level_name: str
+    department_name: str | None = None
+    publication_status: str
+    report_card: VerifiedReportCardResponse
+
+
+class StudentTranscriptResponse(BaseModel):
+    school: ReportSchoolInfo
+    student: TranscriptStudentInfo
+    terms: list[TranscriptTermItem]
+    cumulative_average: Decimal | None = None

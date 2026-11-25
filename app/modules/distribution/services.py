@@ -47,6 +47,9 @@ from app.modules.distribution.schemas import (
     ReportSubjectItem,
     ReportSummaryInfo,
     ReportVerificationInfo,
+    StudentTranscriptResponse,
+    TranscriptStudentInfo,
+    TranscriptTermItem,
     VerifiedReportCardResponse,
 )
 from app.modules.distribution.tasks import send_term_result_notifications
@@ -218,6 +221,34 @@ async def verify_result_token(
             select(SchoolConfiguration).where(SchoolConfiguration.school_id == token.school_id)
         )
     ).scalar_one_or_none()
+
+    response, _, _, _, _, _ = await _build_verified_report_card_response(
+        db,
+        token.school_id,
+        card,
+        student,
+        enrollment,
+        school=school,
+        config=config,
+        now=now,
+    )
+    await db.commit()
+    return response
+
+
+async def _build_verified_report_card_response(
+    db: AsyncSession,
+    school_id: UUID,
+    card: TermReportCard,
+    student: Student,
+    enrollment: StudentEnrollment,
+    *,
+    school: School,
+    config: SchoolConfiguration | None,
+    now: datetime,
+) -> tuple[
+    VerifiedReportCardResponse, AcademicSession, AcademicTerm, ClassGroup, AcademicLevel, str | None
+]:
     term = (
         await db.execute(select(AcademicTerm).where(AcademicTerm.id == card.academic_term_id))
     ).scalar_one()
@@ -248,7 +279,7 @@ async def verify_result_token(
             .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
             .join(Subject, Subject.id == SubjectOffering.subject_id)
             .where(
-                SubjectResult.school_id == token.school_id,
+                SubjectResult.school_id == school_id,
                 SubjectResult.academic_term_id == card.academic_term_id,
                 SubjectResult.student_enrollment_id == card.student_enrollment_id,
                 SubjectResult.deleted_at.is_(None),
@@ -272,7 +303,7 @@ async def verify_result_token(
                 AssessmentDefinition.id == AssessmentScore.assessment_definition_id,
             )
             .where(
-                AssessmentScore.school_id == token.school_id,
+                AssessmentScore.school_id == school_id,
                 AssessmentScore.student_enrollment_id == card.student_enrollment_id,
                 AssessmentDefinition.academic_term_id == card.academic_term_id,
             )
@@ -292,8 +323,6 @@ async def verify_result_token(
             exam_totals[cs_id] = exam_totals.get(cs_id, Decimal("0.00")) + val
         else:
             ca_totals[cs_id] = ca_totals.get(cs_id, Decimal("0.00")) + val
-
-    await db.commit()
 
     full_name = " ".join(
         part for part in (student.first_name, student.middle_name, student.last_name) if part
@@ -323,7 +352,7 @@ async def verify_result_token(
         )
     )
 
-    return VerifiedReportCardResponse(
+    response = VerifiedReportCardResponse(
         school=ReportSchoolInfo(
             name=school.name,
             school_type=school.school_type,
@@ -385,9 +414,10 @@ async def verify_result_token(
         verification=ReportVerificationInfo(
             qr_payload=qr_payload,
             issued_at=card.published_at or now,
-            is_authentic=True,
+            is_authentic=card.publication_status == "PUBLISHED",
         ),
     )
+    return response, session, term, class_group, level, department_name
 
 
 async def update_report_card_remarks(
@@ -828,4 +858,170 @@ async def list_report_cards(
             term_status=term_status,
         ),
         meta=PageMeta(page=page, page_size=page_size, total=total, total_pages=total_pages),
+    )
+
+
+async def get_student_transcript(
+    db: AsyncSession,
+    school_id: UUID,
+    student_id: UUID,
+    current_user: User,
+) -> StudentTranscriptResponse:
+    student = (
+        await db.execute(
+            select(Student).where(
+                Student.id == student_id,
+                Student.school_id == school_id,
+                Student.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if student is None:
+        raise ResourceNotFoundException("student", student_id)
+
+    enrollments = list(
+        (
+            await db.execute(
+                select(StudentEnrollment)
+                .join(AcademicSession, AcademicSession.id == StudentEnrollment.academic_session_id)
+                .where(
+                    StudentEnrollment.school_id == school_id,
+                    StudentEnrollment.student_id == student_id,
+                    StudentEnrollment.deleted_at.is_(None),
+                )
+                .order_by(AcademicSession.start_date.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    has_access = False
+    for perm in ("students:register", "students:enroll", "reports:publish", "scores:approve"):
+        if await user_has_permission(db, current_user, perm):
+            has_access = True
+            break
+    if not has_access and enrollments:
+        cg_ids = [e.class_group_id for e in enrollments]
+        ct_match = (
+            await db.execute(
+                select(ClassGroup.id).where(
+                    ClassGroup.school_id == school_id,
+                    ClassGroup.id.in_(cg_ids),
+                    ClassGroup.class_teacher_id == current_user.id,
+                    ClassGroup.deleted_at.is_(None),
+                )
+            )
+        ).first()
+        has_access = ct_match is not None
+    if not has_access:
+        raise InsufficientPermissionException(permission_code="reports:publish")
+
+    school = (await db.execute(select(School).where(School.id == school_id))).scalar_one()
+    config = (
+        await db.execute(
+            select(SchoolConfiguration).where(SchoolConfiguration.school_id == school_id)
+        )
+    ).scalar_one_or_none()
+
+    current_class_name: str | None = None
+    if enrollments:
+        latest_cg = (
+            await db.execute(
+                select(ClassGroup.display_name).where(
+                    ClassGroup.id == enrollments[-1].class_group_id
+                )
+            )
+        ).scalar_one_or_none()
+        current_class_name = latest_cg
+
+    enrollment_by_id = {e.id: e for e in enrollments}
+    terms: list[TranscriptTermItem] = []
+    if enrollment_by_id:
+        card_rows = (
+            (
+                await db.execute(
+                    select(TermReportCard)
+                    .join(AcademicTerm, AcademicTerm.id == TermReportCard.academic_term_id)
+                    .join(AcademicSession, AcademicSession.id == AcademicTerm.academic_session_id)
+                    .where(
+                        TermReportCard.school_id == school_id,
+                        TermReportCard.student_enrollment_id.in_(list(enrollment_by_id.keys())),
+                        TermReportCard.deleted_at.is_(None),
+                    )
+                    .order_by(AcademicSession.start_date.asc(), AcademicTerm.term_order.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        now = datetime.now(UTC)
+        for card in card_rows:
+            enrollment = enrollment_by_id[card.student_enrollment_id]
+            (
+                report_card,
+                session,
+                term,
+                class_group,
+                level,
+                dept_name,
+            ) = await _build_verified_report_card_response(
+                db,
+                school_id,
+                card,
+                student,
+                enrollment,
+                school=school,
+                config=config,
+                now=now,
+            )
+            terms.append(
+                TranscriptTermItem(
+                    report_card_id=card.id,
+                    academic_session_id=session.id,
+                    session_name=session.name,
+                    academic_term_id=term.id,
+                    term_name=term.name,
+                    term_order=term.term_order,
+                    class_group_name=class_group.display_name,
+                    academic_level_name=level.name,
+                    department_name=dept_name,
+                    publication_status=card.publication_status,
+                    report_card=report_card,
+                )
+            )
+
+    cumulative_average: Decimal | None = None
+    if terms:
+        total_pct = sum((t.report_card.summary.percentage for t in terms), Decimal("0.00"))
+        cumulative_average = (total_pct / Decimal(len(terms))).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
+    full_name = " ".join(
+        part for part in (student.first_name, student.middle_name, student.last_name) if part
+    )
+    return StudentTranscriptResponse(
+        school=ReportSchoolInfo(
+            name=school.name,
+            school_type=school.school_type,
+            address=school.address,
+            city=school.city,
+            state=school.state,
+            logo_url=storage_service.public_url(school.logo_storage_path),
+            stamp_url=storage_service.public_url(school.stamp_image_url),
+            principal_signature_url=storage_service.public_url(school.principal_signature_url),
+            report_card_template_id=config.report_card_template_id if config else "default_v1",
+        ),
+        student=TranscriptStudentInfo(
+            id=student.id,
+            admission_number=student.admission_number,
+            full_name=full_name,
+            gender=student.gender,
+            status=student.status,
+            current_class_name=current_class_name,
+        ),
+        terms=terms,
+        cumulative_average=cumulative_average,
     )

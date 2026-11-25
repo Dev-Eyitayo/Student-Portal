@@ -31,7 +31,9 @@ from app.modules.students.schemas import (
     AttendanceSummaryUpdateRequest,
     EnrollmentAttendanceMarkRequest,
     EnrollmentCreateRequest,
+    EnrollmentElectivesUpdateRequest,
     EnrollmentResponse,
+    EnrollmentSubjectsResponse,
     EnrollmentUpdateRequest,
     StudentBulkImportAcceptedResponse,
     StudentBulkImportStatusResponse,
@@ -412,6 +414,46 @@ async def update_enrollment(
         _audit_context(request, current_user),
     )
     return SuccessResponse[EnrollmentResponse](data=EnrollmentResponse.model_validate(enrollment))
+
+
+@router.get(
+    "/enrollments/{enrollment_id}/subjects",
+    response_model=SuccessResponse[EnrollmentSubjectsResponse],
+)
+async def get_enrollment_subjects(
+    enrollment_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    data = await services.get_enrollment_subjects(
+        db,
+        _school_id(current_user),
+        enrollment_id,
+        current_user,
+    )
+    return SuccessResponse[EnrollmentSubjectsResponse](data=data)
+
+
+@router.put(
+    "/enrollments/{enrollment_id}/electives",
+    response_model=SuccessResponse[EnrollmentSubjectsResponse],
+)
+async def update_enrollment_electives(
+    enrollment_id: UUID,
+    req: EnrollmentElectivesUpdateRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    data = await services.update_enrollment_electives(
+        db,
+        _school_id(current_user),
+        enrollment_id,
+        req.class_subject_ids,
+        current_user,
+        _audit_context(request, current_user),
+    )
+    return SuccessResponse[EnrollmentSubjectsResponse](data=data)
 
 
 @router.post(
