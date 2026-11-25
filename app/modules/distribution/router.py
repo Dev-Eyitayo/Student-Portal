@@ -23,6 +23,7 @@ from app.modules.distribution.schemas import (
     ReportCardListResponse,
     ReportCardRemarksResponse,
     ReportCardRemarksUpdateRequest,
+    StudentTranscriptResponse,
     VerifiedReportCardResponse,
 )
 from app.modules.identity.models import User
@@ -139,6 +140,24 @@ async def update_report_card_remarks(
         build_audit_context(request, current_user),
     )
     return SuccessResponse[ReportCardRemarksResponse](data=result)
+
+
+@publication_distribution_router.get(
+    "/students/{student_id}/transcript",
+    response_model=SuccessResponse[StudentTranscriptResponse],
+)
+async def get_student_transcript(
+    student_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    result = await services.get_student_transcript(
+        db,
+        require_school_id(current_user),
+        student_id,
+        current_user,
+    )
+    return SuccessResponse[StudentTranscriptResponse](data=result)
 
 
 @publication_distribution_router.post(

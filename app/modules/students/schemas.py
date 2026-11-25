@@ -140,7 +140,33 @@ class EnrollmentCreateRequest(BaseModel):
 class EnrollmentUpdateRequest(BaseModel):
     enrollment_status: EnrollmentStatus
     promoted_to_class_group_id: UUID | None = None
+    transfer_to_class_group_id: UUID | None = None
+    create_next_enrollment: bool = False
     reason: str | None = Field(None, max_length=500)
+
+
+class EnrollmentSubjectItem(BaseModel):
+    class_subject_id: UUID
+    subject_id: UUID
+    subject_name: str
+    subject_code: str
+    is_compulsory: bool
+    is_registered: bool
+
+
+class EnrollmentSubjectsResponse(BaseModel):
+    enrollment_id: UUID
+    class_group_id: UUID
+    class_group_name: str
+    academic_session_id: UUID
+    academic_level_name: str
+    department_name: str | None = None
+    core_subjects: list[EnrollmentSubjectItem]
+    elective_subjects: list[EnrollmentSubjectItem]
+
+
+class EnrollmentElectivesUpdateRequest(BaseModel):
+    class_subject_ids: list[UUID]
 
 
 class EnrollmentResponse(BaseModel):
