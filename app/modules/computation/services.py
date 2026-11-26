@@ -152,6 +152,8 @@ async def _load_computation_inputs(
     school_id: UUID,
     term: AcademicTerm,
     context: list[tuple[ClassSubject, ClassGroup, Subject]],
+    *,
+    require_approved: bool = True,
 ) -> tuple[
     dict[str, list[engine.SubjectInput]],
     dict[str, tuple[Student, StudentEnrollment]],
@@ -163,25 +165,26 @@ async def _load_computation_inputs(
     if not class_subject_ids:
         return {}, {}, {}, {}, {}
 
-    status_stmt = select(ScoreSheetStatus).where(
-        ScoreSheetStatus.school_id == school_id,
-        ScoreSheetStatus.academic_term_id == term.id,
-        ScoreSheetStatus.class_subject_id.in_(class_subject_ids),
-    )
-    statuses = {
-        status.class_subject_id: status.status
-        for status in (await db.execute(status_stmt)).scalars().all()
-    }
-    not_approved = [
-        class_subject_id
-        for class_subject_id in class_subject_ids
-        if statuses.get(class_subject_id) != "APPROVED"
-    ]
-    if not_approved:
-        raise ValidationException(
-            f"Results cannot be calculated yet because {len(not_approved)} score sheet(s) "
-            "are not approved. Please approve the outstanding score sheets first."
+    if require_approved:
+        status_stmt = select(ScoreSheetStatus).where(
+            ScoreSheetStatus.school_id == school_id,
+            ScoreSheetStatus.academic_term_id == term.id,
+            ScoreSheetStatus.class_subject_id.in_(class_subject_ids),
         )
+        statuses = {
+            status.class_subject_id: status.status
+            for status in (await db.execute(status_stmt)).scalars().all()
+        }
+        not_approved = [
+            class_subject_id
+            for class_subject_id in class_subject_ids
+            if statuses.get(class_subject_id) != "APPROVED"
+        ]
+        if not_approved:
+            raise ValidationException(
+                f"Results cannot be calculated yet because {len(not_approved)} score sheet(s) "
+                "are not approved. Please approve the outstanding score sheets first."
+            )
 
     definitions_stmt = select(AssessmentDefinition).where(
         AssessmentDefinition.school_id == school_id,
@@ -675,7 +678,7 @@ async def get_broadsheet(
         _,
         student_dept_cohorts,
         student_level_cohorts,
-    ) = await _load_computation_inputs(db, school_id, term, context)
+    ) = await _load_computation_inputs(db, school_id, term, context, require_approved=False)
     if not students_inputs:
         return BroadsheetResponse(
             academic_term_id=term.id,
@@ -695,6 +698,7 @@ async def get_broadsheet(
         config.grading_scale_schema,
         student_dept_cohorts=student_dept_cohorts,
         student_level_cohorts=student_level_cohorts,
+        allow_pending=True,
     )
     scoped_enrollment_ids = [UUID(sid) for sid in calculation.students]
     subject_results = await _get_existing_subject_results(
@@ -900,7 +904,7 @@ async def get_filtered_broadsheet(
         _,
         student_dept_cohorts,
         student_level_cohorts,
-    ) = await _load_computation_inputs(db, school_id, term, context)
+    ) = await _load_computation_inputs(db, school_id, term, context, require_approved=False)
     if not students_inputs:
         return BroadsheetResponse(
             academic_term_id=term.id,
@@ -920,6 +924,7 @@ async def get_filtered_broadsheet(
         config.grading_scale_schema,
         student_dept_cohorts=student_dept_cohorts,
         student_level_cohorts=student_level_cohorts,
+        allow_pending=True,
     )
     scoped_enrollment_ids = [UUID(sid) for sid in calculation.students]
     subject_results = await _get_existing_subject_results(

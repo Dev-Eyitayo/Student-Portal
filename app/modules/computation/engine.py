@@ -79,7 +79,9 @@ def decimal_value(value: Any) -> Decimal:
     return Decimal(str(value))
 
 
-def compute_assessment(assessment: AssessmentInput) -> AssessmentComputation:
+def compute_assessment(
+    assessment: AssessmentInput, *, allow_pending: bool = False
+) -> AssessmentComputation:
     if assessment.max_score <= ZERO:
         raise ValueError("Assessment max_score must be greater than zero.")
     if assessment.weight_percentage < ZERO:
@@ -96,7 +98,9 @@ def compute_assessment(assessment: AssessmentInput) -> AssessmentComputation:
     elif assessment.score_status == "EXEMPT":
         scaled = ZERO
     elif assessment.score_status == "PENDING":
-        raise ValueError("Pending scores cannot be computed.")
+        if not allow_pending:
+            raise ValueError("Pending scores cannot be computed.")
+        scaled = ZERO
     else:
         raise ValueError(f"Unsupported score status: {assessment.score_status}")
 
@@ -146,9 +150,15 @@ def is_exempt_subject(subject: SubjectComputation) -> bool:
 
 
 def compute_subject(
-    subject: SubjectInput, grading_scale_schema: Mapping[str, Any]
+    subject: SubjectInput,
+    grading_scale_schema: Mapping[str, Any],
+    *,
+    allow_pending: bool = False,
 ) -> SubjectComputation:
-    components = tuple(compute_assessment(assessment) for assessment in subject.assessments)
+    components = tuple(
+        compute_assessment(assessment, allow_pending=allow_pending)
+        for assessment in subject.assessments
+    )
     total, obtainable = compute_subject_totals(components, subject.assessments)
     grade, grade_point, remark = grade_for_score(total, grading_scale_schema)
     return SubjectComputation(
@@ -174,12 +184,15 @@ def compute_term_results(
     *,
     student_dept_cohorts: Mapping[str, str] | None = None,
     student_level_cohorts: Mapping[str, str] | None = None,
+    allow_pending: bool = False,
 ) -> TermComputation:
     computed: dict[str, dict[str, SubjectComputation]] = {}
     rank_key_by_cs_id: dict[str, str] = {}
     for student_id, subjects in students.items():
         computed[student_id] = {
-            subject.class_subject_id: compute_subject(subject, grading_scale_schema)
+            subject.class_subject_id: compute_subject(
+                subject, grading_scale_schema, allow_pending=allow_pending
+            )
             for subject in subjects
         }
         for subject in subjects:

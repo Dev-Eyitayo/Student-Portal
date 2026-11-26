@@ -25,13 +25,24 @@ from app.modules.common.pagination import paginate
 from app.modules.common.schemas import PageMeta
 from app.modules.identity.models import User
 from app.modules.students.bulk_import import ParsedStudentRow
-from app.modules.students.models import Student, StudentEnrollment
+from app.modules.students.models import (
+    Guardian,
+    Student,
+    StudentEnrollment,
+    StudentGuardian,
+    StudentMedicalProfile,
+)
 from app.modules.students.schemas import (
     EnrollmentCreateRequest,
     EnrollmentSubjectItem,
     EnrollmentSubjectsResponse,
     EnrollmentUpdateRequest,
+    GuardianResponse,
+    GuardianUpdateRequest,
+    GuardianWardItem,
     StudentCreateRequest,
+    StudentMedicalProfileResponse,
+    StudentMedicalProfileUpsertRequest,
     StudentStatusUpdateRequest,
     StudentUpdateRequest,
 )
@@ -410,6 +421,97 @@ async def get_students_summary(db: AsyncSession, school_id: UUID) -> dict[str, i
     }
 
 
+async def _resolve_or_create_guardian(
+    db: AsyncSession,
+    school_id: UUID,
+    *,
+    guardian_id: UUID | None = None,
+    full_name: str | None = None,
+    email: str | None = None,
+    phone: str | None = None,
+    address: str | None = None,
+) -> Guardian:
+    if guardian_id is not None:
+        guardian = (
+            await db.execute(
+                select(Guardian).where(
+                    Guardian.id == guardian_id,
+                    Guardian.school_id == school_id,
+                    Guardian.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if guardian is None:
+            raise ResourceNotFoundException("parent or guardian", guardian_id)
+        return guardian
+
+    clean_phone = (phone or "").strip()
+    clean_email = (email or "").strip().lower()
+    clean_name = (full_name or "").strip()
+
+    existing: Guardian | None = None
+    if clean_phone:
+        existing = (
+            await db.execute(
+                select(Guardian).where(
+                    Guardian.school_id == school_id,
+                    Guardian.phone == clean_phone,
+                    Guardian.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+    if existing is None and clean_email:
+        existing = (
+            await db.execute(
+                select(Guardian)
+                .where(
+                    Guardian.school_id == school_id,
+                    func.lower(Guardian.email) == clean_email,
+                    Guardian.deleted_at.is_(None),
+                )
+                .order_by(Guardian.created_at.asc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    if existing is not None:
+        return existing
+
+    guardian = Guardian(
+        school_id=school_id,
+        full_name=clean_name,
+        email=clean_email,
+        phone=clean_phone,
+        address=address.strip() if address else None,
+    )
+    db.add(guardian)
+    await db.flush()
+    return guardian
+
+
+async def _attach_primary_guardian_ids(
+    db: AsyncSession,
+    school_id: UUID,
+    students: list[Student],
+) -> None:
+    if not students:
+        return
+    student_ids = [s.id for s in students]
+    rows = (
+        await db.execute(
+            select(StudentGuardian.student_id, StudentGuardian.guardian_id).where(
+                StudentGuardian.school_id == school_id,
+                StudentGuardian.student_id.in_(student_ids),
+                StudentGuardian.is_primary.is_(True),
+                StudentGuardian.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    by_student = {sid: gid for sid, gid in rows}
+    for s in students:
+        s.primary_guardian_id = by_student.get(s.id)
+
+
 async def create_student(
     db: AsyncSession,
     school_id: UUID,
@@ -421,6 +523,16 @@ async def create_student(
     _validate_student_dates(req.date_of_birth, req.enrollment_date)
     await _ensure_admission_available(db, school_id, admission_number)
 
+    guardian = await _resolve_or_create_guardian(
+        db,
+        school_id,
+        guardian_id=req.guardian_id,
+        full_name=req.guardian_name,
+        email=str(req.guardian_email) if req.guardian_email else None,
+        phone=req.guardian_phone,
+        address=req.home_address,
+    )
+
     student = Student(
         school_id=school_id,
         admission_number=admission_number,
@@ -429,14 +541,24 @@ async def create_student(
         last_name=req.last_name.strip(),
         date_of_birth=req.date_of_birth,
         gender=gender,
-        guardian_name=req.guardian_name.strip(),
-        guardian_email=str(req.guardian_email).lower(),
-        guardian_phone=req.guardian_phone.strip(),
-        home_address=req.home_address.strip() if req.home_address else None,
+        guardian_name=guardian.full_name,
+        guardian_email=guardian.email,
+        guardian_phone=guardian.phone,
+        home_address=req.home_address.strip() if req.home_address else guardian.address,
         enrollment_date=req.enrollment_date,
         status="ADMITTED",
     )
     db.add(student)
+    await db.flush()
+    db.add(
+        StudentGuardian(
+            school_id=school_id,
+            student_id=student.id,
+            guardian_id=guardian.id,
+            relationship_type=req.guardian_relationship.value,
+            is_primary=True,
+        )
+    )
     await db.flush()
     record_audit_log(
         db,
@@ -449,6 +571,7 @@ async def create_student(
                 "admission_number": admission_number,
                 "status": "ADMITTED",
                 "enrollment_date": req.enrollment_date,
+                "guardian_id": str(guardian.id),
             }
         },
     )
@@ -460,12 +583,14 @@ async def create_student(
         code="ADMISSION_NUMBER_TAKEN",
     )
     await db.refresh(student)
+    student.primary_guardian_id = guardian.id
     return student
 
 
 async def get_student(db: AsyncSession, school_id: UUID, student_id: UUID) -> Student:
     student = await _get_student(db, school_id, student_id)
     await _attach_current_class(db, school_id, [student])
+    await _attach_primary_guardian_ids(db, school_id, [student])
     return student
 
 
@@ -500,6 +625,48 @@ async def update_student(
         student.home_address = req.home_address.strip() if req.home_address else None
     if "enrollment_date" in fields_set and req.enrollment_date is not None:
         student.enrollment_date = req.enrollment_date
+
+    if "guardian_id" in fields_set and req.guardian_id is not None:
+        guardian = await _resolve_or_create_guardian(db, school_id, guardian_id=req.guardian_id)
+        student.guardian_name = guardian.full_name
+        student.guardian_email = guardian.email
+        student.guardian_phone = guardian.phone
+        existing_links = (
+            (
+                await db.execute(
+                    select(StudentGuardian).where(
+                        StudentGuardian.school_id == school_id,
+                        StudentGuardian.student_id == student.id,
+                        StudentGuardian.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        matched_link = None
+        for link in existing_links:
+            if link.guardian_id == guardian.id:
+                link.is_primary = True
+                if req.guardian_relationship is not None:
+                    link.relationship_type = req.guardian_relationship.value
+                matched_link = link
+            else:
+                link.is_primary = False
+        if matched_link is None:
+            db.add(
+                StudentGuardian(
+                    school_id=school_id,
+                    student_id=student.id,
+                    guardian_id=guardian.id,
+                    relationship_type=(
+                        req.guardian_relationship.value
+                        if req.guardian_relationship is not None
+                        else "GUARDIAN"
+                    ),
+                    is_primary=True,
+                )
+            )
 
     _validate_student_dates(student.date_of_birth, student.enrollment_date)
 
@@ -1162,6 +1329,48 @@ async def provision_student_batch(
 
         db.add_all(students)
         await db.flush()
+
+        # Link or deduplicate guardians for bulk-imported students
+        phones = list({s.guardian_phone for s in students if s.guardian_phone})
+        existing_guardians_by_phone: dict[str, Guardian] = {}
+        if phones:
+            existing_guardians_by_phone = {
+                g.phone: g
+                for g in (
+                    await db.execute(
+                        select(Guardian).where(
+                            Guardian.school_id == school_id,
+                            Guardian.phone.in_(phones),
+                            Guardian.deleted_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            }
+        for s in students:
+            guardian = existing_guardians_by_phone.get(s.guardian_phone)
+            if guardian is None:
+                guardian = Guardian(
+                    school_id=school_id,
+                    full_name=s.guardian_name,
+                    email=s.guardian_email,
+                    phone=s.guardian_phone,
+                    address=s.home_address,
+                )
+                db.add(guardian)
+                await db.flush()
+                existing_guardians_by_phone[guardian.phone] = guardian
+            db.add(
+                StudentGuardian(
+                    school_id=school_id,
+                    student_id=s.id,
+                    guardian_id=guardian.id,
+                    relationship_type="GUARDIAN",
+                    is_primary=True,
+                )
+            )
+
         record_audit_log(
             db,
             audit,
@@ -1187,3 +1396,374 @@ async def provision_student_batch(
         )
 
     return StudentBulkProvisionResult(created=len(students), errors=[])
+
+
+async def _attach_wards_to_guardians(
+    db: AsyncSession,
+    school_id: UUID,
+    guardians: list[Guardian],
+) -> list[GuardianResponse]:
+    if not guardians:
+        return []
+    guardian_ids = [g.id for g in guardians]
+    rows = (
+        await db.execute(
+            select(StudentGuardian, Student)
+            .join(Student, Student.id == StudentGuardian.student_id)
+            .where(
+                StudentGuardian.school_id == school_id,
+                StudentGuardian.guardian_id.in_(guardian_ids),
+                StudentGuardian.deleted_at.is_(None),
+                Student.deleted_at.is_(None),
+            )
+            .order_by(Student.first_name.asc(), Student.last_name.asc())
+        )
+    ).all()
+
+    linked_students = [stu for _, stu in rows]
+    await _attach_current_class(db, school_id, linked_students)
+
+    wards_by_guardian: dict[UUID, list[GuardianWardItem]] = {gid: [] for gid in guardian_ids}
+    for link, stu in rows:
+        full_name = " ".join(p for p in (stu.first_name, stu.middle_name, stu.last_name) if p)
+        wards_by_guardian[link.guardian_id].append(
+            GuardianWardItem(
+                student_id=stu.id,
+                admission_number=stu.admission_number,
+                first_name=stu.first_name,
+                last_name=stu.last_name,
+                full_name=full_name,
+                status=stu.status,
+                relationship_type=link.relationship_type,
+                current_class_name=getattr(stu, "current_class_name", None),
+            )
+        )
+
+    responses: list[GuardianResponse] = []
+    for g in guardians:
+        wards = wards_by_guardian.get(g.id, [])
+        responses.append(
+            GuardianResponse(
+                id=g.id,
+                school_id=g.school_id,
+                full_name=g.full_name,
+                email=g.email,
+                phone=g.phone,
+                alternate_phone=g.alternate_phone,
+                occupation=g.occupation,
+                address=g.address,
+                wards_count=len(wards),
+                wards=wards,
+                created_at=g.created_at,
+                updated_at=g.updated_at,
+            )
+        )
+    return responses
+
+
+async def list_guardians(
+    db: AsyncSession,
+    school_id: UUID,
+    *,
+    q: str | None = None,
+    academic_level_id: UUID | None = None,
+    class_group_id: UUID | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[GuardianResponse], PageMeta, dict[str, int]]:
+    stmt = select(Guardian).where(
+        Guardian.school_id == school_id,
+        Guardian.deleted_at.is_(None),
+    )
+    if q and q.strip():
+        pattern = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                Guardian.full_name.ilike(pattern),
+                Guardian.email.ilike(pattern),
+                Guardian.phone.ilike(pattern),
+            )
+        )
+    if academic_level_id is not None or class_group_id is not None:
+        enr_subq = (
+            select(StudentGuardian.guardian_id)
+            .join(Student, Student.id == StudentGuardian.student_id)
+            .join(StudentEnrollment, StudentEnrollment.student_id == Student.id)
+            .join(ClassGroup, ClassGroup.id == StudentEnrollment.class_group_id)
+            .where(
+                StudentGuardian.school_id == school_id,
+                StudentGuardian.deleted_at.is_(None),
+                Student.deleted_at.is_(None),
+                StudentEnrollment.deleted_at.is_(None),
+                StudentEnrollment.enrollment_status == "ENROLLED",
+            )
+        )
+        if class_group_id is not None:
+            enr_subq = enr_subq.where(StudentEnrollment.class_group_id == class_group_id)
+        if academic_level_id is not None:
+            enr_subq = enr_subq.where(ClassGroup.academic_level_id == academic_level_id)
+        stmt = stmt.where(Guardian.id.in_(enr_subq))
+    stmt = stmt.order_by(Guardian.full_name.asc(), Guardian.created_at.desc())
+    guardians, meta = await paginate(db, stmt, page=page, page_size=page_size)
+    items = await _attach_wards_to_guardians(db, school_id, guardians)
+
+    # Summary stats
+    total_guardians = (
+        await db.execute(
+            select(func.count(Guardian.id)).where(
+                Guardian.school_id == school_id,
+                Guardian.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one()
+
+    ward_counts_subq = (
+        select(
+            StudentGuardian.guardian_id,
+            func.count(StudentGuardian.student_id).label("cnt"),
+        )
+        .join(Student, Student.id == StudentGuardian.student_id)
+        .where(
+            StudentGuardian.school_id == school_id,
+            StudentGuardian.deleted_at.is_(None),
+            Student.deleted_at.is_(None),
+        )
+        .group_by(StudentGuardian.guardian_id)
+        .subquery()
+    )
+    multi_ward_guardians = (
+        await db.execute(
+            select(func.count()).select_from(ward_counts_subq).where(ward_counts_subq.c.cnt > 1)
+        )
+    ).scalar_one()
+    total_linked_students = (
+        await db.execute(
+            select(func.count(func.distinct(StudentGuardian.student_id)))
+            .join(Student, Student.id == StudentGuardian.student_id)
+            .where(
+                StudentGuardian.school_id == school_id,
+                StudentGuardian.deleted_at.is_(None),
+                Student.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one()
+
+    return (
+        items,
+        meta,
+        {
+            "total_guardians": total_guardians,
+            "multi_ward_guardians": multi_ward_guardians,
+            "total_linked_students": total_linked_students,
+        },
+    )
+
+
+async def get_guardian(
+    db: AsyncSession,
+    school_id: UUID,
+    guardian_id: UUID,
+) -> GuardianResponse:
+    guardian = (
+        await db.execute(
+            select(Guardian).where(
+                Guardian.id == guardian_id,
+                Guardian.school_id == school_id,
+                Guardian.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if guardian is None:
+        raise ResourceNotFoundException("parent or guardian", guardian_id)
+    return (await _attach_wards_to_guardians(db, school_id, [guardian]))[0]
+
+
+async def update_guardian(
+    db: AsyncSession,
+    school_id: UUID,
+    guardian_id: UUID,
+    req: GuardianUpdateRequest,
+    audit: AuditContext,
+) -> GuardianResponse:
+    guardian = (
+        await db.execute(
+            select(Guardian).where(
+                Guardian.id == guardian_id,
+                Guardian.school_id == school_id,
+                Guardian.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if guardian is None:
+        raise ResourceNotFoundException("parent or guardian", guardian_id)
+
+    fields_set = req.model_fields_set
+    if "full_name" in fields_set and req.full_name is not None:
+        guardian.full_name = req.full_name.strip()
+    if "email" in fields_set and req.email is not None:
+        guardian.email = str(req.email).strip().lower()
+    if "phone" in fields_set and req.phone is not None:
+        guardian.phone = req.phone.strip()
+    if "alternate_phone" in fields_set:
+        guardian.alternate_phone = req.alternate_phone.strip() if req.alternate_phone else None
+    if "occupation" in fields_set:
+        guardian.occupation = req.occupation.strip() if req.occupation else None
+    if "address" in fields_set:
+        guardian.address = req.address.strip() if req.address else None
+
+    await db.flush()
+
+    # Keep primary Student.guardian_* columns synced on linked wards
+    linked_students = (
+        (
+            await db.execute(
+                select(Student)
+                .join(StudentGuardian, StudentGuardian.student_id == Student.id)
+                .where(
+                    StudentGuardian.school_id == school_id,
+                    StudentGuardian.guardian_id == guardian.id,
+                    StudentGuardian.is_primary.is_(True),
+                    StudentGuardian.deleted_at.is_(None),
+                    Student.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for stu in linked_students:
+        stu.guardian_name = guardian.full_name
+        stu.guardian_email = guardian.email
+        stu.guardian_phone = guardian.phone
+
+    record_audit_log(
+        db,
+        audit,
+        action="GUARDIAN_UPDATED",
+        resource_type="Guardian",
+        resource_id=guardian.id,
+        diff_payload={"changes": req.model_dump(exclude_unset=True)},
+    )
+    await _commit_or_conflict(
+        db,
+        message="This phone number is already linked to another parent or guardian.",
+        code="GUARDIAN_PHONE_TAKEN",
+    )
+    return (await _attach_wards_to_guardians(db, school_id, [guardian]))[0]
+
+
+async def get_student_medical_profile(
+    db: AsyncSession,
+    school_id: UUID,
+    student_id: UUID,
+) -> StudentMedicalProfileResponse:
+    await _get_student(db, school_id, student_id)
+    profile = (
+        await db.execute(
+            select(StudentMedicalProfile).where(
+                StudentMedicalProfile.school_id == school_id,
+                StudentMedicalProfile.student_id == student_id,
+                StudentMedicalProfile.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if profile is None:
+        return StudentMedicalProfileResponse(student_id=student_id, has_record=False)
+    return StudentMedicalProfileResponse(
+        student_id=student_id,
+        has_record=True,
+        blood_group=profile.blood_group,
+        genotype=profile.genotype,
+        allergies=profile.allergies,
+        chronic_conditions=profile.chronic_conditions,
+        medications=profile.medications,
+        dietary_restrictions=profile.dietary_restrictions,
+        emergency_contact_name=profile.emergency_contact_name,
+        emergency_contact_phone=profile.emergency_contact_phone,
+        emergency_contact_relationship=profile.emergency_contact_relationship,
+        notes=profile.notes,
+        updated_at=profile.updated_at,
+    )
+
+
+async def upsert_student_medical_profile(
+    db: AsyncSession,
+    school_id: UUID,
+    student_id: UUID,
+    req: StudentMedicalProfileUpsertRequest,
+    current_user: User,
+    audit: AuditContext,
+) -> StudentMedicalProfileResponse:
+    await _get_student(db, school_id, student_id)
+    profile = (
+        await db.execute(
+            select(StudentMedicalProfile).where(
+                StudentMedicalProfile.school_id == school_id,
+                StudentMedicalProfile.student_id == student_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    def _clean(val: str | None) -> str | None:
+        if val is None:
+            return None
+        stripped = val.strip()
+        return stripped or None
+
+    if profile is None:
+        profile = StudentMedicalProfile(
+            school_id=school_id,
+            student_id=student_id,
+            blood_group=_clean(req.blood_group),
+            genotype=_clean(req.genotype),
+            allergies=_clean(req.allergies),
+            chronic_conditions=_clean(req.chronic_conditions),
+            medications=_clean(req.medications),
+            dietary_restrictions=_clean(req.dietary_restrictions),
+            emergency_contact_name=_clean(req.emergency_contact_name),
+            emergency_contact_phone=_clean(req.emergency_contact_phone),
+            emergency_contact_relationship=_clean(req.emergency_contact_relationship),
+            notes=_clean(req.notes),
+            updated_by_id=current_user.id,
+        )
+        db.add(profile)
+    else:
+        profile.deleted_at = None
+        profile.blood_group = _clean(req.blood_group)
+        profile.genotype = _clean(req.genotype)
+        profile.allergies = _clean(req.allergies)
+        profile.chronic_conditions = _clean(req.chronic_conditions)
+        profile.medications = _clean(req.medications)
+        profile.dietary_restrictions = _clean(req.dietary_restrictions)
+        profile.emergency_contact_name = _clean(req.emergency_contact_name)
+        profile.emergency_contact_phone = _clean(req.emergency_contact_phone)
+        profile.emergency_contact_relationship = _clean(req.emergency_contact_relationship)
+        profile.notes = _clean(req.notes)
+        profile.updated_by_id = current_user.id
+
+    await db.flush()
+    record_audit_log(
+        db,
+        audit,
+        action="STUDENT_MEDICAL_PROFILE_UPDATED",
+        resource_type="StudentMedicalProfile",
+        resource_id=profile.id,
+        diff_payload={"student_id": str(student_id)},
+    )
+    await db.commit()
+    await db.refresh(profile)
+    return StudentMedicalProfileResponse(
+        student_id=student_id,
+        has_record=True,
+        blood_group=profile.blood_group,
+        genotype=profile.genotype,
+        allergies=profile.allergies,
+        chronic_conditions=profile.chronic_conditions,
+        medications=profile.medications,
+        dietary_restrictions=profile.dietary_restrictions,
+        emergency_contact_name=profile.emergency_contact_name,
+        emergency_contact_phone=profile.emergency_contact_phone,
+        emergency_contact_relationship=profile.emergency_contact_relationship,
+        notes=profile.notes,
+        updated_at=profile.updated_at,
+    )

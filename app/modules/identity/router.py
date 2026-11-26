@@ -1,4 +1,5 @@
 import base64
+import json
 import time
 from pathlib import Path
 from uuid import UUID
@@ -17,7 +18,9 @@ from fastapi import (
     UploadFile,
     status,
 )
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
@@ -31,8 +34,7 @@ from app.core.dependencies import (
 )
 from app.core.permissions import require_permission
 from app.core.redis import get_redis
-from app.core.security import decode_access_token, revoke_access_token
-from app.core.storage import storage_service
+from app.core.security import decode_access_token, get_client_ip, revoke_access_token
 from app.modules.audit.services import AuditContext
 from app.modules.common.models import generate_uuid7
 from app.modules.common.schemas import MessageResponse, SuccessResponse
@@ -43,7 +45,6 @@ from app.modules.identity.schemas import (
     AcceptInvitationRequest,
     AssignedClassGroupSummary,
     BrandingAssetType,
-    BrandingUploadResponse,
     ChangePasswordRequest,
     CreateSchoolRoleRequest,
     DeactivateUserResponse,
@@ -114,7 +115,7 @@ def _remaining_ttl(exp: float | None, fallback_seconds: int) -> int:
 
 
 def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "0.0.0.0"
+    return get_client_ip(request) or "0.0.0.0"
 
 
 @router.post(
@@ -162,6 +163,64 @@ async def get_school_setup(
     return SuccessResponse[SchoolSetupResponse](data=await services.get_school_setup(db, school_id))
 
 
+async def _parse_json_or_multipart[TModel: BaseModel](
+    request: Request,
+    schema_cls: type[TModel],
+    file_fields: tuple[str, ...],
+) -> tuple[TModel, dict[str, tuple[str, bytes]]]:
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" not in content_type:
+        try:
+            body = await request.json()
+            return schema_cls.model_validate(body), {}
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=exc.errors(),
+            ) from exc
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Please send a valid JSON or multipart form request.",
+            ) from None
+
+    form = await request.form()
+    payload_raw = form.get("payload")
+    data: dict[str, object] = {}
+    if isinstance(payload_raw, str) and payload_raw.strip():
+        try:
+            parsed = json.loads(payload_raw)
+            if isinstance(parsed, dict):
+                data.update(parsed)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The multipart payload field must contain valid JSON.",
+            ) from None
+
+    for key, value in form.multi_items():
+        if key == "payload" or key in file_fields:
+            continue
+        if isinstance(value, str):
+            data[key] = value
+
+    uploads: dict[str, tuple[str, bytes]] = {}
+    for field in file_fields:
+        item = form.get(field)
+        if isinstance(item, StarletteUploadFile) and item.filename:
+            raw_bytes = await item.read()
+            if raw_bytes:
+                uploads[field] = (item.content_type or "", raw_bytes)
+
+    try:
+        return schema_cls.model_validate(data), uploads
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.errors(),
+        ) from exc
+
+
 @router.patch(
     "/schools/{school_id}/setup",
     response_model=SuccessResponse[SchoolSetupResponse],
@@ -169,7 +228,6 @@ async def get_school_setup(
 )
 async def update_school_setup(
     school_id: UUID,
-    req: SchoolSetupUpdateRequest,
     request: Request,
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
@@ -179,46 +237,27 @@ async def update_school_setup(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="We couldn't find this school's setup details. Please check that you're signed in to the right school.",
         )
-    result = await services.update_school_setup(
-        db, school_id, req, build_audit_context(request, current_user)
+    req, uploads = await _parse_json_or_multipart(
+        request,
+        SchoolSetupUpdateRequest,
+        ("logo", "stamp", "principal_signature"),
     )
-    return SuccessResponse[SchoolSetupResponse](data=result)
-
-
-@router.post(
-    "/schools/{school_id}/branding/uploads",
-    response_model=SuccessResponse[BrandingUploadResponse],
-    dependencies=[Depends(require_permission("configuration:manage"))],
-)
-async def upload_school_branding_asset(
-    school_id: UUID,
-    asset_type: BrandingAssetType,
-    request: Request,
-    file: UploadFile = File(...),
-    current_user: User = Depends(get_current_authenticated_user),
-    db: AsyncSession = Depends(get_tenant_db),
-):
-    if school_id != require_school_id(current_user):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="We couldn't find this school's branding settings. Please check that you're signed in to the right school.",
-        )
-    content = await file.read()
-    storage_path = await services.save_school_branding_asset(
+    branding_uploads: dict[BrandingAssetType, tuple[str, bytes]] = {}
+    for asset_type in (
+        BrandingAssetType.LOGO,
+        BrandingAssetType.STAMP,
+        BrandingAssetType.PRINCIPAL_SIGNATURE,
+    ):
+        if asset_type.value in uploads:
+            branding_uploads[asset_type] = uploads[asset_type.value]
+    result = await services.update_school_setup(
         db,
         school_id,
-        asset_type,
-        file.content_type or "",
-        content,
+        req,
         build_audit_context(request, current_user),
+        branding_uploads=branding_uploads or None,
     )
-    return SuccessResponse[BrandingUploadResponse](
-        data=BrandingUploadResponse(
-            asset_type=asset_type,
-            storage_path=storage_path,
-            url=storage_service.public_url(storage_path) or storage_path,
-        )
-    )
+    return SuccessResponse[SchoolSetupResponse](data=result)
 
 
 @router.get(
@@ -475,16 +514,18 @@ async def get_current_user_profile(
 
 @router.patch("/me", response_model=SuccessResponse[MeResponse])
 async def update_current_user_profile(
-    req: MeUpdateRequest,
+    request: Request,
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
+    req, uploads = await _parse_json_or_multipart(request, MeUpdateRequest, ("signature",))
     updated = await services.update_my_profile(
         db,
         current_user,
         first_name=req.first_name,
         last_name=req.last_name,
         phone_number=req.phone_number,
+        signature_upload=uploads.get("signature"),
     )
     return SuccessResponse[MeResponse](data=await _build_me_response(db, updated))
 
@@ -837,11 +878,11 @@ async def list_school_users(
 )
 async def update_school_user(
     user_id: UUID,
-    req: StaffUpdateRequest,
     request: Request,
     current_user: User = Depends(get_current_authenticated_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
+    req, uploads = await _parse_json_or_multipart(request, StaffUpdateRequest, ("signature",))
     updated = await services.update_school_user(
         db,
         require_school_id(current_user),
@@ -852,6 +893,7 @@ async def update_school_user(
         role=req.role,
         staff_id_number=req.staff_id_number,
         specialization=req.specialization,
+        signature_upload=uploads.get("signature"),
         actor_id=current_user.id,
         actor_ip=_client_ip(request),
     )

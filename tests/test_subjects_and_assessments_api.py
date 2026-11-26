@@ -1101,6 +1101,16 @@ async def test_calculate_term_broadsheet_and_publish_term_lifecycle():
                 headers=admin_headers,
             )
         ).json()["data"]["items"]
+
+        # Broadsheet preview works even when all/some scores are still PENDING and unapproved.
+        pending_preview_resp = await client.get(
+            "/api/v1/computation/broadsheet",
+            params={"academic_term_id": term_id},
+            headers=admin_headers,
+        )
+        assert pending_preview_resp.status_code == 200, pending_preview_resp.text
+        assert pending_preview_resp.json()["data"]["total_students"] == 1
+
         for definition in definitions:
             score_resp = await client.post(
                 "/api/v1/assessments/scores/bulk-entry",
@@ -1118,6 +1128,31 @@ async def test_calculate_term_broadsheet_and_publish_term_lifecycle():
                 headers=admin_headers,
             )
             assert score_resp.status_code == 200, score_resp.text
+
+        # Broadsheet preview works even before score sheets are submitted/approved or calculated.
+        preview_resp = await client.get(
+            f"/api/v1/computation/broadsheet/{class_group_id}",
+            params={"academic_term_id": term_id},
+            headers=admin_headers,
+        )
+        assert preview_resp.status_code == 200, preview_resp.text
+        assert preview_resp.json()["data"]["total_students"] == 1
+
+        filtered_preview_resp = await client.get(
+            "/api/v1/computation/broadsheet",
+            params={"academic_term_id": term_id},
+            headers=admin_headers,
+        )
+        assert filtered_preview_resp.status_code == 200, filtered_preview_resp.text
+        assert filtered_preview_resp.json()["data"]["total_students"] == 1
+
+        # Official calculation still requires approved score sheets.
+        unapproved_calc_resp = await client.post(
+            "/api/v1/computation/calculate-term",
+            json={"academic_term_id": term_id, "class_group_id": class_group_id},
+            headers=admin_headers,
+        )
+        assert unapproved_calc_resp.status_code == 422, unapproved_calc_resp.text
 
         submit_resp = await client.post(
             "/api/v1/assessments/submit",

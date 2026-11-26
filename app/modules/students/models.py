@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Optional
 from uuid import UUID
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     ForeignKey,
@@ -11,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -49,6 +51,30 @@ class Student(Base, TenantMixin, TimestampMixin):
             name="chk_student_status",
         ),
         Index("idx_students_search", "school_id", "last_name", "first_name"),
+        Index(
+            "idx_students_trgm_admission_number",
+            "admission_number",
+            postgresql_using="gin",
+            postgresql_ops={"admission_number": "gin_trgm_ops"},
+        ),
+        Index(
+            "idx_students_trgm_first_name",
+            "first_name",
+            postgresql_using="gin",
+            postgresql_ops={"first_name": "gin_trgm_ops"},
+        ),
+        Index(
+            "idx_students_trgm_middle_name",
+            "middle_name",
+            postgresql_using="gin",
+            postgresql_ops={"middle_name": "gin_trgm_ops"},
+        ),
+        Index(
+            "idx_students_trgm_last_name",
+            "last_name",
+            postgresql_using="gin",
+            postgresql_ops={"last_name": "gin_trgm_ops"},
+        ),
     )
 
     enrollments: Mapped[list["StudentEnrollment"]] = relationship(
@@ -171,4 +197,103 @@ class AttendanceSummary(Base, TenantMixin, TimestampMixin):
 
     student_enrollment: Mapped["StudentEnrollment"] = relationship("StudentEnrollment")
     academic_term: Mapped["AcademicTerm"] = relationship("AcademicTerm")
+    updated_by: Mapped[Optional["User"]] = relationship("User")
+
+
+class Guardian(Base, TenantMixin, TimestampMixin):
+    __tablename__ = "guardians"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
+    full_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    phone: Mapped[str] = mapped_column(String(32), nullable=False)
+    alternate_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    occupation: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    address: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_guardian_school_phone_active",
+            "school_id",
+            "phone",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        Index("idx_guardians_school_email", "school_id", "email"),
+        Index("idx_guardians_search", "school_id", "full_name"),
+        Index(
+            "idx_guardians_trgm_full_name",
+            "full_name",
+            postgresql_using="gin",
+            postgresql_ops={"full_name": "gin_trgm_ops"},
+        ),
+        Index(
+            "idx_guardians_trgm_email",
+            "email",
+            postgresql_using="gin",
+            postgresql_ops={"email": "gin_trgm_ops"},
+        ),
+        Index(
+            "idx_guardians_trgm_phone",
+            "phone",
+            postgresql_using="gin",
+            postgresql_ops={"phone": "gin_trgm_ops"},
+        ),
+    )
+
+    student_links: Mapped[list["StudentGuardian"]] = relationship(
+        "StudentGuardian", back_populates="guardian", passive_deletes=True
+    )
+
+
+class StudentGuardian(Base, TenantMixin, TimestampMixin):
+    __tablename__ = "student_guardians"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
+    student_id: Mapped[UUID] = mapped_column(
+        ForeignKey("students.id", ondelete="CASCADE"), nullable=False
+    )
+    guardian_id: Mapped[UUID] = mapped_column(
+        ForeignKey("guardians.id", ondelete="RESTRICT"), nullable=False
+    )
+    relationship_type: Mapped[str] = mapped_column(
+        String(32), default="GUARDIAN", nullable=False
+    )  # FATHER, MOTHER, GUARDIAN, SPONSOR, OTHER
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("student_id", "guardian_id", name="uq_student_guardian"),
+        CheckConstraint(
+            "relationship_type IN ('FATHER', 'MOTHER', 'GUARDIAN', 'SPONSOR', 'OTHER')",
+            name="chk_student_guardian_relationship",
+        ),
+        Index("idx_student_guardians_guardian", "guardian_id"),
+    )
+
+    student: Mapped["Student"] = relationship("Student")
+    guardian: Mapped["Guardian"] = relationship("Guardian", back_populates="student_links")
+
+
+class StudentMedicalProfile(Base, TenantMixin, TimestampMixin):
+    __tablename__ = "student_medical_profiles"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
+    student_id: Mapped[UUID] = mapped_column(
+        ForeignKey("students.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    blood_group: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    genotype: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    allergies: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chronic_conditions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    medications: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dietary_restrictions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    emergency_contact_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    emergency_contact_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    emergency_contact_relationship: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_by_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    student: Mapped["Student"] = relationship("Student")
     updated_by: Mapped[Optional["User"]] = relationship("User")

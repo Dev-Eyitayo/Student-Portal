@@ -672,6 +672,8 @@ async def update_school_setup(
     school_id: UUID,
     req: SchoolSetupUpdateRequest,
     audit: AuditContext,
+    *,
+    branding_uploads: dict[BrandingAssetType, tuple[str, bytes]] | None = None,
 ) -> SchoolSetupResponse:
     school = await _get_school_for_setup(db, school_id)
     config = await get_school_configuration(db, school_id)
@@ -733,6 +735,21 @@ async def update_school_setup(
         }
         for field, value in branding.model_dump(exclude_unset=True).items():
             setattr(school, field_map[field], value)
+
+    if branding_uploads:
+        asset_field_map = {
+            BrandingAssetType.LOGO: "logo_storage_path",
+            BrandingAssetType.STAMP: "stamp_image_url",
+            BrandingAssetType.PRINCIPAL_SIGNATURE: "principal_signature_url",
+        }
+        for asset_type, (content_type, content) in branding_uploads.items():
+            storage_path = await storage_service.save_school_branding_asset(
+                school_slug=school.slug,
+                asset_type=asset_type.value,
+                content_type=content_type,
+                content=content,
+            )
+            setattr(school, asset_field_map[asset_type], storage_path)
 
     if req.configuration is not None:
         _apply_configuration_updates(config, req.configuration)
@@ -2039,6 +2056,7 @@ async def update_my_profile(
     first_name: str | None = None,
     last_name: str | None = None,
     phone_number: str | None = None,
+    signature_upload: tuple[str, bytes] | None = None,
 ) -> User:
     db_user = (
         await db.execute(
@@ -2053,6 +2071,21 @@ async def update_my_profile(
         db_user.last_name = last_name.strip()
     if phone_number is not None:
         db_user.phone_number = phone_number.strip() or None
+    if signature_upload is not None:
+        if db_user.staff_profile is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only staff accounts with a staff profile can upload a signature.",
+            )
+        school_slug = db_user.school.slug if db_user.school else "platform"
+        content_type, content = signature_upload
+        storage_path = await storage_service.save_school_branding_asset(
+            school_slug=school_slug,
+            asset_type=f"staff_signature_{db_user.id}",
+            content_type=content_type,
+            content=content,
+        )
+        db_user.staff_profile.signature_image_url = storage_path
     await db.commit()
     await db.refresh(db_user)
     return db_user
@@ -2121,13 +2154,14 @@ async def update_school_user(
     role: str | None = None,
     staff_id_number: str | None = None,
     specialization: str | None = None,
+    signature_upload: tuple[str, bytes] | None = None,
     actor_id: UUID,
     actor_ip: str,
 ) -> dict[str, Any]:
     target = (
         await db.execute(
             select(User)
-            .options(selectinload(User.staff_profile))
+            .options(selectinload(User.staff_profile), selectinload(User.school))
             .where(
                 User.id == target_user_id,
                 User.school_id == school_id,
@@ -2146,6 +2180,16 @@ async def update_school_user(
         target.last_name = last_name
     if phone_number is not None:
         target.phone_number = phone_number.strip() or None
+    if signature_upload is not None and target.staff_profile is not None:
+        school_slug = target.school.slug if target.school else "platform"
+        content_type, content = signature_upload
+        storage_path = await storage_service.save_school_branding_asset(
+            school_slug=school_slug,
+            asset_type=f"staff_signature_{target.id}",
+            content_type=content_type,
+            content=content,
+        )
+        target.staff_profile.signature_image_url = storage_path
     if role is not None:
         validated_role = await _validate_school_role_code(db, school_id, role)
         _assert_can_assign_role(actor, validated_role)

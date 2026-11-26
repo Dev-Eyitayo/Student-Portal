@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.database import async_session_factory
-from app.core.redis import get_redis
+from app.core.redis import close_redis, get_redis
 from app.main import app
 from app.modules.identity import tasks as identity_tasks
 from app.modules.identity.models import User
@@ -22,6 +22,13 @@ settings = get_settings()
 async def seed_permissions_fixture():
     async with async_session_factory() as session:
         await seed_system_permissions(session)
+    await close_redis()
+    redis = get_redis()
+    keys = [k async for k in redis.scan_iter("rl:pwd_reset:*")]
+    if keys:
+        await redis.delete(*keys)
+    yield
+    await close_redis()
 
 
 async def _create_school_and_admin(client: AsyncClient, suffix: str) -> tuple[str, str, str]:
@@ -65,13 +72,14 @@ async def test_password_reset_happy_path(monkeypatch):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         suffix = uuid.uuid4().hex[:6]
+        test_ip = f"192.168.1.{int(suffix[:2], 16) % 256}"
         _, email, old_password = await _create_school_and_admin(client, suffix)
 
         # 1. Request forgot password
         forgot_resp = await client.post(
             "/api/v1/identity/forgot-password",
             json={"email": email},
-            headers={"x-forwarded-for": f"192.168.1.{suffix[:2]}"},
+            headers={"x-forwarded-for": test_ip},
         )
         assert forgot_resp.status_code == 200, forgot_resp.text
         assert forgot_resp.json()["success"] is True
@@ -97,7 +105,7 @@ async def test_password_reset_happy_path(monkeypatch):
         # 2. Verify token
         verify_resp = await client.get(
             f"/api/v1/identity/reset-password/verify?token={raw_token}",
-            headers={"x-forwarded-for": f"192.168.1.{suffix[:2]}"},
+            headers={"x-forwarded-for": test_ip},
         )
         assert verify_resp.status_code == 200, verify_resp.text
         assert verify_resp.json()["data"]["valid"] is True
@@ -110,7 +118,7 @@ async def test_password_reset_happy_path(monkeypatch):
         reset_resp = await client.post(
             "/api/v1/identity/reset-password",
             json={"token": raw_token, "new_password": new_password},
-            headers={"x-forwarded-for": f"192.168.1.{suffix[:2]}"},
+            headers={"x-forwarded-for": test_ip},
         )
         assert reset_resp.status_code == 200, reset_resp.text
         assert reset_resp.json()["success"] is True

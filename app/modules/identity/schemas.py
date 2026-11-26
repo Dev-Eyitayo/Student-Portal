@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
+from app.core.storage import storage_service
 from app.modules.common.schemas import PageMeta
 from app.modules.common.validators import validate_optional_nigerian_phone
 
@@ -64,6 +65,11 @@ class StaffProfileResponse(BaseModel):
     employment_status: str
     specialization: str | None = None
     signature_image_url: str | None = None
+
+    @field_validator("signature_image_url", mode="before")
+    @classmethod
+    def _resolve_signature_url(cls, value: str | None) -> str | None:
+        return storage_service.public_url(value) if value else None
 
 
 class UserResponse(BaseModel):

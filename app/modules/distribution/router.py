@@ -12,6 +12,7 @@ from app.core.dependencies import (
     require_school_id,
 )
 from app.core.permissions import require_permission
+from app.core.security import get_client_ip
 from app.modules.common.schemas import SuccessResponse
 from app.modules.distribution import services
 from app.modules.distribution.schemas import (
@@ -35,9 +36,7 @@ publication_distribution_router = APIRouter(
 
 
 def _client_ip(request: Request) -> str | None:
-    if request.client:
-        return request.client.host
-    return None
+    return get_client_ip(request)
 
 
 @results_router.get(
