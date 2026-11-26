@@ -667,6 +667,13 @@ CREATE TABLE students (
     )
 );
 CREATE INDEX idx_students_search ON students(school_id, last_name, first_name);
+-- pg_trgm GIN indexes support leading-wildcard ILIKE '%...%' search on the student directory
+-- (GET /api/v1/students?q=...) without a sequential scan at scale:
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX idx_students_trgm_admission_number ON students USING gin (admission_number gin_trgm_ops);
+CREATE INDEX idx_students_trgm_first_name ON students USING gin (first_name gin_trgm_ops);
+CREATE INDEX idx_students_trgm_middle_name ON students USING gin (middle_name gin_trgm_ops);
+CREATE INDEX idx_students_trgm_last_name ON students USING gin (last_name gin_trgm_ops);
 
 CREATE TABLE student_enrollments (
     id UUID PRIMARY KEY, -- application-generated UUIDv7

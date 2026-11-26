@@ -35,10 +35,16 @@ from app.modules.students.schemas import (
     EnrollmentResponse,
     EnrollmentSubjectsResponse,
     EnrollmentUpdateRequest,
+    GuardianDirectoryPageResponse,
+    GuardianDirectorySummary,
+    GuardianResponse,
+    GuardianUpdateRequest,
     StudentBulkImportAcceptedResponse,
     StudentBulkImportStatusResponse,
     StudentCreateRequest,
     StudentDirectorySummaryResponse,
+    StudentMedicalProfileResponse,
+    StudentMedicalProfileUpsertRequest,
     StudentResponse,
     StudentStatusUpdateRequest,
     StudentUpdateRequest,
@@ -268,6 +274,84 @@ async def get_student_bulk_import_status(
             result=result,
         )
     )
+
+
+# --------------------------------------------------------------------------
+# Parents / Guardians Directory
+#
+# NOTE: These literal-path routes must stay registered before
+# "/students/{student_id}" below — otherwise FastAPI matches
+# "/students/guardians" against the {student_id} path parameter first and
+# fails UUID validation with a 422.
+# --------------------------------------------------------------------------
+
+
+@router.get(
+    "/students/guardians",
+    response_model=SuccessResponse[GuardianDirectoryPageResponse],
+    dependencies=student_permissions,
+)
+async def list_guardians(
+    q: str | None = Query(None, max_length=120),
+    academic_level_id: UUID | None = Query(None),
+    class_group_id: UUID | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    items, meta, summary = await services.list_guardians(
+        db,
+        _school_id(current_user),
+        q=q,
+        academic_level_id=academic_level_id,
+        class_group_id=class_group_id,
+        page=page,
+        page_size=page_size,
+    )
+    return SuccessResponse[GuardianDirectoryPageResponse](
+        data=GuardianDirectoryPageResponse(
+            items=items,
+            meta=meta,
+            summary=GuardianDirectorySummary.model_validate(summary),
+        )
+    )
+
+
+@router.get(
+    "/students/guardians/{guardian_id}",
+    response_model=SuccessResponse[GuardianResponse],
+    dependencies=student_permissions,
+)
+async def get_guardian(
+    guardian_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    guardian = await services.get_guardian(db, _school_id(current_user), guardian_id)
+    return SuccessResponse[GuardianResponse](data=guardian)
+
+
+@router.patch(
+    "/students/guardians/{guardian_id}",
+    response_model=SuccessResponse[GuardianResponse],
+    dependencies=student_permissions,
+)
+async def update_guardian(
+    guardian_id: UUID,
+    req: GuardianUpdateRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    guardian = await services.update_guardian(
+        db,
+        _school_id(current_user),
+        guardian_id,
+        req,
+        _audit_context(request, current_user),
+    )
+    return SuccessResponse[GuardianResponse](data=guardian)
 
 
 @router.get(
@@ -553,3 +637,45 @@ async def update_enrollment_attendance_summary(
     return SuccessResponse[AttendanceSummaryResponse](
         data=AttendanceSummaryResponse.model_validate(summary)
     )
+
+
+# --------------------------------------------------------------------------
+# Student Medical Profile (Optional)
+# --------------------------------------------------------------------------
+
+
+@router.get(
+    "/students/{student_id}/medical-profile",
+    response_model=SuccessResponse[StudentMedicalProfileResponse],
+    dependencies=[Depends(require_permission("students:medical:read"))],
+)
+async def get_student_medical_profile(
+    student_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    profile = await services.get_student_medical_profile(db, _school_id(current_user), student_id)
+    return SuccessResponse[StudentMedicalProfileResponse](data=profile)
+
+
+@router.put(
+    "/students/{student_id}/medical-profile",
+    response_model=SuccessResponse[StudentMedicalProfileResponse],
+    dependencies=[Depends(require_permission("students:medical:manage"))],
+)
+async def upsert_student_medical_profile(
+    student_id: UUID,
+    req: StudentMedicalProfileUpsertRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    profile = await services.upsert_student_medical_profile(
+        db,
+        _school_id(current_user),
+        student_id,
+        req,
+        current_user,
+        _audit_context(request, current_user),
+    )
+    return SuccessResponse[StudentMedicalProfileResponse](data=profile)

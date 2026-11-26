@@ -5,7 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
-from app.modules.common.validators import validate_nigerian_phone
+from app.modules.common.schemas import PageMeta
+from app.modules.common.validators import validate_nigerian_phone, validate_optional_nigerian_phone
 
 
 class Gender(StrEnum):
@@ -32,6 +33,14 @@ class EnrollmentStatus(StrEnum):
     WITHDRAWN = "WITHDRAWN"
 
 
+class GuardianRelationship(StrEnum):
+    FATHER = "FATHER"
+    MOTHER = "MOTHER"
+    GUARDIAN = "GUARDIAN"
+    SPONSOR = "SPONSOR"
+    OTHER = "OTHER"
+
+
 class StudentCreateRequest(BaseModel):
     admission_number: str = Field(..., min_length=1, max_length=64)
     first_name: str = Field(..., min_length=1, max_length=64)
@@ -39,21 +48,31 @@ class StudentCreateRequest(BaseModel):
     last_name: str = Field(..., min_length=1, max_length=64)
     date_of_birth: date
     gender: Gender
-    guardian_name: str = Field(..., min_length=2, max_length=128)
-    guardian_email: EmailStr
-    guardian_phone: str = Field(..., min_length=5, max_length=32)
+    guardian_id: UUID | None = None
+    guardian_relationship: GuardianRelationship = GuardianRelationship.GUARDIAN
+    guardian_name: str | None = Field(None, min_length=2, max_length=128)
+    guardian_email: EmailStr | None = None
+    guardian_phone: str | None = Field(None, min_length=5, max_length=32)
     home_address: str | None = Field(None, max_length=500)
     enrollment_date: date
 
     @field_validator("guardian_phone", mode="before")
     @classmethod
-    def validate_guardian_phone(cls, value: Any) -> str:
+    def validate_guardian_phone(cls, value: Any) -> str | None:
+        if value is None:
+            return None
         return validate_nigerian_phone(value)
 
     @model_validator(mode="after")
-    def validate_dates(self) -> "StudentCreateRequest":
+    def validate_dates_and_guardian(self) -> "StudentCreateRequest":
         if self.date_of_birth >= self.enrollment_date:
             raise ValueError("The date of birth must be before the enrollment date.")
+        if self.guardian_id is None and not (
+            self.guardian_name and self.guardian_email and self.guardian_phone
+        ):
+            raise ValueError(
+                "Please select an existing parent/guardian or enter their full name, email, and phone number."
+            )
         return self
 
 
@@ -63,6 +82,8 @@ class StudentUpdateRequest(BaseModel):
     last_name: str | None = Field(None, min_length=1, max_length=64)
     date_of_birth: date | None = None
     gender: Gender | None = None
+    guardian_id: UUID | None = None
+    guardian_relationship: GuardianRelationship | None = None
     guardian_name: str | None = Field(None, min_length=2, max_length=128)
     guardian_email: EmailStr | None = None
     guardian_phone: str | None = Field(None, min_length=5, max_length=32)
@@ -96,6 +117,7 @@ class StudentResponse(BaseModel):
     guardian_name: str
     guardian_email: EmailStr
     guardian_phone: str
+    primary_guardian_id: UUID | None = None
     home_address: str | None = None
     enrollment_date: date
     status: StudentStatus
@@ -373,3 +395,98 @@ class AttendanceOverviewSummaryResponse(BaseModel):
     total_classes: int
     manual_overrides: int
     classes: list[ClassAttendanceOverviewItem] = Field(default_factory=list)
+
+
+class GuardianWardItem(BaseModel):
+    student_id: UUID
+    admission_number: str
+    first_name: str
+    last_name: str
+    full_name: str
+    status: StudentStatus
+    relationship_type: GuardianRelationship = GuardianRelationship.GUARDIAN
+    current_class_name: str | None = None
+
+
+class GuardianResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    school_id: UUID
+    full_name: str
+    email: EmailStr
+    phone: str
+    alternate_phone: str | None = None
+    occupation: str | None = None
+    address: str | None = None
+    wards_count: int = 0
+    wards: list[GuardianWardItem] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class GuardianUpdateRequest(BaseModel):
+    full_name: str | None = Field(None, min_length=2, max_length=128)
+    email: EmailStr | None = None
+    phone: str | None = Field(None, min_length=5, max_length=32)
+    alternate_phone: str | None = Field(None, max_length=32)
+    occupation: str | None = Field(None, max_length=128)
+    address: str | None = Field(None, max_length=500)
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def validate_phone(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        return validate_nigerian_phone(value)
+
+    @field_validator("alternate_phone", mode="before")
+    @classmethod
+    def validate_alt_phone(cls, value: Any) -> str | None:
+        return validate_optional_nigerian_phone(value)
+
+
+class GuardianDirectorySummary(BaseModel):
+    total_guardians: int
+    multi_ward_guardians: int
+    total_linked_students: int
+
+
+class GuardianDirectoryPageResponse(BaseModel):
+    items: list[GuardianResponse]
+    meta: PageMeta
+    summary: GuardianDirectorySummary
+
+
+class StudentMedicalProfileUpsertRequest(BaseModel):
+    blood_group: str | None = Field(None, max_length=8)
+    genotype: str | None = Field(None, max_length=8)
+    allergies: str | None = Field(None, max_length=2000)
+    chronic_conditions: str | None = Field(None, max_length=2000)
+    medications: str | None = Field(None, max_length=2000)
+    dietary_restrictions: str | None = Field(None, max_length=1000)
+    emergency_contact_name: str | None = Field(None, max_length=128)
+    emergency_contact_phone: str | None = Field(None, max_length=32)
+    emergency_contact_relationship: str | None = Field(None, max_length=64)
+    notes: str | None = Field(None, max_length=2000)
+
+    @field_validator("emergency_contact_phone", mode="before")
+    @classmethod
+    def validate_emergency_phone(cls, value: Any) -> str | None:
+        return validate_optional_nigerian_phone(value)
+
+
+class StudentMedicalProfileResponse(BaseModel):
+    student_id: UUID
+    has_record: bool = False
+    blood_group: str | None = None
+    genotype: str | None = None
+    allergies: str | None = None
+    chronic_conditions: str | None = None
+    medications: str | None = None
+    dietary_restrictions: str | None = None
+    emergency_contact_name: str | None = None
+    emergency_contact_phone: str | None = None
+    emergency_contact_relationship: str | None = None
+    notes: str | None = None
+    updated_at: datetime | None = None

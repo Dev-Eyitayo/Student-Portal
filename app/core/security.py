@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jwt
+from fastapi import Request
 from passlib.context import CryptContext
 
 from app.core.config import get_settings
@@ -144,3 +145,23 @@ async def is_token_revoked(jti: str) -> bool:
     except Exception:
         logger.debug("Redis unavailable while checking token revocation", exc_info=True)
         return False
+
+
+def get_client_ip(request: Request) -> str | None:
+    """
+    Resolves the originating client IP for rate-limiting and audit logging.
+
+    Prefers the leftmost (client-nearest) entry of `X-Forwarded-For` when present,
+    since production deploys this app behind a reverse proxy (e.g. nginx on the
+    same VPS) that always sets this header and strips any client-supplied value —
+    without this, `request.client.host` would resolve to the proxy's own IP for
+    every request, collapsing every distinct user into one shared rate-limit bucket.
+    Falls back to the direct TCP peer address when the header is absent (e.g. local
+    dev without a proxy in front).
+    """
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        first_ip = forwarded_for.split(",")[0].strip()
+        if first_ip:
+            return first_ip
+    return request.client.host if request.client else None

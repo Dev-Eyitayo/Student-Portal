@@ -61,6 +61,18 @@ SYSTEM_PERMISSIONS = [
         "description": "Manage student lifecycle state transitions.",
     },
     {
+        "code": "students:medical:read",
+        "name": "View Student Medical Records",
+        "category": "STUDENT",
+        "description": "View optional student medical profiles and emergency contacts.",
+    },
+    {
+        "code": "students:medical:manage",
+        "name": "Manage Student Medical Records",
+        "category": "STUDENT",
+        "description": "Create and update student medical profiles and emergency contacts.",
+    },
+    {
         "code": "subjects:register_electives",
         "name": "Register Elective Subjects",
         "category": "STUDENT",
@@ -147,6 +159,8 @@ DEFAULT_ROLE_PERMISSIONS: dict[str, list[str]] = {
         "students:bulk_import",
         "students:enroll",
         "students:status",
+        "students:medical:read",
+        "students:medical:manage",
         "subjects:register_electives",
         "structure:manage",
         "subjects:manage",

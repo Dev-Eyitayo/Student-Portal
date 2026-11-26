@@ -45,6 +45,7 @@ class ReportSummaryInfo(BaseModel):
     level_position: int | None = None
     total_students_in_level: int | None = None
     class_teacher_comment: str | None = None
+    class_teacher_signature_url: str | None = None
     principal_comment: str | None = None
     annual_cumulative_score: Decimal | None = None
     promotion_decision: str | None = None

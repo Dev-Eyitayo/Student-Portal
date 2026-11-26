@@ -1,3 +1,5 @@
+import json
+import os
 from datetime import UTC, date, datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -5,8 +7,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.exceptions import InsufficientPermissionException
 from app.core.permissions import user_has_permission
+from app.core.redis import get_redis
 from app.modules.academic_structure.models import (
     AcademicSession,
     AcademicTerm,
@@ -75,6 +79,14 @@ async def _active_session_and_term(
     return session, term
 
 
+def _use_dashboard_cache() -> bool:
+    settings = get_settings()
+    return not (settings.ENVIRONMENT in ("testing", "test") or os.getenv("TESTING") == "1")
+
+
+_ISSUE_UUID_FIELDS = ("class_group_id", "class_subject_id", "academic_term_id")
+
+
 async def _collect_term_issues(
     db: AsyncSession,
     school_id: UUID,
@@ -84,6 +96,22 @@ async def _collect_term_issues(
     issues: list[dict[str, object]] = []
     if session is None:
         return issues, 0, 0
+
+    cache_key = f"dashboard:term_issues:{school_id}:{term.id if term else session.id}"
+    use_cache = _use_dashboard_cache()
+    if use_cache:
+        try:
+            cached = await get_redis().get(cache_key)
+            if cached is not None:
+                payload = json.loads(cached)
+                cached_issues = payload["issues"]
+                for item in cached_issues:
+                    for field in _ISSUE_UUID_FIELDS:
+                        if item.get(field) is not None:
+                            item[field] = UUID(item[field])
+                return cached_issues, payload["approved_count"], payload["total_sheets"]
+        except Exception:
+            pass
 
     class_groups = (
         (
@@ -222,7 +250,32 @@ async def _collect_term_issues(
                 )
 
     approved_count = sum(1 for cs_id in cs_ids if status_map.get(cs_id) == "APPROVED")
-    return issues, approved_count, len(cs_ids)
+    total_sheets = len(cs_ids)
+
+    if use_cache:
+        try:
+            serializable_issues = []
+            for item in issues:
+                clean = dict(item)
+                for field in _ISSUE_UUID_FIELDS:
+                    if clean.get(field) is not None:
+                        clean[field] = str(clean[field])
+                serializable_issues.append(clean)
+            await get_redis().set(
+                cache_key,
+                json.dumps(
+                    {
+                        "issues": serializable_issues,
+                        "approved_count": approved_count,
+                        "total_sheets": total_sheets,
+                    }
+                ),
+                ex=30,
+            )
+        except Exception:
+            pass
+
+    return issues, approved_count, total_sheets
 
 
 async def get_admin_dashboard(

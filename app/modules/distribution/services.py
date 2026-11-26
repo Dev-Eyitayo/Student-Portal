@@ -5,7 +5,7 @@ from hashlib import sha256
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select, text, update
+from sqlalchemy import case, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -53,7 +53,7 @@ from app.modules.distribution.schemas import (
     VerifiedReportCardResponse,
 )
 from app.modules.distribution.tasks import send_term_result_notifications
-from app.modules.identity.models import School, SchoolConfiguration, User
+from app.modules.identity.models import School, SchoolConfiguration, StaffProfile, User
 from app.modules.students.models import Student, StudentEnrollment
 from app.modules.subjects.models import ClassSubject, Subject, SubjectOffering
 
@@ -268,6 +268,7 @@ def _assemble_verified_report_card_response(
     department_name: str | None,
     subject_rows: list[tuple[SubjectResult, Subject]],
     score_rows: list[tuple[UUID, str, Decimal, Decimal, str, Decimal | None]],
+    class_teacher_signature_url: str | None = None,
     now: datetime,
 ) -> VerifiedReportCardResponse:
     ca_totals: dict[UUID, Decimal] = {}
@@ -348,6 +349,7 @@ def _assemble_verified_report_card_response(
             level_position=card.level_position if show_level_pos else None,
             total_students_in_level=card.total_students_in_level if show_level_pos else None,
             class_teacher_comment=card.teacher_comment,
+            class_teacher_signature_url=class_teacher_signature_url,
             principal_comment=card.principal_comment,
             annual_cumulative_score=card.cumulative_average_percentage,
             promotion_decision=card.promotion_decision,
@@ -457,6 +459,18 @@ async def _build_verified_report_card_response(
         ).all()
     )
 
+    class_teacher_signature_url: str | None = None
+    if class_group.class_teacher_id is not None:
+        sig_path = (
+            await db.execute(
+                select(StaffProfile.signature_image_url).where(
+                    StaffProfile.school_id == school_id,
+                    StaffProfile.user_id == class_group.class_teacher_id,
+                )
+            )
+        ).scalar_one_or_none()
+        class_teacher_signature_url = storage_service.public_url(sig_path)
+
     response = _assemble_verified_report_card_response(
         card=card,
         student=student,
@@ -469,6 +483,7 @@ async def _build_verified_report_card_response(
         department_name=department_name,
         subject_rows=subject_rows,
         score_rows=score_rows,
+        class_teacher_signature_url=class_teacher_signature_url,
         now=now,
     )
     return response, session, term, class_group, level, department_name
@@ -808,68 +823,90 @@ async def list_report_cards(
     )
     pass_mark = Decimal(str(thresholds.get("promoted_min_percentage", "50.00")))
 
-    rows = (
+    base_filters = (
+        TermReportCard.school_id == school_id,
+        TermReportCard.academic_term_id == term.id,
+        StudentEnrollment.class_group_id.in_(group_ids),
+        StudentEnrollment.deleted_at.is_(None),
+        Student.deleted_at.is_(None),
+        TermReportCard.deleted_at.is_(None),
+    )
+    average_expr = func.coalesce(
+        TermReportCard.cumulative_average_percentage, TermReportCard.overall_percentage
+    )
+
+    students_computed, avg_score, passing_count, any_published = (
         await db.execute(
-            select(TermReportCard, Student, ClassGroup.display_name)
+            select(
+                func.count(),
+                func.avg(average_expr),
+                func.sum(case((average_expr >= pass_mark, 1), else_=0)),
+                func.bool_or(TermReportCard.publication_status == "PUBLISHED"),
+            )
+            .select_from(TermReportCard)
             .join(StudentEnrollment, StudentEnrollment.id == TermReportCard.student_enrollment_id)
             .join(Student, Student.id == StudentEnrollment.student_id)
-            .join(ClassGroup, ClassGroup.id == StudentEnrollment.class_group_id)
-            .where(
-                TermReportCard.school_id == school_id,
-                TermReportCard.academic_term_id == term.id,
-                StudentEnrollment.class_group_id.in_(group_ids),
-                StudentEnrollment.deleted_at.is_(None),
-                Student.deleted_at.is_(None),
-                TermReportCard.deleted_at.is_(None),
-            )
-            .order_by(
-                TermReportCard.class_position.asc().nulls_last(),
-                Student.last_name.asc(),
-                Student.first_name.asc(),
-            )
+            .where(*base_filters)
         )
-    ).all()
+    ).one()
 
-    averages = [
-        (
-            card.cumulative_average_percentage
-            if card.cumulative_average_percentage is not None
-            else card.overall_percentage
-        )
-        for card, _, _ in rows
-    ]
     class_average = (
-        str(
-            (sum(averages, Decimal("0.00")) / Decimal(len(averages))).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
-        )
-        if averages
+        str(Decimal(str(avg_score)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        if avg_score is not None
         else None
     )
-    passing = sum(1 for avg in averages if avg >= pass_mark)
     pass_rate = (
         float(
-            ((Decimal(passing) / Decimal(len(averages))) * Decimal("100")).quantize(
+            ((Decimal(passing_count) / Decimal(students_computed)) * Decimal("100")).quantize(
                 Decimal("0.1"), rounding=ROUND_HALF_UP
             )
         )
-        if averages
+        if students_computed
         else None
     )
+    term_status = (
+        "PUBLISHED" if any_published else ("LOCKED" if term.is_locked_for_scoring else "DRAFT")
+    )
 
-    filtered_rows = rows
-    if promotion_decision:
-        dec = promotion_decision.strip().upper()
-        filtered_rows = [
-            (c, s, cg_name) for c, s, cg_name in rows if (c.promotion_decision or "").upper() == dec
-        ]
+    dec = promotion_decision.strip().upper() if promotion_decision else None
 
-    total = len(filtered_rows)
+    count_stmt = (
+        select(func.count())
+        .select_from(TermReportCard)
+        .join(StudentEnrollment, StudentEnrollment.id == TermReportCard.student_enrollment_id)
+        .join(Student, Student.id == StudentEnrollment.student_id)
+        .where(*base_filters)
+    )
+    if dec:
+        count_stmt = count_stmt.where(
+            func.upper(func.coalesce(TermReportCard.promotion_decision, "")) == dec
+        )
+    total = (await db.execute(count_stmt)).scalar_one()
+
     start = (page - 1) * page_size
-    end = start + page_size
     total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 0
-    paged_rows = filtered_rows[start:end]
+
+    paged_stmt = (
+        select(TermReportCard, Student, ClassGroup.display_name)
+        .join(StudentEnrollment, StudentEnrollment.id == TermReportCard.student_enrollment_id)
+        .join(Student, Student.id == StudentEnrollment.student_id)
+        .join(ClassGroup, ClassGroup.id == StudentEnrollment.class_group_id)
+        .where(*base_filters)
+    )
+    if dec:
+        paged_stmt = paged_stmt.where(
+            func.upper(func.coalesce(TermReportCard.promotion_decision, "")) == dec
+        )
+    paged_stmt = (
+        paged_stmt.order_by(
+            TermReportCard.class_position.asc().nulls_last(),
+            Student.last_name.asc(),
+            Student.first_name.asc(),
+        )
+        .limit(page_size)
+        .offset(start)
+    )
+    paged_rows = (await db.execute(paged_stmt)).all()
 
     items = [
         ReportCardListItem(
@@ -897,16 +934,10 @@ async def list_report_cards(
         for card, student, cg_name in paged_rows
     ]
 
-    term_status = (
-        "PUBLISHED"
-        if any(card.publication_status == "PUBLISHED" for card, _, _ in rows)
-        else ("LOCKED" if term.is_locked_for_scoring else "DRAFT")
-    )
-
     return ReportCardListResponse(
         items=items,
         summary=ReportCardListSummary(
-            students_computed=len(rows),
+            students_computed=students_computed,
             class_average=class_average,
             pass_rate=pass_rate,
             term_status=term_status,
@@ -1114,6 +1145,23 @@ async def get_student_transcript(
                     (cs_id, atype, max_s, weight_p, s_status, raw_s)
                 )
 
+            teacher_ids = list(
+                {cg.class_teacher_id for cg in cgs_by_id.values() if cg.class_teacher_id}
+            )
+            sig_by_teacher_id: dict[UUID, str | None] = {}
+            if teacher_ids:
+                sig_rows = (
+                    await db.execute(
+                        select(StaffProfile.user_id, StaffProfile.signature_image_url).where(
+                            StaffProfile.school_id == school_id,
+                            StaffProfile.user_id.in_(teacher_ids),
+                        )
+                    )
+                ).all()
+                sig_by_teacher_id = {
+                    uid: storage_service.public_url(path) for uid, path in sig_rows
+                }
+
             for card in card_rows:
                 enrollment = enrollment_by_id[card.student_enrollment_id]
                 term = terms_by_id[card.academic_term_id]
@@ -1141,6 +1189,9 @@ async def get_student_transcript(
                     score_rows=scores_by_key.get(
                         (card.academic_term_id, card.student_enrollment_id), []
                     ),
+                    class_teacher_signature_url=sig_by_teacher_id.get(class_group.class_teacher_id)
+                    if class_group.class_teacher_id
+                    else None,
                     now=now,
                 )
                 terms.append(
