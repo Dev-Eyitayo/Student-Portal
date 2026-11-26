@@ -3,16 +3,17 @@ Secondary, NERDC curriculum, trade subjects, joint-class electives, and a
 generated timetable -- meant to replace the ad-hoc state left behind by manual
 UI testing.
 
-Preserves: the School row, SchoolConfiguration, and every existing
-User/StaffProfile/SchoolRolePermission/UserPermissionGrant record (so the
-principal's and existing staff's logins keep working).
+Preserves: the School row (except `school_sector`, forced to PUBLIC -- see
+below) and every existing User/StaffProfile/SchoolRolePermission/
+UserPermissionGrant record (so the principal's and existing staff's logins
+keep working).
 
 Rebuilds from scratch: academic session/term, levels (JSS1-3, SS1-3), arms,
 departments, class groups, subjects/offerings/class subjects, students,
-enrollments, subject registrations, assessment definitions, and every
-timetable constraint tab (bell schedules, rooms, scheduling rules, sync
-groups). Does NOT create a Timetable draft or run generation -- that's left
-for you to trigger from the UI.
+enrollments, subject registrations, assessment definitions, assessment
+scores, and every timetable constraint tab (bell schedules, rooms,
+scheduling rules, sync groups). Does NOT create a Timetable draft or run
+generation -- that's left for you to trigger from the UI.
 
 Interpretation notes (since a few instructions were judgment calls):
   - "Core subjects" getting English/Maths' 3-periods-with-one-double
@@ -23,9 +24,16 @@ Interpretation notes (since a few instructions were judgment calls):
     (PHE, CCA, Home Economics, Security Education, Business Studies, Social
     Studies) and all true electives/trade subjects get 1-2 periods/week with
     no double, matching "the rest can have two or one periods per week."
-  - Assessment scores/report-card publishing are intentionally NOT seeded --
-    this reseed focuses on structure, people, and the timetable, which is
-    what was asked for. Scores can be entered through the normal UI flow.
+  - This school is forced to `school_sector=PUBLIC` on every run so its
+    SchoolConfiguration.assessment_weight_schema matches the TESCOM Mark
+    Book template (ATTENDANCE/NOTEBOOK/OPEN_DAY/TEXTBOOK/SB_TEST/TB_ASSESS,
+    each 5%, + EXAM at 70%) instead of the generic private-school
+    TEST1/TEST2/ASSIGN/EXAM default -- see app.modules.assessments.mark_book
+    and `GET /api/v1/assessments/mark-book/export`.
+  - Every class arm gets a class (form) teacher, and assessment scores are
+    seeded at ~96% completion (APPROVED score sheets) for First Term, so the
+    Mark Book export, broadsheets, and report cards all have realistic,
+    near-finished data to check against -- rather than an empty gradebook.
 
 Usage:
     .venv/bin/python -m scripts.seed_realistic_school
@@ -35,7 +43,9 @@ import asyncio
 import logging
 import math
 import random
-from datetime import date, time, timedelta
+from copy import deepcopy
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import delete, func, select, text
@@ -62,7 +72,9 @@ from app.modules.audit.models import AuditLog
 from app.modules.audit.services import AuditContext
 from app.modules.computation.models import SubjectResult, TermReportCard
 from app.modules.distribution.models import ResultAccessToken
-from app.modules.identity.models import School, StaffProfile, User
+from app.modules.identity.models import School, SchoolConfiguration, StaffProfile, User
+from app.modules.identity.schemas import SchoolSector
+from app.modules.identity.services import PUBLIC_TESCOM_ASSESSMENT_WEIGHTS
 from app.modules.students.models import (
     AttendanceRecord,
     AttendanceSummary,
@@ -675,6 +687,26 @@ async def seed() -> None:
             text("SELECT set_config('app.current_school_id', :sid, false)"), {"sid": str(school.id)}
         )
 
+        # Ensure this school is configured as a PUBLIC-sector secondary school so
+        # its assessment components match the TESCOM Mark Book structure
+        # (ATTENDANCE/NOTEBOOK/OPEN_DAY/TEXTBOOK/SB_TEST/TB_ASSESS + EXAM) instead
+        # of the generic private-school TEST1/TEST2/ASSIGN/EXAM default -- this
+        # runs on every reseed so it self-heals regardless of how the school row
+        # was originally created.
+        config = (
+            await db.execute(
+                select(SchoolConfiguration).where(SchoolConfiguration.school_id == school.id)
+            )
+        ).scalar_one_or_none()
+        if config is None:
+            raise RuntimeError(
+                "No SchoolConfiguration found for 'OBHS-OYO'. Run scripts.seed_demo first."
+            )
+        school.school_sector = SchoolSector.PUBLIC.value
+        config.assessment_weight_schema = deepcopy(PUBLIC_TESCOM_ASSESSMENT_WEIGHTS)
+        await db.flush()
+        print("Set school sector to PUBLIC and assessment weight schema to the TESCOM structure.")
+
         await _reset_school_data(db, school)
 
         staff_by_email = await _load_existing_staff(db, school.id)
@@ -1129,6 +1161,36 @@ async def seed() -> None:
         print(f"Created {cross_count} deliberate JSS<->SS cross-category teacher assignments.")
 
         # ------------------------------------------------------------------
+        # 3.6 Class (form) teachers: every arm gets a homeroom teacher, drawn
+        #    from the arm's own already-assigned subject teachers (preferring
+        #    the English teacher, as is typical) so it's a real, consistent
+        #    person rather than an arbitrary extra hire.
+        # ------------------------------------------------------------------
+        cs_ids_by_cg: dict[UUID, list[UUID]] = {}
+        for (cgid, _code), cs in cs_by_cg_and_code.items():
+            cs_ids_by_cg.setdefault(cgid, []).append(cs.id)
+
+        class_teacher_count = 0
+        for cg in class_groups:
+            teacher_id: UUID | None = None
+            eng_cs = cs_by_cg_and_code.get((cg.id, "ENG"))
+            if eng_cs is not None:
+                ta = cs_teacher_assignments.get(eng_cs.id)
+                if ta is not None:
+                    teacher_id = ta.teacher_id
+            if teacher_id is None:
+                for cs_id in cs_ids_by_cg.get(cg.id, []):
+                    ta = cs_teacher_assignments.get(cs_id)
+                    if ta is not None:
+                        teacher_id = ta.teacher_id
+                        break
+            if teacher_id is not None:
+                cg.class_teacher_id = teacher_id
+                class_teacher_count += 1
+        await db.flush()
+        print(f"Assigned class (form) teachers to {class_teacher_count}/{len(class_groups)} class arms.")
+
+        # ------------------------------------------------------------------
         # 4. Joint-class electives: trade subjects & Technical Drawing
         #    combine two arms into one session (low per-arm uptake).
         # ------------------------------------------------------------------
@@ -1340,11 +1402,107 @@ async def seed() -> None:
         print(f"Created {total_students} students across {len(class_groups)} class arms.")
 
         # ------------------------------------------------------------------
-        # 6. Assessment definitions (10/10/10/70) for the term
+        # 6. Assessment definitions (TESCOM: 6x CA@5% + EXAM@70%) for the term
         # ------------------------------------------------------------------
         await seed_assessment_definitions_for_term(db, school.id, term)
         await db.commit()
         print("Seeded assessment definitions for First Term.")
+
+        # ------------------------------------------------------------------
+        # 6.5 Assessment scores: ~96% of (student, component) cells filled in,
+        #    as if the term is nearly done -- the remaining ~4% stay unscored
+        #    so the UI still has a few gaps to show/fill, same as a real
+        #    school at this point in the term. Every scored class subject's
+        #    sheet is marked APPROVED so Mark Book/broadsheet/report-card
+        #    reads show finished-looking results.
+        # ------------------------------------------------------------------
+        print("Seeding assessment scores (~96% complete, First Term)...", flush=True)
+        SCORE_FILL_RATE = 0.96
+
+        all_defs = (
+            (
+                await db.execute(
+                    select(AssessmentDefinition).where(
+                        AssessmentDefinition.school_id == school.id,
+                        AssessmentDefinition.academic_term_id == term.id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        defs_by_cs: dict[UUID, list[AssessmentDefinition]] = {}
+        for defn in all_defs:
+            defs_by_cs.setdefault(defn.class_subject_id, []).append(defn)
+
+        reg_rows_for_scoring = (
+            await db.execute(
+                select(
+                    StudentSubjectRegistration.class_subject_id,
+                    StudentSubjectRegistration.student_enrollment_id,
+                ).where(
+                    StudentSubjectRegistration.school_id == school.id,
+                    StudentSubjectRegistration.is_active.is_(True),
+                )
+            )
+        ).all()
+        enr_ids_by_cs: dict[UUID, list[UUID]] = {}
+        for cs_id, enr_id in reg_rows_for_scoring:
+            enr_ids_by_cs.setdefault(cs_id, []).append(enr_id)
+
+        score_count = 0
+        sheet_count = 0
+        now = datetime.now(UTC)
+        for cs_id, defs in defs_by_cs.items():
+            enr_ids = enr_ids_by_cs.get(cs_id, [])
+            if not enr_ids:
+                continue
+            ta = cs_teacher_assignments.get(cs_id)
+            recorder_id = ta.teacher_id if ta is not None else admin.id
+
+            for defn in defs:
+                is_exam = defn.code.upper() == "EXAM"
+                max_score = float(defn.max_score)
+                for enr_id in enr_ids:
+                    if rng.random() > SCORE_FILL_RATE:
+                        continue
+                    if is_exam:
+                        raw = rng.triangular(max_score * 0.3, max_score, max_score * 0.72)
+                    else:
+                        raw = rng.triangular(max_score * 0.4, max_score, max_score * 0.8)
+                    raw = min(round(raw * 2) / 2, max_score)
+                    db.add(
+                        AssessmentScore(
+                            school_id=school.id,
+                            assessment_definition_id=defn.id,
+                            student_enrollment_id=enr_id,
+                            score_status="SCORED",
+                            raw_score=Decimal(str(raw)),
+                            recorded_by_id=recorder_id,
+                            last_modified_by_id=recorder_id,
+                        )
+                    )
+                    score_count += 1
+
+            db.add(
+                ScoreSheetStatus(
+                    school_id=school.id,
+                    academic_term_id=term.id,
+                    class_subject_id=cs_id,
+                    status="APPROVED",
+                    submitted_by_id=recorder_id,
+                    submitted_at=now,
+                    approved_by_id=admin.id,
+                    approved_at=now,
+                )
+            )
+            sheet_count += 1
+        await db.flush()
+        await db.commit()
+        print(
+            f"Seeded {score_count} assessment scores (~{int(SCORE_FILL_RATE * 100)}% fill) "
+            f"across {sheet_count} score sheets, all marked APPROVED."
+        )
 
         # ------------------------------------------------------------------
         # 7. Timetable module constraints: bell schedules only. Rooms,

@@ -791,6 +791,28 @@ CREATE UNIQUE INDEX uq_active_teacher_class_subject ON teacher_assignments(class
 CREATE INDEX idx_teacher_assignments_lookup ON teacher_assignments(teacher_id, is_active);
 ```
 
+##### `teacher_subject_qualifications`
+A level/class-independent tag ("this teacher takes this subject"), distinct from
+`teacher_assignments` (which ties a teacher to one specific `class_subject`). Set once
+per teacher from the Staff page (`PUT /api/v1/identity/users/{user_id}/subject-qualifications`);
+read by the subject-teacher-assignment flows (`GET /api/v1/subjects/{subject_id}/qualified-teachers`)
+to soft-filter (prioritize, never hide) the teacher pool offered when assigning a subject
+teacher to a class arm.
+```sql
+CREATE TABLE teacher_subject_qualifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
+    teacher_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    subject_id UUID NOT NULL REFERENCES subjects(id) ON DELETE RESTRICT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ NULL
+);
+CREATE UNIQUE INDEX uq_active_teacher_subject_qualification ON teacher_subject_qualifications(teacher_id, subject_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_teacher_subject_qualifications_teacher ON teacher_subject_qualifications(teacher_id);
+CREATE INDEX idx_teacher_subject_qualifications_subject ON teacher_subject_qualifications(subject_id);
+```
+
 ##### `assessment_definitions`, `assessment_scores` & `score_sheet_statuses`
 ```sql
 CREATE TABLE assessment_definitions (
@@ -1195,6 +1217,7 @@ This catalog is authoritative. `BACKEND_DEV_PLAN.md`, module routers, tests, and
 | **Identity** | `POST` | `/api/v1/identity/users/{user_id}/permissions` | Delegate a scoped permission | `SCHOOL_ADMIN` |
 | **Identity** | `DELETE` | `/api/v1/identity/users/{user_id}/permissions/{grant_id}` | Revoke a delegated permission | `SCHOOL_ADMIN` |
 | **Identity** | `POST` | `/api/v1/identity/users/{user_id}/deactivate` | Deactivate a staff account | `SCHOOL_ADMIN` |
+| **Identity** | `GET`, `PUT` | `/api/v1/identity/users/{user_id}/subject-qualifications` | Read or set the subjects a teacher is tagged as taking (level/class-independent) | `SCHOOL_ADMIN` |
 | **Structure** | `GET`, `POST` | `/api/v1/structure/sessions` | List or create academic sessions | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Structure** | `GET`, `PATCH`, `DELETE` | `/api/v1/structure/sessions/{session_id}` | Read, update, or retire a session | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Structure** | `GET`, `POST` | `/api/v1/structure/sessions/{session_id}/terms` | List or create terms for a session | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
@@ -1224,6 +1247,7 @@ This catalog is authoritative. `BACKEND_DEV_PLAN.md`, module routers, tests, and
 | **Enrollments** | `DELETE` | `/api/v1/enrollments/{enrollment_id}/subject-registrations/{registration_id}` | Deactivate a student's subject registration | `ACADEMIC_OFFICER`, `TEACHER` (Form Master) |
 | **Subjects** | `GET`, `POST` | `/api/v1/subjects` | List or create subjects | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Subjects** | `GET`, `PATCH`, `DELETE` | `/api/v1/subjects/{subject_id}` | Read, update, or retire a subject | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
+| **Subjects** | `GET` | `/api/v1/subjects/{subject_id}/qualified-teachers` | List teachers tagged as taking this subject (suggested pool for teacher assignment) | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Subjects** | `GET`, `POST` | `/api/v1/subjects/offerings` | List or create session offerings | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Subjects** | `GET`, `PATCH`, `DELETE` | `/api/v1/subjects/offerings/{offering_id}` | Read, update, or retire an offering | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |
 | **Subjects** | `GET`, `POST` | `/api/v1/class-subjects` | List or link offerings to class groups | `SCHOOL_ADMIN`, `ACADEMIC_OFFICER` |

@@ -21,7 +21,7 @@ from app.modules.academic_structure.models import (
 from app.modules.assessments.models import AssessmentDefinition, AssessmentScore, ScoreSheetStatus
 from app.modules.audit.services import AuditContext, record_audit_log
 from app.modules.common.schemas import PageMeta
-from app.modules.computation import engine
+from app.modules.computation import broadsheet_export, engine
 from app.modules.computation.models import SubjectResult, TermReportCard
 from app.modules.computation.schemas import (
     BroadsheetResponse,
@@ -32,7 +32,7 @@ from app.modules.computation.schemas import (
     StudentBroadsheetRow,
     SubjectComputationResponse,
 )
-from app.modules.identity.models import SchoolConfiguration, User
+from app.modules.identity.models import School, SchoolConfiguration, User
 from app.modules.students.models import Student, StudentEnrollment
 from app.modules.subjects.models import (
     ClassSubject,
@@ -335,6 +335,31 @@ async def _get_existing_report_cards(
     return {card.student_enrollment_id: card for card in (await db.execute(stmt)).scalars().all()}
 
 
+async def _load_student_categories(
+    db: AsyncSession,
+    school_id: UUID,
+    context: list[tuple[ClassSubject, ClassGroup, Subject]],
+    student_metadata: dict[str, tuple[Student, StudentEnrollment]],
+) -> dict[str, str]:
+    level_by_cg_id = {
+        class_group.id: class_group.academic_level_id for _, class_group, _ in context
+    }
+    level_ids = set(level_by_cg_id.values())
+    if not level_ids:
+        return {}
+    levels_stmt = select(AcademicLevel.id, AcademicLevel.category).where(
+        AcademicLevel.school_id == school_id,
+        AcademicLevel.id.in_(level_ids),
+    )
+    category_by_level_id = {row.id: row.category for row in (await db.execute(levels_stmt)).all()}
+    return {
+        student_id: category_by_level_id[level_by_cg_id[enrollment.class_group_id]]
+        for student_id, (_, enrollment) in student_metadata.items()
+        if enrollment.class_group_id in level_by_cg_id
+        and level_by_cg_id[enrollment.class_group_id] in category_by_level_id
+    }
+
+
 async def _apply_annual_data(
     db: AsyncSession,
     school_id: UUID,
@@ -346,6 +371,7 @@ async def _apply_annual_data(
     *,
     student_dept_cohorts: dict[str, str],
     student_level_cohorts: dict[str, str],
+    student_categories: dict[str, str] | None = None,
 ) -> None:
     if TERM_KEYS.get(term.term_order) != "third_term":
         return
@@ -402,7 +428,11 @@ async def _apply_annual_data(
                 result.third_term_score = scores["third_term"]
                 result.cumulative_annual_score = annual_score
                 result.cumulative_annual_grade = engine.grade_for_score(
-                    annual_score, config.grading_scale_schema
+                    annual_score,
+                    engine.resolve_grading_scale(
+                        config.grading_scale_schema,
+                        student_categories.get(student_id) if student_categories else None,
+                    ),
                 )[0]
 
     prior_overall = await _prior_overall_percentages(db, school_id, prior_terms, calculation)
@@ -451,7 +481,11 @@ async def _apply_annual_data(
         card.cumulative_class_position = positions[student_id]
         card.cumulative_level_position = level_positions[student_id]
         card.promotion_decision = engine.promotion_decision(
-            percentage, config.annual_results_schema
+            percentage,
+            engine.resolve_annual_results_schema(
+                config.annual_results_schema,
+                student_categories.get(student_id) if student_categories else None,
+            ),
         )
 
 
@@ -508,11 +542,13 @@ async def calculate_term(
         raise ValidationException(
             "There are no registered students available to calculate for this term."
         )
+    student_categories = await _load_student_categories(db, school_id, context, student_metadata)
     calculation = engine.compute_term_results(
         students_inputs,
         config.grading_scale_schema,
         student_dept_cohorts=student_dept_cohorts,
         student_level_cohorts=student_level_cohorts,
+        student_categories=student_categories,
     )
     snapshot = build_snapshot(config)
     subject_results = await _get_existing_subject_results(db, school_id, term.id)
@@ -582,6 +618,7 @@ async def calculate_term(
         config,
         student_dept_cohorts=student_dept_cohorts,
         student_level_cohorts=student_level_cohorts,
+        student_categories=student_categories,
     )
     record_audit_log(
         db,
@@ -693,11 +730,13 @@ async def get_broadsheet(
             meta=PageMeta(page=page, page_size=page_size, total=0, total_pages=0),
         )
 
+    student_categories = await _load_student_categories(db, school_id, context, student_metadata)
     calculation = engine.compute_term_results(
         students_inputs,
         config.grading_scale_schema,
         student_dept_cohorts=student_dept_cohorts,
         student_level_cohorts=student_level_cohorts,
+        student_categories=student_categories,
         allow_pending=True,
     )
     scoped_enrollment_ids = [UUID(sid) for sid in calculation.students]
@@ -919,11 +958,13 @@ async def get_filtered_broadsheet(
             meta=PageMeta(page=page, page_size=page_size, total=0, total_pages=0),
         )
 
+    student_categories = await _load_student_categories(db, school_id, context, student_metadata)
     calculation = engine.compute_term_results(
         students_inputs,
         config.grading_scale_schema,
         student_dept_cohorts=student_dept_cohorts,
         student_level_cohorts=student_level_cohorts,
+        student_categories=student_categories,
         allow_pending=True,
     )
     scoped_enrollment_ids = [UUID(sid) for sid in calculation.students]
@@ -1058,3 +1099,32 @@ async def get_filtered_broadsheet(
 
 def promotion_decision_values() -> list[str]:
     return [decision.value for decision in PromotionDecision]
+
+
+async def export_broadsheet(
+    db: AsyncSession,
+    school_id: UUID,
+    *,
+    academic_term_id: UUID,
+    class_group_id: UUID | None,
+    academic_level_id: UUID | None,
+    department_id: UUID | None,
+    current_user: User,
+) -> tuple[bytes, str]:
+    broadsheet = await get_filtered_broadsheet(
+        db,
+        school_id,
+        academic_term_id=academic_term_id,
+        class_group_id=class_group_id,
+        academic_level_id=academic_level_id,
+        department_id=department_id,
+        current_user=current_user,
+        page=1,
+        page_size=2000,
+    )
+    school = (await db.execute(select(School).where(School.id == school_id))).scalar_one_or_none()
+    school_name = school.name if school else "School"
+    xlsx_bytes = broadsheet_export.build_broadsheet_xlsx(school_name, broadsheet)
+    safe_scope = broadsheet.class_group_name.replace(" ", "_").replace("/", "-")
+    safe_term = broadsheet.academic_term_name.replace(" ", "_")
+    return xlsx_bytes, f"BROADSHEET_{safe_scope}_{safe_term}.xlsx"

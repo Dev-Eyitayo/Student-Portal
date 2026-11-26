@@ -1,6 +1,8 @@
+from io import BytesIO
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_authenticated_user, get_tenant_db
@@ -363,4 +365,33 @@ async def unlock_score_sheet(
     )
     return SuccessResponse[ScoreSheetStatusResponse](
         data=ScoreSheetStatusResponse.model_validate(sheet_status)
+    )
+
+
+@router.get("/mark-book/export")
+async def export_mark_book(
+    class_subject_id: UUID | None = Query(None),
+    all_arms: bool = Query(False),
+    class_group_id: UUID | None = Query(None),
+    academic_session_id: UUID | None = Query(None),
+    subject_id: UUID | None = Query(None),
+    academic_level_id: UUID | None = Query(None),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    file_bytes, filename, media_type = await services.export_mark_book(
+        db,
+        _school_id(current_user),
+        current_user,
+        class_subject_id=class_subject_id,
+        all_arms=all_arms,
+        class_group_id=class_group_id,
+        academic_session_id=academic_session_id,
+        subject_id=subject_id,
+        academic_level_id=academic_level_id,
+    )
+    return StreamingResponse(
+        BytesIO(file_bytes),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

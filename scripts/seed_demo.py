@@ -41,9 +41,9 @@ from app.modules.identity.models import (
     User,
     UserPermissionGrant,
 )
-from app.modules.identity.schemas import SchoolType
+from app.modules.identity.schemas import SchoolSector, SchoolType
 from app.modules.identity.seed import seed_system_permissions
-from app.modules.identity.services import SCHOOL_DEFAULTS
+from app.modules.identity.services import get_school_defaults
 from app.modules.students.models import (
     AttendanceRecord,
     AttendanceSummary,
@@ -271,12 +271,16 @@ async def _get_or_create_school(db: AsyncSession) -> School:
         city="Oyo",
         address="Olivet Heights, Oyo, Oyo State",
         school_type="SECONDARY",
+        # PUBLIC so SchoolConfiguration below picks up the TESCOM assessment
+        # weight schema (ATTENDANCE/NOTEBOOK/OPEN_DAY/TEXTBOOK/SB_TEST/
+        # TB_ASSESS + EXAM) that the Mark Book export is built against.
+        school_sector=SchoolSector.PUBLIC.value,
         is_active=True,
     )
     db.add(school)
     await db.flush()
 
-    defaults = SCHOOL_DEFAULTS[SchoolType.SECONDARY]
+    defaults = get_school_defaults(SchoolType.SECONDARY, SchoolSector.PUBLIC)
     db.add(
         SchoolConfiguration(
             school_id=school.id,

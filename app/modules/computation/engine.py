@@ -178,20 +178,45 @@ def compute_subject(
     )
 
 
+def resolve_grading_scale(
+    grading_scale_schema: Mapping[str, Any], category: str | None = None
+) -> Mapping[str, Any]:
+    if category:
+        by_category = grading_scale_schema.get("by_category")
+        if isinstance(by_category, Mapping):
+            category_scale = by_category.get(category)
+            if isinstance(category_scale, Mapping) and category_scale.get("grades"):
+                return category_scale
+    return grading_scale_schema
+
+
+def resolve_annual_results_schema(
+    annual_results_schema: Mapping[str, Any], category: str | None = None
+) -> Mapping[str, Any]:
+    if category:
+        by_category = annual_results_schema.get("promotion_thresholds_by_category")
+        if isinstance(by_category, Mapping) and category in by_category:
+            return {**annual_results_schema, "promotion_thresholds": by_category[category]}
+    return annual_results_schema
+
+
 def compute_term_results(
     students: Mapping[str, Sequence[SubjectInput]],
     grading_scale_schema: Mapping[str, Any],
     *,
     student_dept_cohorts: Mapping[str, str] | None = None,
     student_level_cohorts: Mapping[str, str] | None = None,
+    student_categories: Mapping[str, str] | None = None,
     allow_pending: bool = False,
 ) -> TermComputation:
     computed: dict[str, dict[str, SubjectComputation]] = {}
     rank_key_by_cs_id: dict[str, str] = {}
     for student_id, subjects in students.items():
+        category = student_categories.get(student_id) if student_categories else None
+        student_scale = resolve_grading_scale(grading_scale_schema, category)
         computed[student_id] = {
             subject.class_subject_id: compute_subject(
-                subject, grading_scale_schema, allow_pending=allow_pending
+                subject, student_scale, allow_pending=allow_pending
             )
             for subject in subjects
         }

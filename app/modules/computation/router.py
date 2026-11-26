@@ -1,6 +1,8 @@
+from io import BytesIO
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import (
@@ -67,6 +69,31 @@ async def get_filtered_broadsheet(
         page_size=page_size,
     )
     return SuccessResponse[BroadsheetResponse](data=data)
+
+
+@router.get("/broadsheet/export")
+async def export_broadsheet(
+    academic_term_id: UUID = Query(...),
+    class_group_id: UUID | None = Query(None),
+    academic_level_id: UUID | None = Query(None),
+    department_id: UUID | None = Query(None),
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    xlsx_bytes, filename = await services.export_broadsheet(
+        db,
+        require_school_id(current_user),
+        academic_term_id=academic_term_id,
+        class_group_id=class_group_id,
+        academic_level_id=academic_level_id,
+        department_id=department_id,
+        current_user=current_user,
+    )
+    return StreamingResponse(
+        BytesIO(xlsx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get(

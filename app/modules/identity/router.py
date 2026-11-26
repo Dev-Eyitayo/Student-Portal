@@ -85,6 +85,11 @@ from app.modules.identity.tasks import (
     STAGING_TTL_SECONDS,
     process_staff_bulk_import,
 )
+from app.modules.subjects import services as subjects_services
+from app.modules.subjects.schemas import (
+    TeacherSubjectQualificationsResponse,
+    TeacherSubjectQualificationsUpdateRequest,
+)
 
 router = APIRouter(prefix="/identity", tags=["Identity & Access Management"])
 
@@ -474,6 +479,11 @@ async def _build_me_response(db: AsyncSession, current_user: User) -> MeResponse
         if current_user.school and hasattr(current_user.school.school_type, "value")
         else (current_user.school.school_type if current_user.school else None)
     )
+    school_sector = (
+        current_user.school.school_sector.value
+        if current_user.school and hasattr(current_user.school.school_sector, "value")
+        else (current_user.school.school_sector if current_user.school else None)
+    )
     assigned_class_groups: list[AssignedClassGroupSummary] = []
     if current_user.school_id is not None:
         groups = await services.get_assigned_class_groups(
@@ -488,6 +498,7 @@ async def _build_me_response(db: AsyncSession, current_user: User) -> MeResponse
         school_id=current_user.school_id,
         school_name=school_name,
         school_type=school_type,
+        school_sector=school_sector,
         email=current_user.email,
         first_name=current_user.first_name,
         last_name=current_user.last_name,
@@ -933,6 +944,44 @@ async def list_user_permission_grants(
     return SuccessResponse[list[UserPermissionGrantDetailResponse]](
         data=[UserPermissionGrantDetailResponse.model_validate(g) for g in grants]
     )
+
+
+@router.get(
+    "/users/{user_id}/subject-qualifications",
+    response_model=SuccessResponse[TeacherSubjectQualificationsResponse],
+    dependencies=[Depends(require_permission("users:manage"))],
+)
+async def get_user_subject_qualifications(
+    user_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    result = await subjects_services.get_teacher_subject_qualifications(
+        db, require_school_id(current_user), user_id
+    )
+    return SuccessResponse[TeacherSubjectQualificationsResponse](data=result)
+
+
+@router.put(
+    "/users/{user_id}/subject-qualifications",
+    response_model=SuccessResponse[TeacherSubjectQualificationsResponse],
+    dependencies=[Depends(require_permission("users:manage"))],
+)
+async def set_user_subject_qualifications(
+    user_id: UUID,
+    req: TeacherSubjectQualificationsUpdateRequest,
+    request: Request,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    result = await subjects_services.set_teacher_subject_qualifications(
+        db,
+        require_school_id(current_user),
+        user_id,
+        req.subject_ids,
+        build_audit_context(request, current_user),
+    )
+    return SuccessResponse[TeacherSubjectQualificationsResponse](data=result)
 
 
 @router.get(

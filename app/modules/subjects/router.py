@@ -16,6 +16,7 @@ from app.modules.subjects.schemas import (
     OfferingCreateRequest,
     OfferingResponse,
     OfferingUpdateRequest,
+    QualifiedTeacherResponse,
     SubjectCreateRequest,
     SubjectRegistrationBulkCreateRequest,
     SubjectRegistrationBulkResponse,
@@ -241,6 +242,22 @@ async def get_subject(
 ):
     subject = await services.get_subject(db, _school_id(current_user), subject_id)
     return SuccessResponse[SubjectResponse](data=SubjectResponse.model_validate(subject))
+
+
+@router.get(
+    "/{subject_id}/qualified-teachers",
+    response_model=SuccessResponse[list[QualifiedTeacherResponse]],
+    dependencies=[Depends(require_permission("subjects:manage"))],
+)
+async def get_qualified_teachers(
+    subject_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    teachers = await services.get_qualified_teachers_for_subject(
+        db, _school_id(current_user), subject_id, current_user
+    )
+    return SuccessResponse[list[QualifiedTeacherResponse]](data=teachers)
 
 
 @router.patch(

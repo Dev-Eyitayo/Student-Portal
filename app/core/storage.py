@@ -16,6 +16,17 @@ ALLOWED_BRANDING_CONTENT_TYPES = {
 }
 
 
+def detect_image_format(content: bytes) -> tuple[str, str] | None:
+    """Detect PNG, JPEG, or WebP from binary magic bytes (never trust filename/MIME alone)."""
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", ".png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", ".jpg"
+    if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+    return None
+
+
 class StorageService:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -28,8 +39,8 @@ class StorageService:
         content_type: str,
         content: bytes,
     ) -> str:
-        extension = ALLOWED_BRANDING_CONTENT_TYPES.get(content_type)
-        if extension is None:
+        normalized_mime = "image/jpeg" if content_type == "image/jpg" else content_type.lower()
+        if normalized_mime not in ALLOWED_BRANDING_CONTENT_TYPES:
             raise ValidationException(
                 "Please upload a PNG, JPEG, or WebP image. Other image formats are not supported yet."
             )
@@ -40,6 +51,16 @@ class StorageService:
         if len(content) > self.settings.BRANDING_UPLOAD_MAX_BYTES:
             raise ValidationException(
                 "This image is too large. Please upload an image smaller than 2 MB."
+            )
+        detected = detect_image_format(content)
+        if detected is None:
+            raise ValidationException(
+                "The uploaded file does not appear to be a valid PNG, JPEG, or WebP image."
+            )
+        detected_mime, extension = detected
+        if detected_mime != normalized_mime:
+            raise ValidationException(
+                "The file's content does not match its declared image type. Please upload a valid PNG, JPEG, or WebP image."
             )
 
         safe_slug = "".join(char for char in school_slug.lower() if char.isalnum() or char in "-_")
