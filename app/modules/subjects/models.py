@@ -205,3 +205,38 @@ class TeacherAssignment(Base, TenantMixin, TimestampMixin):
     class_subject: Mapped["ClassSubject"] = relationship(
         "ClassSubject", back_populates="teacher_assignments"
     )
+
+
+class TeacherSubjectQualification(Base, TenantMixin, TimestampMixin):
+    """A level/class-independent tag: 'this teacher takes this subject.'
+
+    Distinct from TeacherAssignment (which ties a teacher to one specific
+    ClassSubject). Set once per teacher from the Staff page, then used to
+    soft-filter (prioritize, never hide) the teacher pool shown when assigning
+    a subject teacher to a class arm.
+    """
+
+    __tablename__ = "teacher_subject_qualifications"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=generate_uuid7)
+    teacher_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    subject_id: Mapped[UUID] = mapped_column(
+        ForeignKey("subjects.id", ondelete="RESTRICT"), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_active_teacher_subject_qualification",
+            "teacher_id",
+            "subject_id",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        Index("idx_teacher_subject_qualifications_teacher", "teacher_id"),
+        Index("idx_teacher_subject_qualifications_subject", "subject_id"),
+    )
+
+    teacher: Mapped["User"] = relationship("User", foreign_keys=[teacher_id])
+    subject: Mapped["Subject"] = relationship("Subject")

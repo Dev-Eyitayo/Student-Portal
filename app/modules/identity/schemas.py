@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
@@ -35,6 +35,11 @@ class SchoolType(StrEnum):
     PRIMARY = "PRIMARY"
     SECONDARY = "SECONDARY"
     COMBINED = "COMBINED"
+
+
+class SchoolSector(StrEnum):
+    PUBLIC = "PUBLIC"
+    PRIVATE = "PRIVATE"
 
 
 class TokenResponse(BaseModel):
@@ -105,6 +110,7 @@ class MeResponse(BaseModel):
     school_id: UUID | None = None
     school_name: str | None = None
     school_type: str | None = None
+    school_sector: str | None = None
     email: EmailStr
     first_name: str
     last_name: str
@@ -209,6 +215,7 @@ class SchoolCreateRequest(BaseModel):
     admin_last_name: str = Field(..., min_length=1, max_length=64)
     admin_password: str = Field(..., min_length=8)
     school_type: SchoolType = SchoolType.SECONDARY
+    school_sector: SchoolSector = SchoolSector.PRIVATE
 
 
 class SchoolResponse(BaseModel):
@@ -223,6 +230,7 @@ class SchoolResponse(BaseModel):
     city: str
     address: str
     school_type: SchoolType
+    school_sector: SchoolSector = SchoolSector.PRIVATE
     is_active: bool
     created_at: datetime
 
@@ -252,26 +260,43 @@ class GradingScaleEntry(BaseModel):
         return self
 
 
-class GradingScaleSchema(BaseModel):
+LevelCategory = Literal["PRIMARY", "JUNIOR_SECONDARY", "SENIOR_SECONDARY"]
+
+
+def _validate_grade_coverage(grades: list[GradingScaleEntry]) -> None:
+    ordered = sorted(grades, key=lambda grade: grade.min_score)
+    if ordered[0].min_score != Decimal("0"):
+        raise ValueError("The grading scale must start at 0.")
+    if ordered[-1].max_score != Decimal("100"):
+        raise ValueError("The grading scale must end at 100.")
+    for index, grade in enumerate(ordered):
+        if grade.max_score < grade.min_score:
+            raise ValueError("The maximum score cannot be lower than the minimum score.")
+        if index == 0:
+            continue
+        previous = ordered[index - 1]
+        if grade.min_score <= previous.max_score:
+            raise ValueError("Grading scale ranges cannot overlap.")
+        if grade.min_score - previous.max_score != Decimal("0.01"):
+            raise ValueError("Grading scale ranges cannot have gaps between them.")
+
+
+class CategoryGradingScale(BaseModel):
     grades: list[GradingScaleEntry] = Field(..., min_length=1)
 
     @model_validator(mode="after")
+    def validate_grade_coverage(self) -> "CategoryGradingScale":
+        _validate_grade_coverage(self.grades)
+        return self
+
+
+class GradingScaleSchema(BaseModel):
+    grades: list[GradingScaleEntry] = Field(..., min_length=1)
+    by_category: dict[LevelCategory, CategoryGradingScale] | None = None
+
+    @model_validator(mode="after")
     def validate_grade_coverage(self) -> "GradingScaleSchema":
-        ordered = sorted(self.grades, key=lambda grade: grade.min_score)
-        if ordered[0].min_score != Decimal("0"):
-            raise ValueError("The grading scale must start at 0.")
-        if ordered[-1].max_score != Decimal("100"):
-            raise ValueError("The grading scale must end at 100.")
-        for index, grade in enumerate(ordered):
-            if grade.max_score < grade.min_score:
-                raise ValueError("The maximum score cannot be lower than the minimum score.")
-            if index == 0:
-                continue
-            previous = ordered[index - 1]
-            if grade.min_score <= previous.max_score:
-                raise ValueError("Grading scale ranges cannot overlap.")
-            if grade.min_score - previous.max_score != Decimal("0.01"):
-                raise ValueError("Grading scale ranges cannot have gaps between them.")
+        _validate_grade_coverage(self.grades)
         return self
 
 
@@ -294,8 +319,8 @@ class AssessmentWeightSchema(BaseModel):
     def validate_totals(self) -> "AssessmentWeightSchema":
         max_score_total = sum(item.max_score for item in self.components.values())
         weight_total = sum(item.weight_percentage for item in self.components.values())
-        if max_score_total != Decimal("100"):
-            raise ValueError("Assessment maximum scores must add up to 100.")
+        if max_score_total <= Decimal("0"):
+            raise ValueError("Assessment maximum scores must be greater than zero.")
         if weight_total != Decimal("100"):
             raise ValueError("Assessment weight percentages must add up to 100.")
         return self
@@ -335,6 +360,7 @@ class AnnualResultsConfig(BaseModel):
     version: int = Field(..., ge=1)
     term_weights: dict[str, int]
     promotion_thresholds: PromotionThresholdSchema
+    promotion_thresholds_by_category: dict[LevelCategory, PromotionThresholdSchema] | None = None
 
     @model_validator(mode="after")
     def validate_term_weights(self) -> "AnnualResultsConfig":
@@ -391,6 +417,7 @@ class SchoolProfileUpdateRequest(BaseModel):
     address: str | None = Field(None, min_length=5)
     country_code: str | None = Field(None, min_length=2, max_length=2)
     school_type: SchoolType | None = None
+    school_sector: SchoolSector | None = None
 
 
 class SchoolBrandingPaths(BaseModel):

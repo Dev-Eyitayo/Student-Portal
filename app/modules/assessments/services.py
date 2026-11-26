@@ -1,5 +1,7 @@
+import zipfile
 from datetime import UTC, datetime
 from decimal import Decimal
+from io import BytesIO
 from typing import Any
 from uuid import UUID
 
@@ -20,7 +22,13 @@ from app.core.permissions import (
     require_scoped_permission,
     user_has_permission,
 )
-from app.modules.academic_structure.models import AcademicLevel, AcademicTerm, ClassGroup
+from app.modules.academic_structure.models import (
+    AcademicLevel,
+    AcademicSession,
+    AcademicTerm,
+    ClassGroup,
+)
+from app.modules.assessments import mark_book
 from app.modules.assessments.models import AssessmentDefinition, AssessmentScore, ScoreSheetStatus
 from app.modules.assessments.schemas import (
     AssessmentDefinitionBulkActionResponse,
@@ -39,13 +47,15 @@ from app.modules.assessments.schemas import (
 from app.modules.audit.services import AuditContext, record_audit_log
 from app.modules.common.pagination import paginate
 from app.modules.common.schemas import PageMeta
-from app.modules.identity.models import SchoolConfiguration, User
+from app.modules.computation import engine
+from app.modules.identity.models import School, SchoolConfiguration, User
 from app.modules.students.models import Student, StudentEnrollment
 from app.modules.subjects.models import (
     ClassSubject,
     StudentSubjectRegistration,
     Subject,
     SubjectOffering,
+    TeacherAssignment,
 )
 
 ASSESSMENT_TYPE_BY_CODE = {
@@ -1521,3 +1531,301 @@ async def list_score_sheets_overview(
     paged = assembled[offset : offset + page_size]
     meta = PageMeta.build(page=page, page_size=page_size, total=total)
     return paged, meta, summary
+
+
+async def export_mark_book(
+    db: AsyncSession,
+    school_id: UUID,
+    current_user: User,
+    *,
+    class_subject_id: UUID | None = None,
+    all_arms: bool = False,
+    class_group_id: UUID | None = None,
+    academic_session_id: UUID | None = None,
+    subject_id: UUID | None = None,
+    academic_level_id: UUID | None = None,
+) -> tuple[bytes, str, str]:
+    XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    ZIP_MIME = "application/zip"
+
+    if (
+        class_subject_id is None
+        and class_group_id is None
+        and (academic_session_id is None or (subject_id is None and academic_level_id is None))
+    ):
+        raise ValidationException(
+            "Provide a class subject, a class group, or an academic session with a subject or level to export the mark book."
+        )
+
+    school = (await db.execute(select(School).where(School.id == school_id))).scalar_one_or_none()
+    if not school:
+        raise ResourceNotFoundException("school", school_id)
+
+    config = (
+        await db.execute(
+            select(SchoolConfiguration).where(SchoolConfiguration.school_id == school_id)
+        )
+    ).scalar_one_or_none()
+    grading_schema = config.grading_scale_schema if config else {"grades": []}
+
+    # Expand class_subject_id + all_arms=true into (academic_session_id, academic_level_id, subject_id)
+    if class_subject_id is not None and all_arms:
+        anchor = (
+            await db.execute(
+                select(
+                    ClassGroup.academic_session_id,
+                    ClassGroup.academic_level_id,
+                    SubjectOffering.subject_id,
+                )
+                .select_from(ClassSubject)
+                .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+                .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+                .where(
+                    ClassSubject.id == class_subject_id,
+                    ClassSubject.school_id == school_id,
+                    ClassSubject.deleted_at.is_(None),
+                )
+            )
+        ).first()
+        if not anchor:
+            raise ResourceNotFoundException("class subject", class_subject_id)
+        academic_session_id, academic_level_id, subject_id = anchor
+        class_subject_id = None
+
+    cs_stmt = (
+        select(ClassSubject, ClassGroup, AcademicLevel, Subject, SubjectOffering)
+        .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+        .join(AcademicLevel, AcademicLevel.id == ClassGroup.academic_level_id)
+        .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+        .join(Subject, Subject.id == SubjectOffering.subject_id)
+        .where(
+            ClassSubject.school_id == school_id,
+            ClassSubject.deleted_at.is_(None),
+            ClassGroup.deleted_at.is_(None),
+        )
+        .order_by(AcademicLevel.level_order, Subject.name, ClassGroup.display_name)
+    )
+    if class_subject_id is not None:
+        cs_stmt = cs_stmt.where(ClassSubject.id == class_subject_id)
+    elif class_group_id is not None:
+        cs_stmt = cs_stmt.where(ClassGroup.id == class_group_id)
+    else:
+        cs_stmt = cs_stmt.where(ClassGroup.academic_session_id == academic_session_id)
+        if subject_id is not None:
+            cs_stmt = cs_stmt.where(SubjectOffering.subject_id == subject_id)
+        if academic_level_id is not None:
+            cs_stmt = cs_stmt.where(ClassGroup.academic_level_id == academic_level_id)
+
+    cs_rows = (await db.execute(cs_stmt)).all()
+    if not cs_rows:
+        raise ResourceNotFoundException(
+            "class subject",
+            class_subject_id or class_group_id or subject_id or academic_level_id or school_id,
+        )
+
+    # Filter or authorize access per class subject (allowing assigned Form Master on class_group_id)
+    authorized_rows = []
+    for row in cs_rows:
+        cs, cg, _, _, _ = row
+        if current_user.role == "TEACHER" and cg.class_teacher_id == current_user.id:
+            authorized_rows.append(row)
+            continue
+        try:
+            await _check_class_subject_access(db, school_id, cs, current_user, "scores:enter")
+            authorized_rows.append(row)
+        except InsufficientPermissionException:
+            # For multi-arm exports by a teacher, include only the arms they teach
+            if (
+                current_user.role == "TEACHER"
+                and class_subject_id is None
+                and class_group_id is None
+            ):
+                continue
+            raise
+
+    if not authorized_rows:
+        raise InsufficientPermissionException(permission_code="scores:enter")
+    cs_rows = authorized_rows
+
+    session_id = cs_rows[0][1].academic_session_id
+    session = (
+        await db.execute(
+            select(AcademicSession).where(
+                AcademicSession.id == session_id, AcademicSession.school_id == school_id
+            )
+        )
+    ).scalar_one()
+
+    terms = (
+        (
+            await db.execute(
+                select(AcademicTerm)
+                .where(
+                    AcademicTerm.school_id == school_id,
+                    AcademicTerm.academic_session_id == session_id,
+                    AcademicTerm.deleted_at.is_(None),
+                )
+                .order_by(AcademicTerm.term_order)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    term_order_by_id = {term.id: term.term_order for term in terms}
+
+    cs_ids = [cs.id for cs, _, _, _, _ in cs_rows]
+
+    teacher_rows = (
+        await db.execute(
+            select(TeacherAssignment.class_subject_id, User.first_name, User.last_name)
+            .join(User, User.id == TeacherAssignment.teacher_id)
+            .where(
+                TeacherAssignment.school_id == school_id,
+                TeacherAssignment.class_subject_id.in_(cs_ids),
+                TeacherAssignment.is_active.is_(True),
+                TeacherAssignment.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    teachers_by_cs: dict[UUID, list[str]] = {}
+    for cs_id_val, fname, lname in teacher_rows:
+        teachers_by_cs.setdefault(cs_id_val, []).append(f"{fname} {lname}".strip())
+
+    defs_rows = (
+        (
+            await db.execute(
+                select(AssessmentDefinition).where(
+                    AssessmentDefinition.school_id == school_id,
+                    AssessmentDefinition.class_subject_id.in_(cs_ids),
+                    AssessmentDefinition.academic_term_id.in_(list(term_order_by_id.keys())),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    defs_by_id = {d.id: d for d in defs_rows}
+
+    reg_rows = (
+        await db.execute(
+            select(
+                StudentSubjectRegistration.class_subject_id,
+                StudentEnrollment.id,
+                Student.first_name,
+                Student.last_name,
+            )
+            .join(
+                StudentEnrollment,
+                StudentEnrollment.id == StudentSubjectRegistration.student_enrollment_id,
+            )
+            .join(Student, Student.id == StudentEnrollment.student_id)
+            .where(
+                StudentSubjectRegistration.school_id == school_id,
+                StudentSubjectRegistration.class_subject_id.in_(cs_ids),
+                StudentSubjectRegistration.is_active.is_(True),
+                StudentEnrollment.deleted_at.is_(None),
+                Student.deleted_at.is_(None),
+            )
+            .order_by(Student.last_name, Student.first_name)
+        )
+    ).all()
+
+    enrollment_ids = list({row[1] for row in reg_rows})
+    scores_by_key: dict[tuple[UUID, UUID], Decimal | None] = {}
+    if enrollment_ids and defs_by_id:
+        score_rows = (
+            (
+                await db.execute(
+                    select(AssessmentScore).where(
+                        AssessmentScore.school_id == school_id,
+                        AssessmentScore.student_enrollment_id.in_(enrollment_ids),
+                        AssessmentScore.assessment_definition_id.in_(list(defs_by_id.keys())),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for sc in score_rows:
+            if sc.score_status == "SCORED" and sc.raw_score is not None:
+                scores_by_key[(sc.assessment_definition_id, sc.student_enrollment_id)] = (
+                    sc.raw_score
+                )
+
+    students_by_cs: dict[UUID, list[tuple[UUID, str]]] = {}
+    for cs_id_val, enr_id, fname, lname in reg_rows:
+        students_by_cs.setdefault(cs_id_val, []).append((enr_id, f"{lname} {fname}".strip()))
+
+    defs_by_cs: dict[UUID, list[AssessmentDefinition]] = {}
+    for defn in defs_rows:
+        defs_by_cs.setdefault(defn.class_subject_id, []).append(defn)
+
+    safe_session = session.name.replace("/", "-")
+
+    def _build_sheet(row_tuple: tuple[Any, ...], sheet_title: str) -> mark_book.MarkBookSheetData:
+        cs, cg, level, subject, _ = row_tuple
+        resolved_scale = engine.resolve_grading_scale(grading_schema, level.category)
+        grades_list = (
+            list(resolved_scale.get("grades", [])) if isinstance(resolved_scale, dict) else []
+        )
+        teacher_name = ", ".join(teachers_by_cs.get(cs.id, [])) or "UNASSIGNED"
+        cs_defs = defs_by_cs.get(cs.id, [])
+
+        student_rows: list[mark_book.MarkBookStudentRow] = []
+        for enr_id, full_name in students_by_cs.get(cs.id, []):
+            score_map: dict[tuple[int, str], Decimal | None] = {}
+            for defn in cs_defs:
+                t_order = term_order_by_id.get(defn.academic_term_id)
+                if t_order in (1, 2, 3):
+                    raw = scores_by_key.get((defn.id, enr_id))
+                    if raw is not None:
+                        score_map[(t_order, defn.code.upper())] = raw
+            student_rows.append(mark_book.MarkBookStudentRow(full_name=full_name, scores=score_map))
+
+        return mark_book.MarkBookSheetData(
+            sheet_title=sheet_title,
+            school_name=school.name,
+            session_name=session.name,
+            subject_name=subject.name,
+            class_name=cg.display_name,
+            teacher_name=teacher_name,
+            grading_grades=grades_list,
+            students=student_rows,
+        )
+
+    # Case 1: Level-wide export without subject_id -> ZIP of multi-arm .xlsx per subject
+    if class_subject_id is None and class_group_id is None and subject_id is None:
+        by_subject: dict[UUID, list[tuple[Any, ...]]] = {}
+        for row in cs_rows:
+            by_subject.setdefault(row[3].id, []).append(row)
+
+        zip_buf = BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for subj_rows in by_subject.values():
+                subj_code = subj_rows[0][3].code.replace(" ", "_")
+                subj_sheets = [_build_sheet(r, r[1].display_name) for r in subj_rows]
+                zf.writestr(
+                    f"MARK_BOOK_{subj_code}_{safe_session}.xlsx",
+                    mark_book.build_mark_book_xlsx(subj_sheets),
+                )
+        level_code = cs_rows[0][2].code.replace(" ", "_")
+        return zip_buf.getvalue(), f"MARK_BOOKS_{level_code}_{safe_session}.zip", ZIP_MIME
+
+    # Case 2: Class arm export (class_group_id) -> 1 workbook with 1 tab per subject
+    if class_group_id is not None:
+        sheets = [_build_sheet(r, f"{r[3].code} - {r[3].name}") for r in cs_rows]
+        safe_cg = cs_rows[0][1].display_name.replace(" ", "_")
+        return (
+            mark_book.build_mark_book_xlsx(sheets),
+            f"MARK_BOOK_{safe_cg}_{safe_session}.xlsx",
+            XLSX_MIME,
+        )
+
+    # Case 3: Single class_subject_id or multi-arm subject workbook
+    sheets = [_build_sheet(r, r[1].display_name) for r in cs_rows]
+    safe_subject = cs_rows[0][3].code.replace(" ", "_")
+    return (
+        mark_book.build_mark_book_xlsx(sheets),
+        f"MARK_BOOK_{safe_subject}_{safe_session}.xlsx",
+        XLSX_MIME,
+    )

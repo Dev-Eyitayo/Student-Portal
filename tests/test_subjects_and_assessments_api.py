@@ -1190,6 +1190,59 @@ async def test_calculate_term_broadsheet_and_publish_term_lifecycle():
         assert broadsheet_data["students"][0]["annual_score"] is None
         assert broadsheet_data["students"][0]["promotion_decision"] is None
 
+        broadsheet_xlsx_resp = await client.get(
+            "/api/v1/computation/broadsheet/export",
+            params={"academic_term_id": term_id, "class_group_id": class_group_id},
+            headers=admin_headers,
+        )
+        assert broadsheet_xlsx_resp.status_code == 200, broadsheet_xlsx_resp.text
+        assert (
+            broadsheet_xlsx_resp.headers["content-type"]
+            == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        assert broadsheet_xlsx_resp.content[:2] == b"PK"
+
+        # Export TESCOM-style Mark Book (.xlsx) for this class subject, all arms, class arm, and level ZIP
+        export_resp = await client.get(
+            "/api/v1/assessments/mark-book/export",
+            params={"class_subject_id": class_subject["id"]},
+            headers=admin_headers,
+        )
+        assert export_resp.status_code == 200, export_resp.text
+        assert (
+            export_resp.headers["content-type"]
+            == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        assert export_resp.content[:2] == b"PK"
+
+        all_arms_resp = await client.get(
+            "/api/v1/assessments/mark-book/export",
+            params={"class_subject_id": class_subject["id"], "all_arms": "true"},
+            headers=admin_headers,
+        )
+        assert all_arms_resp.status_code == 200, all_arms_resp.text
+        assert all_arms_resp.content[:2] == b"PK"
+
+        arm_resp = await client.get(
+            "/api/v1/assessments/mark-book/export",
+            params={"class_group_id": class_group_id},
+            headers=admin_headers,
+        )
+        assert arm_resp.status_code == 200, arm_resp.text
+        assert arm_resp.content[:2] == b"PK"
+
+        level_zip_resp = await client.get(
+            "/api/v1/assessments/mark-book/export",
+            params={
+                "academic_session_id": structure["session"]["id"],
+                "academic_level_id": structure["level"]["id"],
+            },
+            headers=admin_headers,
+        )
+        assert level_zip_resp.status_code == 200, level_zip_resp.text
+        assert level_zip_resp.headers["content-type"] == "application/zip"
+        assert level_zip_resp.content[:2] == b"PK"
+
         publish_resp = await client.post(
             "/api/v1/publication/publish-term",
             json={"academic_term_id": term_id},

@@ -133,3 +133,66 @@ def test_promotion_decision_uses_configured_thresholds(percentage: Decimal) -> N
         assert decision == "PROMOTED_ON_TRIAL"
     else:
         assert decision == "REPEATING"
+
+
+def test_category_specific_grading_scale_and_thresholds() -> None:
+    scale = {
+        **GRADING_SCALE,
+        "by_category": {
+            "JUNIOR_SECONDARY": {
+                "grades": [
+                    {
+                        "grade": "A",
+                        "min_score": Decimal("70"),
+                        "max_score": Decimal("100"),
+                        "grade_point": Decimal("4"),
+                        "remark": "Excellent",
+                    },
+                    {
+                        "grade": "F",
+                        "min_score": Decimal("0"),
+                        "max_score": Decimal("69.99"),
+                        "grade_point": Decimal("0"),
+                        "remark": "Fail",
+                    },
+                ]
+            }
+        },
+    }
+    assessments = (
+        engine.AssessmentInput("EXAM", Decimal("100"), Decimal("100"), "SCORED", Decimal("72")),
+    )
+    students = {
+        "junior": (engine.SubjectInput("mth", "MTH", "Mathematics", assessments),),
+        "senior": (engine.SubjectInput("mth", "MTH", "Mathematics", assessments),),
+    }
+    computed = engine.compute_term_results(
+        students,
+        scale,
+        student_categories={"junior": "JUNIOR_SECONDARY", "senior": "SENIOR_SECONDARY"},
+    )
+    # 72 is 'A' under JUNIOR_SECONDARY (70-100) and 'F9' under fallback GRADING_SCALE (0-74.99)
+    assert computed.students["junior"].subjects["mth"].grade == "A"
+    assert computed.students["senior"].subjects["mth"].grade == "F9"
+
+    annual_cfg = {
+        **ANNUAL_CONFIG,
+        "promotion_thresholds_by_category": {
+            "PRIMARY": {
+                "promoted_min_percentage": Decimal("60"),
+                "trial_min_percentage": Decimal("45"),
+            }
+        },
+    }
+    assert (
+        engine.promotion_decision(
+            Decimal("55"), engine.resolve_annual_results_schema(annual_cfg, "PRIMARY")
+        )
+        == "PROMOTED_ON_TRIAL"
+    )
+    assert (
+        engine.promotion_decision(
+            Decimal("55"), engine.resolve_annual_results_schema(annual_cfg, "SENIOR_SECONDARY")
+        )
+        == "PROMOTED"
+    )

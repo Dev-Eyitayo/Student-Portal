@@ -73,6 +73,7 @@ class ClassSubjectResponse(BaseModel):
     school_id: UUID
     subject_offering_id: UUID
     class_group_id: UUID
+    subject_id: UUID | None = None
     subject_name: str | None = None
     subject_code: str | None = None
     category: str | None = None
@@ -177,6 +178,22 @@ class ClassSubjectTeacherSummary(BaseModel):
     last_name: str
     email: str
     start_date: date
+
+
+class TeacherSubjectQualificationsUpdateRequest(BaseModel):
+    subject_ids: list[UUID] = Field(default_factory=list)
+
+
+class TeacherSubjectQualificationsResponse(BaseModel):
+    teacher_id: UUID
+    subjects: list[SubjectResponse] = Field(default_factory=list)
+
+
+class QualifiedTeacherResponse(BaseModel):
+    teacher_id: UUID
+    first_name: str
+    last_name: str
+    email: str
 
 
 class ClassGroupSubjectItem(BaseModel):

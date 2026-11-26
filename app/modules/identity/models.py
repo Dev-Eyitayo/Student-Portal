@@ -33,6 +33,9 @@ class School(Base, TimestampMixin):
     school_type: Mapped[str] = mapped_column(
         String(16), default="SECONDARY", server_default="SECONDARY", nullable=False
     )
+    school_sector: Mapped[str] = mapped_column(
+        String(16), default="PRIVATE", server_default="PRIVATE", nullable=False
+    )
     logo_storage_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     stamp_image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     principal_signature_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
@@ -42,6 +45,10 @@ class School(Base, TimestampMixin):
         CheckConstraint(
             "school_type IN ('PRIMARY', 'SECONDARY', 'COMBINED')",
             name="chk_schools_school_type",
+        ),
+        CheckConstraint(
+            "school_sector IN ('PUBLIC', 'PRIVATE')",
+            name="chk_schools_school_sector",
         ),
     )
 

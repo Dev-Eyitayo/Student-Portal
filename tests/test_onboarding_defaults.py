@@ -69,6 +69,50 @@ def test_primary_structure_template_preview_is_deterministic():
     assert all(item["department_code"] is None for item in preview["class_groups"])
 
 
+def test_school_defaults_seed_af_grading_scale_per_school_type():
+    from app.modules.identity.schemas import SchoolType
+    from app.modules.identity.services import get_school_defaults
+
+    for school_type, expected_categories in (
+        (SchoolType.PRIMARY, {"PRIMARY"}),
+        (SchoolType.SECONDARY, {"JUNIOR_SECONDARY", "SENIOR_SECONDARY"}),
+        (SchoolType.COMBINED, {"PRIMARY", "JUNIOR_SECONDARY", "SENIOR_SECONDARY"}),
+    ):
+        defaults = get_school_defaults(school_type)
+        scale = defaults["grading_scale_schema"]
+        assert [g["grade"] for g in scale["grades"]] == ["A", "B", "C", "D", "E", "F"]
+        assert set(scale["by_category"].keys()) == expected_categories
+        for cat in expected_categories:
+            assert [g["grade"] for g in scale["by_category"][cat]["grades"]] == [
+                "A",
+                "B",
+                "C",
+                "D",
+                "E",
+                "F",
+            ]
+
+
+def test_public_school_defaults_seed_tescom_7_components():
+    from app.modules.identity.schemas import AssessmentWeightSchema, SchoolSector, SchoolType
+    from app.modules.identity.services import get_school_defaults
+
+    defaults = get_school_defaults(SchoolType.SECONDARY, SchoolSector.PUBLIC)
+    weights = defaults["assessment_weight_schema"]
+    assert list(weights.keys()) == [
+        "ATTENDANCE",
+        "NOTEBOOK",
+        "OPEN_DAY",
+        "TEXTBOOK",
+        "SB_TEST",
+        "TB_ASSESS",
+        "EXAM",
+    ]
+    validated = AssessmentWeightSchema.model_validate(weights)
+    assert sum(c.max_score for c in validated.components.values()) == 130
+    assert sum(c.weight_percentage for c in validated.components.values()) == 100
+
+
 def test_grading_scale_rejects_gaps():
     with pytest.raises(ValidationError):
         GradingScaleSchema.model_validate(
@@ -129,20 +173,66 @@ async def test_branding_assets_are_isolated_by_school(tmp_path: Path):
         school_slug="first-school",
         asset_type="logo",
         content_type="image/png",
-        content=b"first-image",
+        content=b"\x89PNG\r\n\x1a\nfirst-image",
     )
     second_path = await service.save_school_branding_asset(
         school_slug="second-school",
         asset_type="logo",
         content_type="image/png",
-        content=b"second-image",
+        content=b"\x89PNG\r\n\x1a\nsecond-image",
     )
 
     assert first_path.startswith("schools/first-school/branding/logo/")
     assert second_path.startswith("schools/second-school/branding/logo/")
-    assert (tmp_path / first_path).read_bytes() == b"first-image"
-    assert (tmp_path / second_path).read_bytes() == b"second-image"
+    assert (tmp_path / first_path).read_bytes() == b"\x89PNG\r\n\x1a\nfirst-image"
+    assert (tmp_path / second_path).read_bytes() == b"\x89PNG\r\n\x1a\nsecond-image"
     assert service.public_url(first_path) == f"https://files.example.test/{first_path}"
+
+
+@pytest.mark.asyncio
+async def test_storage_rejects_spoofed_magic_bytes(tmp_path):
+    from app.core.config import Settings
+    from app.core.exceptions import ValidationException
+    from app.core.storage import StorageService
+
+    settings = Settings(
+        ENVIRONMENT="development",
+        STORAGE_PROVIDER="local",
+        STORAGE_LOCAL_DIR=str(tmp_path),
+    )
+    service = StorageService(settings)
+
+    with pytest.raises(ValidationException, match="valid PNG, JPEG, or WebP"):
+        await service.save_school_branding_asset(
+            school_slug="test-school",
+            asset_type="logo",
+            content_type="image/png",
+            content=b"<svg onload=alert(1)></svg>",
+        )
+
+    with pytest.raises(ValidationException, match="does not match its declared image type"):
+        await service.save_school_branding_asset(
+            school_slug="test-school",
+            asset_type="logo",
+            content_type="image/png",
+            content=b"\xff\xd8\xff\xe0fake-jpeg-bytes",
+        )
+
+    jpeg_path = await service.save_school_branding_asset(
+        school_slug="test-school",
+        asset_type="logo",
+        content_type="image/jpeg",
+        content=b"\xff\xd8\xff\xe0valid-jpeg-bytes",
+    )
+    assert jpeg_path.endswith(".jpg")
+
+    webp_path = await service.save_school_branding_asset(
+        school_slug="test-school",
+        asset_type="logo",
+        content_type="image/webp",
+        content=b"RIFF\x00\x00\x00\x00WEBP",
+    )
+    assert webp_path.endswith(".webp")
 
 
 @pytest.mark.asyncio

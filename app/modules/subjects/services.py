@@ -30,6 +30,7 @@ from app.modules.subjects.models import (
     Subject,
     SubjectOffering,
     TeacherAssignment,
+    TeacherSubjectQualification,
 )
 from app.modules.subjects.schemas import (
     ClassGroupSubjectItem,
@@ -38,10 +39,12 @@ from app.modules.subjects.schemas import (
     MyTeachingAssignmentResponse,
     OfferingCreateRequest,
     OfferingUpdateRequest,
+    QualifiedTeacherResponse,
     SubjectCreateRequest,
     SubjectUpdateRequest,
     TeacherAssignmentBulkCreateRequest,
     TeacherAssignmentBulkSkip,
+    TeacherSubjectQualificationsResponse,
 )
 
 ASSIGNABLE_TEACHER_ROLES = {"TEACHER", "ACADEMIC_OFFICER", "SCHOOL_ADMIN"}
@@ -789,6 +792,7 @@ async def list_class_subjects(
             await db.execute(
                 select(
                     ClassSubject.id,
+                    Subject.id,
                     Subject.name,
                     Subject.code,
                     Subject.is_elective,
@@ -803,12 +807,13 @@ async def list_class_subjects(
         ).all()
         meta_map = {
             cs_id: (
+                subj_id,
                 s_name,
                 s_code,
                 "TRADE" if is_trade else ("ELECTIVE" if is_elective else "CORE"),
                 cg_name,
             )
-            for cs_id, s_name, s_code, is_elective, is_trade, cg_name in meta_rows
+            for cs_id, subj_id, s_name, s_code, is_elective, is_trade, cg_name in meta_rows
         }
 
         ta_rows = (
@@ -830,7 +835,13 @@ async def list_class_subjects(
         for cs in items:
             info = meta_map.get(cs.id)
             if info:
-                cs.subject_name, cs.subject_code, cs.category, cs.class_group_name = info
+                (
+                    cs.subject_id,
+                    cs.subject_name,
+                    cs.subject_code,
+                    cs.category,
+                    cs.class_group_name,
+                ) = info
             cs.teacher_names = ta_map.get(cs.id, [])
     return items, meta
 
@@ -1870,4 +1881,151 @@ async def list_class_group_subjects(
             teachers=teachers_by_cs.get(cs.id, []),
         )
         for cs, offering, subject in cs_rows
+    ]
+
+
+# --------------------------------------------------------------------------
+# Teacher Subject Qualifications ("this teacher takes this subject", level/
+# class-independent -- distinct from TeacherAssignment). Set once per teacher
+# from the Staff page; used to soft-filter (prioritize, never hide) the
+# teacher pool offered when assigning a subject teacher to a class arm.
+# --------------------------------------------------------------------------
+
+
+async def get_teacher_subject_qualifications(
+    db: AsyncSession,
+    school_id: UUID,
+    teacher_id: UUID,
+) -> TeacherSubjectQualificationsResponse:
+    teacher = await _validate_teacher(db, school_id, teacher_id)
+    subjects = (
+        (
+            await db.execute(
+                select(Subject)
+                .join(
+                    TeacherSubjectQualification,
+                    TeacherSubjectQualification.subject_id == Subject.id,
+                )
+                .where(
+                    TeacherSubjectQualification.school_id == school_id,
+                    TeacherSubjectQualification.teacher_id == teacher.id,
+                    TeacherSubjectQualification.deleted_at.is_(None),
+                    Subject.deleted_at.is_(None),
+                )
+                .order_by(Subject.name.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return TeacherSubjectQualificationsResponse(teacher_id=teacher.id, subjects=list(subjects))
+
+
+async def set_teacher_subject_qualifications(
+    db: AsyncSession,
+    school_id: UUID,
+    teacher_id: UUID,
+    subject_ids: list[UUID],
+    audit: AuditContext,
+) -> TeacherSubjectQualificationsResponse:
+    teacher = await _validate_teacher(db, school_id, teacher_id)
+
+    requested_ids = set(subject_ids)
+    if requested_ids:
+        valid_count = (
+            await db.execute(
+                select(func.count()).where(
+                    Subject.id.in_(requested_ids),
+                    Subject.school_id == school_id,
+                    Subject.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one()
+        if valid_count != len(requested_ids):
+            raise ValidationException(
+                "One or more selected subjects could not be found in your school's catalog."
+            )
+
+    existing = (
+        (
+            await db.execute(
+                select(TeacherSubjectQualification).where(
+                    TeacherSubjectQualification.school_id == school_id,
+                    TeacherSubjectQualification.teacher_id == teacher.id,
+                    TeacherSubjectQualification.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    existing_by_subject = {q.subject_id: q for q in existing}
+
+    for subject_id, qualification in existing_by_subject.items():
+        if subject_id not in requested_ids:
+            qualification.deleted_at = datetime.now(UTC)
+
+    newly_added = requested_ids - set(existing_by_subject.keys())
+    for subject_id in newly_added:
+        db.add(
+            TeacherSubjectQualification(
+                school_id=school_id,
+                teacher_id=teacher.id,
+                subject_id=subject_id,
+            )
+        )
+
+    record_audit_log(
+        db,
+        audit,
+        action="TEACHER_SUBJECT_QUALIFICATIONS_UPDATED",
+        resource_type="TeacherSubjectQualification",
+        resource_id=teacher.id,
+        diff_payload={"after": {"subject_ids": [str(sid) for sid in sorted(requested_ids)]}},
+    )
+    await _commit_or_conflict(
+        db,
+        message="These subject qualifications could not be saved. Please try again.",
+        code="TEACHER_SUBJECT_QUALIFICATION_CONFLICT",
+    )
+    return await get_teacher_subject_qualifications(db, school_id, teacher.id)
+
+
+async def get_qualified_teachers_for_subject(
+    db: AsyncSession,
+    school_id: UUID,
+    subject_id: UUID,
+    current_user: User,
+) -> list[QualifiedTeacherResponse]:
+    scope = await get_permission_scope(db, current_user, "subjects:manage")
+    if not scope.has_any_access:
+        raise InsufficientPermissionException(permission_code="subjects:manage")
+    await _get_subject(db, school_id, subject_id)
+
+    rows = (
+        (
+            await db.execute(
+                select(User)
+                .join(
+                    TeacherSubjectQualification,
+                    TeacherSubjectQualification.teacher_id == User.id,
+                )
+                .where(
+                    TeacherSubjectQualification.school_id == school_id,
+                    TeacherSubjectQualification.subject_id == subject_id,
+                    TeacherSubjectQualification.deleted_at.is_(None),
+                    User.is_active.is_(True),
+                    User.deleted_at.is_(None),
+                )
+                .order_by(User.first_name.asc(), User.last_name.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        QualifiedTeacherResponse(
+            teacher_id=u.id, first_name=u.first_name, last_name=u.last_name, email=u.email
+        )
+        for u in rows
     ]
