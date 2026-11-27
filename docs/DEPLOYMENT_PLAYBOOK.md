@@ -139,108 +139,28 @@ BRANDING_UPLOAD_MAX_BYTES=2097152
 
 ---
 
-## 4. Dockerize Backend (`Dockerfile` + `docker-compose.prod.yml`)
+## 4. Launch the Production Stack (Single Command)
 
-Create `/opt/olivet/Dockerfile`:
+`Dockerfile` (multi-stage with `uv`) and `docker-compose.prod.yml` are already in the repository. GitHub Actions (`.github/workflows/docker-publish.yml`) builds and pushes the image to `ghcr.io/dev-eyitayo/olivet-backend:latest` on every push to `main`, so your $3 VPS never compiles Python packages.
 
-```dockerfile
-FROM python:3.12-slim
+If the GHCR package is private, log in once on the VPS with a GitHub PAT (`read:packages`):
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
-
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt boto3
-
-COPY . .
-
-EXPOSE 8000
+```bash
+echo "<GITHUB_PAT>" | docker login ghcr.io -u Dev-Eyitayo --password-stdin
 ```
 
-Create `/opt/olivet/docker-compose.prod.yml` (tuned for **2 GB RAM / 1 vCPU**):
-
-```yaml
-services:
-  db:
-    image: postgres:16-alpine
-    restart: always
-    env_file: .env.prod
-    command:
-      - "postgres"
-      - "-c"
-      - "shared_buffers=256MB"
-      - "-c"
-      - "work_mem=4MB"
-      - "-c"
-      - "max_connections=50"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-olivet_app} -d ${POSTGRES_DB:-olivet_records}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    restart: always
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  api:
-    build: .
-    restart: always
-    env_file: .env.prod
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --proxy-headers --forwarded-allow-ips="*"
-    ports:
-      - "127.0.0.1:8000:8000"
-    volumes:
-      - ./config/keys:/app/config/keys:ro
-      - ./var/storage:/app/var/storage
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  worker:
-    build: .
-    restart: always
-    env_file: .env.prod
-    command: celery -A app.core.celery_app worker -Q default,bulk_imports,notifications --concurrency=2 --max-tasks-per-child=100 -l info
-    volumes:
-      - ./config/keys:/app/config/keys:ro
-      - ./var/storage:/app/var/storage
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-volumes:
-  postgres_data:
-  redis_data:
-```
-
-Start the stack and run Alembic migrations:
+Start everything with one command:
 
 ```bash
 cd /opt/olivet
-docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
-docker compose -f docker-compose.prod.yml --env-file .env.prod exec api alembic upgrade head
+docker compose -f docker-compose.prod.yml --env-file .env.prod pull && \
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+```
+
+Verify all services are healthy:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod ps
 ```
 
 ---
@@ -332,11 +252,11 @@ Add to crontab (`crontab -e`):
 ## 8. Release / Update Procedure
 
 ```bash
-# On the VPS (for backend updates)
+# On the VPS (for backend updates — pulls pre-built GHCR image & auto-runs migrations)
 cd /opt/olivet
 git pull origin main
-docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
-docker compose -f docker-compose.prod.yml --env-file .env.prod exec api alembic upgrade head
+docker compose -f docker-compose.prod.yml --env-file .env.prod pull
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 docker compose -f docker-compose.prod.yml --env-file .env.prod ps
 ```
 

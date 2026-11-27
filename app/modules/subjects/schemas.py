@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -182,10 +183,12 @@ class ClassSubjectTeacherSummary(BaseModel):
 
 class TeacherSubjectQualificationsUpdateRequest(BaseModel):
     subject_ids: list[UUID] = Field(default_factory=list)
+    level_categories: list[Literal["PRIMARY", "JUNIOR_SECONDARY", "SENIOR_SECONDARY"]] | None = None
 
 
 class TeacherSubjectQualificationsResponse(BaseModel):
     teacher_id: UUID
+    level_categories: list[str] = Field(default_factory=list)
     subjects: list[SubjectResponse] = Field(default_factory=list)
 
 
@@ -194,6 +197,7 @@ class QualifiedTeacherResponse(BaseModel):
     first_name: str
     last_name: str
     email: str
+    level_categories: list[str] = Field(default_factory=list)
 
 
 class ClassGroupSubjectItem(BaseModel):

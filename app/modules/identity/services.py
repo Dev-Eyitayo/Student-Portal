@@ -1588,6 +1588,243 @@ async def get_user_effective_permissions(db: AsyncSession, user: User) -> list[s
     return sorted(list(set(role_perms).union(set(grant_perms))))
 
 
+async def get_staff_profile_detail(
+    db: AsyncSession,
+    school_id: UUID,
+    user_id: UUID,
+) -> dict[str, Any]:
+    from app.modules.academic_structure.models import AcademicTerm
+    from app.modules.assessments.models import ScoreSheetStatus
+    from app.modules.students.models import StudentEnrollment
+    from app.modules.subjects.models import (
+        ClassSubject,
+        StudentSubjectRegistration,
+        Subject,
+        SubjectOffering,
+        TeacherAssignment,
+        TeacherSubjectQualification,
+    )
+
+    user = (
+        await db.execute(
+            select(User)
+            .options(selectinload(User.staff_profile))
+            .where(
+                User.id == user_id,
+                User.school_id == school_id,
+                User.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if not user:
+        raise ResourceNotFoundException("staff member", user_id)
+
+    profile = user.staff_profile
+
+    # 1. Qualified subjects
+    qual_rows = (
+        await db.execute(
+            select(Subject.id, Subject.code, Subject.name)
+            .join(
+                TeacherSubjectQualification,
+                TeacherSubjectQualification.subject_id == Subject.id,
+            )
+            .where(
+                TeacherSubjectQualification.school_id == school_id,
+                TeacherSubjectQualification.teacher_id == user_id,
+                TeacherSubjectQualification.deleted_at.is_(None),
+                Subject.deleted_at.is_(None),
+            )
+            .order_by(Subject.name)
+        )
+    ).all()
+    qualified_subjects = [
+        {"subject_id": r.id, "subject_code": r.code, "subject_name": r.name} for r in qual_rows
+    ]
+
+    # 2. Class teacher (form master) groups
+    cg_rows = (
+        await db.execute(
+            select(
+                ClassGroup.id,
+                ClassGroup.display_name,
+                AcademicSession.name.label("session_name"),
+                AcademicLevel.name.label("level_name"),
+                Department.name.label("dept_name"),
+            )
+            .join(AcademicSession, AcademicSession.id == ClassGroup.academic_session_id)
+            .join(AcademicLevel, AcademicLevel.id == ClassGroup.academic_level_id)
+            .outerjoin(Department, Department.id == ClassGroup.department_id)
+            .where(
+                ClassGroup.school_id == school_id,
+                ClassGroup.class_teacher_id == user_id,
+                ClassGroup.deleted_at.is_(None),
+            )
+            .order_by(
+                AcademicSession.start_date.desc(),
+                AcademicLevel.level_order,
+                ClassGroup.display_name,
+            )
+        )
+    ).all()
+    cg_ids = [r.id for r in cg_rows]
+    cg_student_counts: dict[UUID, int] = {}
+    if cg_ids:
+        cnt_rows = (
+            await db.execute(
+                select(StudentEnrollment.class_group_id, func.count(StudentEnrollment.id))
+                .where(
+                    StudentEnrollment.school_id == school_id,
+                    StudentEnrollment.class_group_id.in_(cg_ids),
+                    StudentEnrollment.deleted_at.is_(None),
+                )
+                .group_by(StudentEnrollment.class_group_id)
+            )
+        ).all()
+        cg_student_counts = {cid: int(cnt) for cid, cnt in cnt_rows}
+    class_teacher_groups = [
+        {
+            "class_group_id": r.id,
+            "display_name": r.display_name,
+            "academic_session_name": r.session_name,
+            "academic_level_name": r.level_name,
+            "department_name": r.dept_name,
+            "student_count": cg_student_counts.get(r.id, 0),
+        }
+        for r in cg_rows
+    ]
+
+    # 3. Active teaching assignments + current term score sheet status
+    current_term_id = (
+        await db.execute(
+            select(AcademicTerm.id)
+            .where(
+                AcademicTerm.school_id == school_id,
+                AcademicTerm.is_current.is_(True),
+                AcademicTerm.deleted_at.is_(None),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    ta_rows = (
+        await db.execute(
+            select(
+                ClassSubject.id.label("cs_id"),
+                ClassGroup.id.label("cg_id"),
+                ClassGroup.display_name.label("cg_name"),
+                AcademicSession.name.label("session_name"),
+                AcademicLevel.name.label("level_name"),
+                Subject.id.label("subject_id"),
+                Subject.code.label("subject_code"),
+                Subject.name.label("subject_name"),
+            )
+            .select_from(TeacherAssignment)
+            .join(ClassSubject, ClassSubject.id == TeacherAssignment.class_subject_id)
+            .join(ClassGroup, ClassGroup.id == ClassSubject.class_group_id)
+            .join(AcademicSession, AcademicSession.id == ClassGroup.academic_session_id)
+            .join(AcademicLevel, AcademicLevel.id == ClassGroup.academic_level_id)
+            .join(SubjectOffering, SubjectOffering.id == ClassSubject.subject_offering_id)
+            .join(Subject, Subject.id == SubjectOffering.subject_id)
+            .where(
+                TeacherAssignment.school_id == school_id,
+                TeacherAssignment.teacher_id == user_id,
+                TeacherAssignment.is_active.is_(True),
+                TeacherAssignment.deleted_at.is_(None),
+                ClassSubject.deleted_at.is_(None),
+                ClassGroup.deleted_at.is_(None),
+            )
+            .order_by(
+                AcademicSession.start_date.desc(),
+                AcademicLevel.level_order,
+                ClassGroup.display_name,
+                Subject.name,
+            )
+        )
+    ).all()
+
+    cs_ids = [r.cs_id for r in ta_rows]
+    cs_student_counts: dict[UUID, int] = {}
+    cs_sheet_statuses: dict[UUID, str] = {}
+    if cs_ids:
+        reg_cnts = (
+            await db.execute(
+                select(
+                    StudentSubjectRegistration.class_subject_id,
+                    func.count(StudentSubjectRegistration.id),
+                )
+                .where(
+                    StudentSubjectRegistration.school_id == school_id,
+                    StudentSubjectRegistration.class_subject_id.in_(cs_ids),
+                    StudentSubjectRegistration.is_active.is_(True),
+                )
+                .group_by(StudentSubjectRegistration.class_subject_id)
+            )
+        ).all()
+        cs_student_counts = {cs_id: int(cnt) for cs_id, cnt in reg_cnts}
+
+        if current_term_id is not None:
+            ss_rows = (
+                await db.execute(
+                    select(ScoreSheetStatus.class_subject_id, ScoreSheetStatus.status).where(
+                        ScoreSheetStatus.school_id == school_id,
+                        ScoreSheetStatus.academic_term_id == current_term_id,
+                        ScoreSheetStatus.class_subject_id.in_(cs_ids),
+                    )
+                )
+            ).all()
+            cs_sheet_statuses = {cs_id: st for cs_id, st in ss_rows}
+
+    teaching_assignments = [
+        {
+            "class_subject_id": r.cs_id,
+            "class_group_id": r.cg_id,
+            "class_group_name": r.cg_name,
+            "academic_session_name": r.session_name,
+            "academic_level_name": r.level_name,
+            "subject_id": r.subject_id,
+            "subject_code": r.subject_code,
+            "subject_name": r.subject_name,
+            "student_count": cs_student_counts.get(r.cs_id, 0),
+            "score_sheet_status": cs_sheet_statuses.get(r.cs_id, "DRAFT")
+            if current_term_id
+            else None,
+        }
+        for r in ta_rows
+    ]
+
+    # 4. Delegated permissions
+    grants = await list_user_permission_grants(db, school_id, user_id)
+
+    return {
+        "id": user.id,
+        "email": user.email,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "phone_number": user.phone_number,
+        "role": user.role,
+        "is_active": user.is_active,
+        "is_mfa_enabled": user.is_mfa_enabled,
+        "employment_status": profile.employment_status
+        if profile
+        else ("ACTIVE" if user.is_active else "INACTIVE"),
+        "staff_id_number": profile.staff_id_number if profile else None,
+        "specialization": profile.specialization if profile else None,
+        "level_categories": list(profile.level_categories or []) if profile else [],
+        "signature_image_url": (
+            storage_service.public_url(profile.signature_image_url)
+            if profile and profile.signature_image_url
+            else None
+        ),
+        "last_login_at": user.last_login_at,
+        "created_at": user.created_at,
+        "qualified_subjects": qualified_subjects,
+        "class_teacher_groups": class_teacher_groups,
+        "teaching_assignments": teaching_assignments,
+        "permission_grants": grants,
+    }
+
+
 async def list_school_users(
     db: AsyncSession,
     school_id: UUID,
@@ -1702,6 +1939,7 @@ async def list_school_users(
             else ("ACTIVE" if u.is_active else "INACTIVE"),
             "staff_id_number": sp.staff_id_number if sp else None,
             "specialization": sp.specialization if sp else None,
+            "level_categories": list(sp.level_categories or []) if sp else [],
             "last_login_at": u.last_login_at,
             "created_at": u.created_at,
         }
@@ -2210,6 +2448,7 @@ async def update_school_user(
     role: str | None = None,
     staff_id_number: str | None = None,
     specialization: str | None = None,
+    level_categories: list[str] | None = None,
     signature_upload: tuple[str, bytes] | None = None,
     actor_id: UUID,
     actor_ip: str,
@@ -2257,6 +2496,8 @@ async def update_school_user(
             sp.staff_id_number = staff_id_number
         if specialization is not None:
             sp.specialization = specialization.strip() or None
+        if level_categories is not None:
+            sp.level_categories = list(dict.fromkeys(level_categories))
 
     await db.flush()
     record_audit_log(
@@ -2292,6 +2533,7 @@ async def update_school_user(
         else ("ACTIVE" if target.is_active else "INACTIVE"),
         "staff_id_number": sp.staff_id_number if sp else None,
         "specialization": sp.specialization if sp else None,
+        "level_categories": list(sp.level_categories or []) if sp else [],
         "last_login_at": target.last_login_at,
         "created_at": target.created_at,
     }

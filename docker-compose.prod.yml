@@ -1,0 +1,85 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: olivet_db
+    restart: always
+    env_file: .env.prod
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "max_connections=50"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-olivet_app} -d ${POSTGRES_DB:-olivet_records}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: olivet_redis
+    restart: always
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: ${BACKEND_IMAGE:-ghcr.io/dev-eyitayo/olivet-backend:latest}
+    container_name: olivet_migrate
+    env_file: .env.prod
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: ${BACKEND_IMAGE:-ghcr.io/dev-eyitayo/olivet-backend:latest}
+    container_name: olivet_api
+    restart: always
+    env_file: .env.prod
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--proxy-headers", "--forwarded-allow-ips=*"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./config/keys:/app/config/keys:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    image: ${BACKEND_IMAGE:-ghcr.io/dev-eyitayo/olivet-backend:latest}
+    container_name: olivet_worker
+    restart: always
+    env_file: .env.prod
+    command: ["celery", "-A", "app.core.celery_app", "worker", "-Q", "default,bulk_imports,notifications", "--concurrency=2", "--max-tasks-per-child=100", "-l", "info"]
+    volumes:
+      - ./config/keys:/app/config/keys:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
