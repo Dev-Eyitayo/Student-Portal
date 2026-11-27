@@ -488,6 +488,7 @@ class StaffListItemResponse(BaseModel):
     employment_status: str
     staff_id_number: str | None = None
     specialization: str | None = None
+    level_categories: list[str] = Field(default_factory=list)
     last_login_at: datetime | None = None
     created_at: datetime
 
@@ -527,6 +528,56 @@ class UserPermissionGrantDetailResponse(BaseModel):
     created_at: datetime
 
 
+class StaffQualifiedSubjectItem(BaseModel):
+    subject_id: UUID
+    subject_code: str
+    subject_name: str
+
+
+class StaffClassTeacherGroupItem(BaseModel):
+    class_group_id: UUID
+    display_name: str
+    academic_session_name: str
+    academic_level_name: str
+    department_name: str | None = None
+    student_count: int = 0
+
+
+class StaffTeachingAssignmentItem(BaseModel):
+    class_subject_id: UUID
+    class_group_id: UUID
+    class_group_name: str
+    academic_session_name: str
+    academic_level_name: str
+    subject_id: UUID
+    subject_code: str
+    subject_name: str
+    student_count: int = 0
+    score_sheet_status: str | None = None
+
+
+class StaffProfileDetailResponse(BaseModel):
+    id: UUID
+    email: str
+    first_name: str
+    last_name: str
+    phone_number: str | None = None
+    role: str
+    is_active: bool
+    is_mfa_enabled: bool
+    employment_status: str
+    staff_id_number: str | None = None
+    specialization: str | None = None
+    level_categories: list[str] = Field(default_factory=list)
+    signature_image_url: str | None = None
+    last_login_at: datetime | None = None
+    created_at: datetime
+    qualified_subjects: list[StaffQualifiedSubjectItem] = Field(default_factory=list)
+    class_teacher_groups: list[StaffClassTeacherGroupItem] = Field(default_factory=list)
+    teaching_assignments: list[StaffTeachingAssignmentItem] = Field(default_factory=list)
+    permission_grants: list[UserPermissionGrantDetailResponse] = Field(default_factory=list)
+
+
 class MeUpdateRequest(BaseModel):
     first_name: str | None = Field(default=None, min_length=1, max_length=64)
     last_name: str | None = Field(default=None, min_length=1, max_length=64)
@@ -560,6 +611,7 @@ class StaffUpdateRequest(BaseModel):
     role: str | None = Field(default=None, min_length=1, max_length=32)
     staff_id_number: str | None = Field(default=None, min_length=1, max_length=64)
     specialization: str | None = Field(default=None, max_length=128)
+    level_categories: list[Literal["PRIMARY", "JUNIOR_SECONDARY", "SENIOR_SECONDARY"]] | None = None
 
     @field_validator("first_name", "last_name", "staff_id_number")
     @classmethod

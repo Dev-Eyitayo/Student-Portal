@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from celery.result import AsyncResult
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.celery_app import celery_app
@@ -10,7 +10,7 @@ from app.core.dependencies import (
     get_tenant_db,
     require_school_id,
 )
-from app.core.permissions import require_permission
+from app.core.permissions import require_permission, user_has_permission
 from app.modules.audit.services import AuditContext
 from app.modules.common.schemas import SuccessResponse
 from app.modules.identity.models import User
@@ -681,6 +681,32 @@ async def get_my_teacher_timetable(
     return SuccessResponse[TimetableGridResponse](
         data=await services.get_teacher_timetable(
             db, require_school_id(current_user), timetable_id, current_user.id
+        )
+    )
+
+
+@router.get(
+    "/schedules/{timetable_id}/teachers/{teacher_id}",
+    response_model=SuccessResponse[TimetableGridResponse],
+)
+async def get_teacher_timetable_by_id(
+    timetable_id: UUID,
+    teacher_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    if current_user.id != teacher_id:
+        can_view = await user_has_permission(
+            db, current_user, "timetable:manage"
+        ) or await user_has_permission(db, current_user, "users:manage")
+        if not can_view:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to view this teacher's timetable.",
+            )
+    return SuccessResponse[TimetableGridResponse](
+        data=await services.get_teacher_timetable(
+            db, require_school_id(current_user), timetable_id, teacher_id
         )
     )
 

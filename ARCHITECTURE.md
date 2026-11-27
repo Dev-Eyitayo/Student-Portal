@@ -470,6 +470,7 @@ CREATE TABLE staff_profiles (
     staff_id_number VARCHAR(64) NOT NULL,
     employment_status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE', -- ACTIVE, ON_LEAVE, TERMINATED, TRANSFERRED
     specialization VARCHAR(128),
+    level_categories JSONB NOT NULL DEFAULT '[]'::jsonb, -- Optional scope hint: PRIMARY, JUNIOR_SECONDARY, SENIOR_SECONDARY
     signature_image_url VARCHAR(512), -- Form Master / Teacher digital signature for reports
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),

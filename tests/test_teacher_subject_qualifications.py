@@ -179,3 +179,105 @@ async def test_teacher_subject_qualifications_tenant_isolation():
             f"/api/v1/subjects/{subject_a}/qualified-teachers", headers=headers_b
         )
         assert cross_pool.status_code in (403, 404), cross_pool.text
+
+
+@pytest.mark.asyncio
+async def test_staff_profile_detail_access_and_tenant_isolation():
+    suffix_a = uuid.uuid4().hex[:6]
+    suffix_b = uuid.uuid4().hex[:6]
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        school_a, headers_a = await _create_school_and_admin(client, suffix_a)
+        _, headers_b = await _create_school_and_admin(client, suffix_b)
+        teacher_a = await _create_teacher(school_a, suffix_a, label="prof_a")
+        teacher_b = await _create_teacher(school_a, suffix_a, label="prof_b")
+        subject_a = await _create_subject(client, headers_a, suffix_a, label="PRF")
+
+        await client.put(
+            f"/api/v1/identity/users/{teacher_a}/subject-qualifications",
+            json={"subject_ids": [subject_a]},
+            headers=headers_a,
+        )
+
+        # Admin can view full staff profile detail.
+        admin_resp = await client.get(f"/api/v1/identity/users/{teacher_a}", headers=headers_a)
+        assert admin_resp.status_code == 200, admin_resp.text
+        data = admin_resp.json()["data"]
+        assert data["id"] == teacher_a
+        assert [s["subject_id"] for s in data["qualified_subjects"]] == [subject_a]
+
+        # Teacher can view their own staff profile.
+        login_a = await client.post(
+            "/api/v1/identity/login",
+            json={
+                "email": f"qual.teacher.prof_a.{suffix_a}@olivet-test.edu.ng",
+                "password": "TeacherSecurePassword123!",
+            },
+        )
+        assert login_a.status_code == 200, login_a.text
+        headers_teacher_a = {"Authorization": f"Bearer {login_a.json()['data']['access_token']}"}
+        self_resp = await client.get(
+            f"/api/v1/identity/users/{teacher_a}", headers=headers_teacher_a
+        )
+        assert self_resp.status_code == 200, self_resp.text
+
+        # Another teacher without users:manage cannot view teacher_a's profile.
+        login_b = await client.post(
+            "/api/v1/identity/login",
+            json={
+                "email": f"qual.teacher.prof_b.{suffix_a}@olivet-test.edu.ng",
+                "password": "TeacherSecurePassword123!",
+            },
+        )
+        assert login_b.status_code == 200, login_b.text
+        headers_teacher_b = {"Authorization": f"Bearer {login_b.json()['data']['access_token']}"}
+        assert teacher_b != teacher_a
+        peer_resp = await client.get(
+            f"/api/v1/identity/users/{teacher_a}", headers=headers_teacher_b
+        )
+        assert peer_resp.status_code == 403, peer_resp.text
+
+        # Cross-tenant admin cannot view School A's staff profile.
+        cross_resp = await client.get(f"/api/v1/identity/users/{teacher_a}", headers=headers_b)
+        assert cross_resp.status_code in (403, 404), cross_resp.text
+
+
+@pytest.mark.asyncio
+async def test_teacher_level_category_scoping():
+    suffix = uuid.uuid4().hex[:6]
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        school_id, headers = await _create_school_and_admin(client, suffix)
+        teacher_id = await _create_teacher(school_id, suffix, label="lvl")
+        subject_id = await _create_subject(client, headers, suffix, label="LVL")
+
+        put_resp = await client.put(
+            f"/api/v1/identity/users/{teacher_id}/subject-qualifications",
+            json={
+                "subject_ids": [subject_id],
+                "level_categories": ["JUNIOR_SECONDARY", "SENIOR_SECONDARY"],
+            },
+            headers=headers,
+        )
+        assert put_resp.status_code == 200, put_resp.text
+        assert put_resp.json()["data"]["level_categories"] == [
+            "JUNIOR_SECONDARY",
+            "SENIOR_SECONDARY",
+        ]
+
+        # Returned on qualified-teachers pool endpoint for the subject.
+        pool_resp = await client.get(
+            f"/api/v1/subjects/{subject_id}/qualified-teachers", headers=headers
+        )
+        assert pool_resp.status_code == 200, pool_resp.text
+        pool_items = pool_resp.json()["data"]
+        assert len(pool_items) == 1
+        assert pool_items[0]["level_categories"] == ["JUNIOR_SECONDARY", "SENIOR_SECONDARY"]
+
+        # Returned on staff profile detail endpoint.
+        prof_resp = await client.get(f"/api/v1/identity/users/{teacher_id}", headers=headers)
+        assert prof_resp.status_code == 200, prof_resp.text
+        assert prof_resp.json()["data"]["level_categories"] == [
+            "JUNIOR_SECONDARY",
+            "SENIOR_SECONDARY",
+        ]

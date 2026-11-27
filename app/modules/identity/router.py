@@ -32,7 +32,7 @@ from app.core.dependencies import (
     oauth2_scheme,
     require_school_id,
 )
-from app.core.permissions import require_permission
+from app.core.permissions import require_permission, user_has_permission
 from app.core.redis import get_redis
 from app.core.security import decode_access_token, get_client_ip, revoke_access_token
 from app.modules.audit.services import AuditContext
@@ -73,6 +73,7 @@ from app.modules.identity.schemas import (
     StaffInviteRequest,
     StaffInviteResponse,
     StaffListItemResponse,
+    StaffProfileDetailResponse,
     StaffUpdateRequest,
     StaffVerifyInviteResponse,
     TokenResponse,
@@ -882,6 +883,27 @@ async def list_school_users(
     )
 
 
+@router.get(
+    "/users/{user_id}",
+    response_model=SuccessResponse[StaffProfileDetailResponse],
+)
+async def get_school_user_profile(
+    user_id: UUID,
+    current_user: User = Depends(get_current_authenticated_user),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    if current_user.id != user_id:
+        if not await user_has_permission(db, current_user, "users:manage"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to view this staff member's profile.",
+            )
+    detail = await services.get_staff_profile_detail(db, require_school_id(current_user), user_id)
+    return SuccessResponse[StaffProfileDetailResponse](
+        data=StaffProfileDetailResponse.model_validate(detail)
+    )
+
+
 @router.patch(
     "/users/{user_id}",
     response_model=SuccessResponse[StaffListItemResponse],
@@ -904,6 +926,7 @@ async def update_school_user(
         role=req.role,
         staff_id_number=req.staff_id_number,
         specialization=req.specialization,
+        level_categories=req.level_categories,
         signature_upload=uploads.get("signature"),
         actor_id=current_user.id,
         actor_ip=_client_ip(request),
@@ -980,6 +1003,7 @@ async def set_user_subject_qualifications(
         user_id,
         req.subject_ids,
         build_audit_context(request, current_user),
+        level_categories=req.level_categories,
     )
     return SuccessResponse[TeacherSubjectQualificationsResponse](data=result)
 

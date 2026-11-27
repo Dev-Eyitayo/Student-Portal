@@ -139,6 +139,9 @@ class StaffProfile(Base, TimestampMixin):
     staff_id_number: Mapped[str] = mapped_column(String(64), nullable=False)
     employment_status: Mapped[str] = mapped_column(String(32), default="ACTIVE", nullable=False)
     specialization: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    level_categories: Mapped[list[str]] = mapped_column(
+        JSONB, server_default=text("'[]'::jsonb"), default=list, nullable=False
+    )
     signature_image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     __table_args__ = (

@@ -22,7 +22,7 @@ from app.modules.assessments.services import seed_assessment_definitions_for_cla
 from app.modules.audit.services import AuditContext, record_audit_log
 from app.modules.common.pagination import paginate
 from app.modules.common.schemas import PageMeta
-from app.modules.identity.models import User
+from app.modules.identity.models import StaffProfile, User
 from app.modules.students.models import StudentEnrollment
 from app.modules.subjects.models import (
     ClassSubject,
@@ -1898,6 +1898,15 @@ async def get_teacher_subject_qualifications(
     teacher_id: UUID,
 ) -> TeacherSubjectQualificationsResponse:
     teacher = await _validate_teacher(db, school_id, teacher_id)
+    level_categories_row = (
+        await db.execute(
+            select(StaffProfile.level_categories).where(
+                StaffProfile.school_id == school_id,
+                StaffProfile.user_id == teacher.id,
+            )
+        )
+    ).scalar_one_or_none()
+    level_categories = list(level_categories_row or [])
     subjects = (
         (
             await db.execute(
@@ -1918,7 +1927,11 @@ async def get_teacher_subject_qualifications(
         .scalars()
         .all()
     )
-    return TeacherSubjectQualificationsResponse(teacher_id=teacher.id, subjects=list(subjects))
+    return TeacherSubjectQualificationsResponse(
+        teacher_id=teacher.id,
+        level_categories=level_categories,
+        subjects=list(subjects),
+    )
 
 
 async def set_teacher_subject_qualifications(
@@ -1927,6 +1940,8 @@ async def set_teacher_subject_qualifications(
     teacher_id: UUID,
     subject_ids: list[UUID],
     audit: AuditContext,
+    *,
+    level_categories: list[str] | None = None,
 ) -> TeacherSubjectQualificationsResponse:
     teacher = await _validate_teacher(db, school_id, teacher_id)
 
@@ -1975,13 +1990,40 @@ async def set_teacher_subject_qualifications(
             )
         )
 
+    normalized_categories: list[str] | None = None
+    if level_categories is not None:
+        normalized_categories = list(dict.fromkeys(level_categories))
+        sp = (
+            await db.execute(
+                select(StaffProfile).where(
+                    StaffProfile.school_id == school_id,
+                    StaffProfile.user_id == teacher.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if sp is not None:
+            sp.level_categories = normalized_categories
+        else:
+            db.add(
+                StaffProfile(
+                    school_id=school_id,
+                    user_id=teacher.id,
+                    staff_id_number=f"STAFF-{str(teacher.id)[:8].upper()}",
+                    level_categories=normalized_categories,
+                )
+            )
+
+    diff_after: dict[str, object] = {"subject_ids": [str(sid) for sid in sorted(requested_ids)]}
+    if normalized_categories is not None:
+        diff_after["level_categories"] = normalized_categories
+
     record_audit_log(
         db,
         audit,
         action="TEACHER_SUBJECT_QUALIFICATIONS_UPDATED",
         resource_type="TeacherSubjectQualification",
         resource_id=teacher.id,
-        diff_payload={"after": {"subject_ids": [str(sid) for sid in sorted(requested_ids)]}},
+        diff_payload={"after": diff_after},
     )
     await _commit_or_conflict(
         db,
@@ -2003,29 +2045,30 @@ async def get_qualified_teachers_for_subject(
     await _get_subject(db, school_id, subject_id)
 
     rows = (
-        (
-            await db.execute(
-                select(User)
-                .join(
-                    TeacherSubjectQualification,
-                    TeacherSubjectQualification.teacher_id == User.id,
-                )
-                .where(
-                    TeacherSubjectQualification.school_id == school_id,
-                    TeacherSubjectQualification.subject_id == subject_id,
-                    TeacherSubjectQualification.deleted_at.is_(None),
-                    User.is_active.is_(True),
-                    User.deleted_at.is_(None),
-                )
-                .order_by(User.first_name.asc(), User.last_name.asc())
+        await db.execute(
+            select(User, StaffProfile.level_categories)
+            .join(
+                TeacherSubjectQualification,
+                TeacherSubjectQualification.teacher_id == User.id,
             )
+            .outerjoin(StaffProfile, StaffProfile.user_id == User.id)
+            .where(
+                TeacherSubjectQualification.school_id == school_id,
+                TeacherSubjectQualification.subject_id == subject_id,
+                TeacherSubjectQualification.deleted_at.is_(None),
+                User.is_active.is_(True),
+                User.deleted_at.is_(None),
+            )
+            .order_by(User.first_name.asc(), User.last_name.asc())
         )
-        .scalars()
-        .all()
-    )
+    ).all()
     return [
         QualifiedTeacherResponse(
-            teacher_id=u.id, first_name=u.first_name, last_name=u.last_name, email=u.email
+            teacher_id=u.id,
+            first_name=u.first_name,
+            last_name=u.last_name,
+            email=u.email,
+            level_categories=list(level_cats or []),
         )
-        for u in rows
+        for u, level_cats in rows
     ]
